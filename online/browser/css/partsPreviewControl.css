@@ -1,0 +1,196 @@
+#slide-sorter {
+	white-space: nowrap;
+	overflow-x: hidden;
+	overflow-y: visible;
+	background: var(--color-background-lighter);
+	max-height: 95%;
+	scrollbar-color: var(--scrollbar-color);
+	scrollbar-width: var(--scrollbar-width);
+	counter-reset: slide-number;
+}
+
+#sidebar-panel {
+	height: 100%
+}
+
+#first-drop-site {
+	padding: 0px;
+}
+
+.preview-frame {
+	white-space: nowrap;
+	display: flex;
+	align-items: flex-start;
+	justify-content: center;
+	padding: 1em 0;
+}
+
+.preview-slide-number {
+	font-family: var(--cool-font);
+	font-size: 12px;
+	color: var(--color-text-light);
+	min-width: 24px;
+	text-align: right;
+	padding-right: 4px;
+	flex-shrink: 0;
+	user-select: none;
+	counter-increment: slide-number;
+}
+
+.preview-slide-number::before {
+	content: counter(slide-number);
+}
+
+.preview-helper {
+	display: inline-block;
+	height: 100%;
+	vertical-align: middle;
+}
+
+.preview-img {
+	/* In draw docs, the width of previews are small, but we want a min of 160px to align it with document's left edge */
+	min-width: 160px;
+	vertical-align: middle;
+	max-width: 164px;
+	cursor: pointer;
+	border: 3px solid transparent !important;
+	outline: 3px solid var(--color-border);
+	box-sizing: border-box;
+	margin-left: 10px;
+	margin-right: 10px;
+}
+
+/* The current part the user is on. */
+.preview-img-currentpart {
+	border-color: transparent !important;
+	outline-color: rgba(var(--doc-type), 1);
+}
+
+/* One of (potentially many) selected parts, but not the current. */
+.preview-img-selectedpart {
+	border-color: transparent !important;
+	outline-color: rgba(var(--doc-type), 0.65);
+}
+
+/* Highlight where a slide can be dropped when reordering by drag-and-drop. */
+.preview-img-dropsite {
+	border-bottom: 20px solid var(--color-primary);
+}
+
+/* Fluid drag-and-drop reordering: while a slide drag is in progress the
+   frames animate size and margin changes, so the remaining slides close
+   the space the dragged slide left and a new insertion gap opens under
+   the pointer. */
+#slide-sorter.dragging-slide .preview-frame {
+	transition: margin 0.15s ease-out, height 0.15s ease-out,
+		width 0.15s ease-out, padding 0.15s ease-out, opacity 0.15s ease-out;
+}
+
+/* A finished drop rearranges the frames in a single step. */
+#slide-sorter.dragging-slide.drag-no-transition .preview-frame {
+	transition: none;
+}
+
+/* The drag ghost: the slide picture with the standard preview border,
+   rendered out of view while the browser takes its snapshot. */
+.slide-drag-ghost {
+	position: absolute;
+	top: -1000px;
+	left: 0;
+	border: 3px solid var(--color-border);
+	background: var(--color-background-lighter);
+}
+
+.slide-drag-ghost img {
+	display: block;
+}
+
+@media (prefers-reduced-motion: reduce) {
+	#slide-sorter.dragging-slide .preview-frame {
+		transition: none;
+	}
+}
+
+/* Drop indicator on a section header: drop here to make the dragged slide
+   the first slide of this section (visually fills the header). */
+.slide-section-header.slide-section-dropsite {
+	background-color: var(--color-primary);
+	color: var(--color-primary-text);
+}
+
+.slide-section-header.slide-section-dropsite .slide-section-name {
+	color: var(--color-primary-text);
+}
+
+.hidden-slide {
+	opacity: 0.5;
+}
+
+/* Slide section headers - styled to match sidebar expander labels */
+.slide-section-header {
+	display: flex;
+	align-items: center;
+	margin-inline: 16px;
+	line-height: var(--sidebar-header-height, 34px);
+	cursor: pointer;
+	user-select: none;
+	border-bottom: 1px solid var(--color-border, #ccc);
+}
+
+.slide-section-header:hover {
+	background-color: var(--color-background-darker);
+	border-radius: var(--border-radius-s);
+}
+
+.slide-section-toggle {
+	background: transparent;
+	border: 0;
+	padding: 0;
+	margin-inline-end: 7px;
+	cursor: pointer;
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+	width: 16px;
+	height: 16px;
+	flex: 0 0 auto;
+	color: inherit;
+}
+
+.slide-section-toggle::before {
+	content: '';
+	display: inline-block;
+	width: 9px;
+	height: 9px;
+	background: transparent url('images/lc_menu_chevron.svg') no-repeat center;
+	filter: brightness(0.5);
+	transform: rotate(90deg); /* expanded: chevron points down */
+	transition: transform 0.1s ease-in;
+}
+
+.slide-section-header.collapsed .slide-section-toggle::before {
+	transform: rotate(0deg); /* collapsed: chevron points right */
+}
+
+[data-theme='dark'] .slide-section-toggle::before {
+	filter: brightness(1);
+}
+
+.slide-section-name {
+	color: var(--color-main-text);
+	font-family: var(--cool-font);
+	font-size: var(--header-font-size, 12px);
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+	flex: 1;
+}
+
+.preview-frame.section-collapsed {
+	display: none;
+}
+
+.slide-section-name.selected {
+	color: rgb(var(--doc-type));
+	font-weight: 600;
+}

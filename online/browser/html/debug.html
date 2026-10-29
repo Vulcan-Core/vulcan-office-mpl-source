@@ -1,0 +1,198 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta http-equiv="X-UA-Compatible" content="IE=edge">
+    <meta name="viewport" content="width=device-width, initial-scale=1, minimum-scale=1, interactive-widget=resizes-content">
+    <title>Online</title>
+    <style>
+        html, body, iframe
+        {
+            margin: 0px;
+            padding: 0px;
+            border: none;
+        }
+    </style>
+</head>
+<body>
+    <form id="form" action enctype="multipart/form-data" target="coolframe" method="post">
+         <input name="access_token" value="test" type="hidden"/>
+         <input id="ui_defaults" name="ui_defaults" type="hidden"/>
+         <input id="wopi_setting_base_url" name="wopi_setting_base_url" type="hidden"/>
+    </form>
+    <iframe id="coolframe" name= "coolframe" style="width:100%;height:100%;position:absolute;" title="Collabora Online" allow="fullscreen">
+    </iframe>
+    <script>
+        function constructWopiUrl() {
+            let localServer = window.location.protocol + "//" + window.location.host;
+            let localUrl = localServer + window.location.pathname + "?";
+            let params = new URLSearchParams(window.location.search);
+            let req = params.get('req');
+            params.delete('req');
+            if (req)
+              req = req.replace('debug.html', 'cool.html')
+            else
+              localUrl = localUrl.replace('debug.html', 'cool.html');
+            var wopiSrc = params.get('WOPISrc');
+            if (wopiSrc)
+            {
+                params.delete('WOPISrc');
+                wopiSrc = encodeURIComponent(wopiSrc);
+            }
+            else
+            {
+                let filePath = params.get('file_path').substr(1);
+                params.delete('file_path');
+                const wopiPort = params.get('wopiPort');
+                wopiSrc = localServer;
+                params.delete('wopiPort');
+                if (wopiPort)
+                  wopiSrc += ':' + wopiPort;
+                wopiSrc += "/wopi/files/" + encodeURIComponent(filePath);
+            }
+            var filename = "Document"; // default
+            if (wopiSrc) {
+                var decodedWopiSrc = decodeURIComponent(wopiSrc);
+                var lastSlash = decodedWopiSrc.lastIndexOf('/');
+                if (lastSlash !== -1) {
+                    filename = decodedWopiSrc.substring(lastSlash + 1);
+                }
+            }
+            // Initial title carries the brand without a module suffix; the
+            // iframe will postMessage 'Doc_Title' once it knows the doc type
+            // and we refine to '<filename> - Collabora <Module>' then.
+            var initialTitle = filename + " - Collabora Online";
+            window.document.title = initialTitle;
+            document.getElementById("coolframe").title = initialTitle;
+            if (req)
+              localUrl += 'req=' + req + '&';
+
+            localUrl += "WOPISrc=" + wopiSrc;
+            let remainingParams = params.toString()
+            if (remainingParams)
+              localUrl = localUrl + '&' + params.toString();
+            // The debug user id identifies the user to the (test) WOPI host.
+            // The access token is an authorization credential, not an identity
+            // (a real host may mint several tokens for one user), so debugging
+            // multi-user scenarios needs a separate, explicit user id. Drive it
+            // purely from the URL: open with &userid=2 in a second tab to act
+            // as a different user; same userid across tabs/reloads = same user.
+            // It is a plain query param, not part of the WOPISrc, so the doc key
+            // and collaboration are unaffected. When present it already rode
+            // along in params above. When omitted the (test) WOPI host falls back
+            // to its default user "test", which stays the document owner
+            // (UserId == OwnerId), so add nothing here.
+            return localUrl
+          }
+        var form = document.getElementById("form");
+        var settingsBaseUrl = new URLSearchParams(window.location.search).get('wopi_setting_base_url');
+        if (!settingsBaseUrl)
+          settingsBaseUrl = window.location.protocol + "//" + window.location.host + "/wopi/settings";
+        document.getElementById("wopi_setting_base_url").value = settingsBaseUrl;
+        form.action = constructWopiUrl();
+        // The access token is an auth credential, not an identity, and the test
+        // WOPI server does not validate it. Vary it per user so the proactive
+        // vetting key (docKey_token) differs between users; otherwise two tabs
+        // opened at the same time share one key and the second tab can pick up
+        // the first user's vetting result. User identity for preset routing
+        // still comes from the separate userid param, not the token. With no
+        // userid the default user keeps the plain "test" token, so cypress and
+        // the committed seed are unaffected.
+        var debugUserId = new URLSearchParams(window.location.search).get('userid');
+        if (debugUserId)
+          document.querySelector('input[name=access_token]').value = 'test-' + debugUserId;
+        // Debug-only test aid: pass ?UITheme=dark|light to mimic an integrator
+        // whose UI theme default differs from the server-stored user setting.
+        // SavedUIState=false is the part that lets the integrator default win
+        // over the saved browsersetting on the client (prefs.get); it lets us
+        // exercise the client/core theme reconciliation easily.
+        var uiTheme = new URLSearchParams(window.location.search).get('UITheme');
+        if (uiTheme === 'dark' || uiTheme === 'light')
+          document.getElementById('ui_defaults').value =
+            'UITheme=' + uiTheme + ';SavedUIState=false';
+        form.submit();
+
+        // TODO: share code between debug.html and framed.doc.html
+        window.addEventListener('message', receivePostMessage);
+
+        function post(msg) {
+          window.frames[0].postMessage(JSON.stringify(msg), '*');
+        }
+
+        function getMentionUserData() {
+          const usernames = ['Alexandra', 'Alison', 'Amanda', 'Amelia', 'Amy', 'Andrea', 'Angela', 'Anna',
+                             'Audrey', 'Ava', 'Bella', 'Bernadette', 'Carol', 'Caroline', 'Carolyn' , 'John Doe', 'John Smith'];
+          const userProfileLink = 'https://github.com/CollaboraOnline/online';
+          let data = [];
+          usernames.forEach(username => data.push({
+            username: username,
+            profile: userProfileLink
+          }));
+
+          return data;
+        }
+
+        function receivePostMessage(event) {
+          if (event.origin !== window.origin)
+            return;
+
+          // check if event is a error message
+          if (typeof event.data === 'object' &&
+              event.data !== null &&
+              typeof event.data.name === 'string' &&
+              event.data.name.endsWith("Error"))
+            throw event.data;
+
+          let msg;
+          try {
+            msg = JSON.parse(event.data);
+            if (!msg)
+              return;
+          } catch(e) {
+            return;
+          }
+
+          console.log('==== debug.html receiveMessage: ' + event.data);
+          switch (msg.MessageId) {
+            case 'App_LoadingStatus':
+              if (!msg.Values)
+                return;
+              if (msg.Values.Status == 'Document_Loaded')
+                post({'MessageId': 'Host_PostmessageReady'});
+              break;
+            case 'Doc_Title':
+              if (msg.Values && msg.Values.Title) {
+                window.document.title = msg.Values.Title;
+                document.getElementById("coolframe").title = msg.Values.Title;
+              }
+              break;
+            case 'UI_Mention':
+              if (!msg.Values)
+                return;
+              const type = msg.Values.type;
+              const text = msg.Values.text;
+
+              if (type === 'autocomplete')
+              {
+                const userData = getMentionUserData();
+
+                let filteredUser = [];
+                userData.forEach(element => {
+                  if (element.username.toLowerCase().includes(text.toLowerCase()))
+                    filteredUser.push(element);
+                });
+                setTimeout(post, 0,
+                  {
+                    'MessageId': 'Action_Mention',
+                    'SendTime': Date.now(),
+                    'Values': {
+                      'list': filteredUser,
+                    }
+                  });
+              }
+              break;
+          }
+        }
+    </script>
+</body>
+</html>
