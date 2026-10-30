@@ -26,6 +26,7 @@
 #include <oox/export/shapes.hxx>
 #include <oox/token/relationship.hxx>
 #include <oox/export/utils.hxx>
+#include <drawingml/chart/chartworkbook.hxx>
 #include <drawingml/chart/typegroupconverter.hxx>
 #include <oox/drawingml/chart/datasourcemodel.hxx>
 #include <drawingml/chart/seriesmodel.hxx>
@@ -91,6 +92,7 @@
 #include <com/sun/star/drawing/FillStyle.hpp>
 #include <com/sun/star/drawing/LineStyle.hpp>
 #include <com/sun/star/awt/XBitmap.hpp>
+#include <com/sun/star/io/XOutputStream.hpp>
 #include <com/sun/star/io/XSeekable.hpp>
 #include <com/sun/star/io/XStreamListener.hpp>
 #include <com/sun/star/lang/XMultiServiceFactory.hpp>
@@ -1572,6 +1574,171 @@ void ChartExport::InitRangeSegmentationProperties( const Reference< chart2::XCha
     }
 }
 
+namespace {
+
+/** A part name the kept workbook may be written back under: a workbook in ppt/embeddings/
+    that this export does not write itself. ShapeExport::WriteOLE2Shape writes each OLE object
+    as ppt/embeddings/oleObject<N>.<ext>, from 1 up, and a crafted deck's chart could name any
+    part of the package (a slide, the presentation): writing the workbook there would overwrite
+    that part, or be overwritten by it. The extensions are the ones getUnchangedChartWorkbook
+    types a workbook part by (.xlsm macro-enabled, .bin an OLE package). */
+bool lcl_isWorkbookPartName(const OUString& rPath)
+{
+    static constexpr OUString aDir = u"ppt/embeddings/"_ustr;
+    if (!rPath.startsWith(aDir))
+        return false;
+    for (const OUString& rExt : { u".xlsx"_ustr, u".xlsm"_ustr, u".bin"_ustr })
+    {
+        if (!rPath.endsWithIgnoreAsciiCase(rExt)
+            || rPath.getLength() <= aDir.getLength() + rExt.getLength())
+            continue;
+        const OUString aName
+            = rPath.copy(aDir.getLength(), rPath.getLength() - aDir.getLength() - rExt.getLength());
+        return aName.indexOf('/') < 0 && aName.indexOf('\\') < 0 && aName != "." && aName != ".."
+               && !aName.startsWithIgnoreAsciiCase("oleObject");
+    }
+    return false;
+}
+
+/** PPTX: writes the workbook the chart was imported with back to the part it came from
+    (chartworkbook.hxx), when the chart still shows the data it was imported with and no earlier
+    chart of this export links that part. True when it was written: the chart then links it. */
+bool lcl_writeImportedWorkbook(XmlFilterBase& rFB, const OUString& rPath,
+                               const Reference<chart2::XChartDocument>& xChartDoc)
+{
+    Sequence<sal_Int8> aBytes;
+    OUString aMediaType;
+    if (!lcl_isWorkbookPartName(rPath)
+        || !::oox::drawingml::chart::getUnchangedChartWorkbook(rFB, rPath, xChartDoc, aBytes,
+                                                               aMediaType)
+        || !rFB.linkChartEmbeddingOnce(rPath))
+        return false;
+    try
+    {
+        Reference<css::io::XOutputStream> xOutStream = rFB.openFragmentStream(rPath, aMediaType);
+        if (!xOutStream.is())
+            return false;
+        xOutStream->writeBytes(aBytes);
+        xOutStream->closeOutput();
+        return true;
+    }
+    catch (const uno::Exception&)
+    {
+        TOOLS_WARN_EXCEPTION("oox", "ChartExport: cannot write the chart's workbook " << rPath);
+        return false;
+    }
+}
+
+/** The c:f reference this data sequence was imported with: datasourceconverter.cxx keeps it as
+    the sequence's ChartExFormula. A chart that links the workbook it was imported with writes
+    these, so they still point into that workbook; our own range names ("0", "label 0",
+    "categories") name no cells in it. True when the sequence had one, and rFormula is now it.
+    A series name given as c:tx/c:v is kept as the quoted string ("Name", titlecontext.cxx):
+    that is the literal, not a reference, and false. */
+bool lcl_useImportedFormula(const Reference<chart2::data::XDataSequence>& xSeq, OUString& rFormula)
+{
+    Reference<beans::XPropertySet> xProps(xSeq, uno::UNO_QUERY);
+    if (!xProps.is())
+        return false;
+    Reference<beans::XPropertySetInfo> xInfo = xProps->getPropertySetInfo();
+    OUString aFormula;
+    if (!xInfo.is() || !xInfo->hasPropertyByName(u"ChartExFormula"_ustr)
+        || !(xProps->getPropertyValue(u"ChartExFormula"_ustr) >>= aFormula) || aFormula.isEmpty()
+        || aFormula.startsWith("\""))
+        return false;
+    rFormula = aFormula;
+    return true;
+}
+
+/// Whether this sequence kept the c:f reference it was imported with (lcl_useImportedFormula).
+bool lcl_hasImportedFormula(const Reference<chart2::data::XDataSequence>& xSeq)
+{
+    OUString aFormula;
+    return lcl_useImportedFormula(xSeq, aFormula);
+}
+
+/// Whether the values or the label of some labeled sequence here kept their c:f.
+bool lcl_someHasImportedFormula(
+    const Sequence<Reference<chart2::data::XLabeledDataSequence>>& rSequences)
+{
+    for (const Reference<chart2::data::XLabeledDataSequence>& xLabeled : rSequences)
+    {
+        if (xLabeled.is()
+            && (lcl_hasImportedFormula(xLabeled->getValues())
+                || lcl_hasImportedFormula(xLabeled->getLabel())))
+            return true;
+    }
+    return false;
+}
+
+/** PPTX: whether some data sequence of this chart kept the c:f reference it was imported with:
+    the categories, or a series' name, values or error-bar ranges. A linked chart writes those
+    references, so its series read the workbook's cells, and writes each sequence that kept none
+    as the literal it was (exportSeriesValues, exportSeriesCategory, exportSeriesText): numLit
+    and strLit data, a series name given as c:v, the categories the import made up for a chart
+    without c:cat. A chart none of whose sequences kept one is not linked: one copied through
+    storage (a cut and paste, a duplicated slide) keeps its workbook's name but no
+    ChartExFormula, and would otherwise win its original's workbook. */
+bool lcl_someSequenceHasImportedFormula(const Reference<chart2::XChartDocument>& xChartDoc)
+{
+    try
+    {
+        const Reference<chart2::XDiagram> xDiagram = xChartDoc->getFirstDiagram();
+        if (!xDiagram.is())
+            return false;
+        bool bDateCategories = false;
+        const Reference<chart2::data::XLabeledDataSequence> xCategories
+            = lcl_getCategories(xDiagram, &bDateCategories);
+        if (xCategories.is() && lcl_hasImportedFormula(xCategories->getValues()))
+            return true;
+
+        const Reference<chart2::XCoordinateSystemContainer> xCooSysCnt(xDiagram,
+                                                                       uno::UNO_QUERY_THROW);
+        for (const auto& rCooSys : xCooSysCnt->getCoordinateSystems())
+        {
+            const Reference<chart2::XChartTypeContainer> xCTCnt(rCooSys, uno::UNO_QUERY_THROW);
+            for (const auto& rChartType : xCTCnt->getChartTypes())
+            {
+                const Reference<chart2::XDataSeriesContainer> xDSCnt(rChartType,
+                                                                    uno::UNO_QUERY_THROW);
+                for (const auto& rSeries : xDSCnt->getDataSeries())
+                {
+                    const Reference<chart2::data::XDataSource> xSource(rSeries,
+                                                                       uno::UNO_QUERY_THROW);
+                    if (lcl_someHasImportedFormula(xSource->getDataSequences()))
+                        return true;
+                    // exportErrorBar writes the ranges of an error bar from data.
+                    const Reference<beans::XPropertySet> xSeriesProps(rSeries,
+                                                                      uno::UNO_QUERY_THROW);
+                    for (const OUString& rErrorBar : { u"ErrorBarY"_ustr, u"ErrorBarX"_ustr })
+                    {
+                        Reference<beans::XPropertySet> xErrorBar;
+                        sal_Int32 nStyle = cssc::ErrorBarStyle::NONE;
+                        if (!(xSeriesProps->getPropertyValue(rErrorBar) >>= xErrorBar)
+                            || !xErrorBar.is()
+                            || !(xErrorBar->getPropertyValue(u"ErrorBarStyle"_ustr) >>= nStyle)
+                            || nStyle != cssc::ErrorBarStyle::FROM_DATA)
+                            continue;
+                        const Reference<chart2::data::XDataSource> xErrorData(xErrorBar,
+                                                                              uno::UNO_QUERY);
+                        if (xErrorData.is()
+                            && lcl_someHasImportedFormula(xErrorData->getDataSequences()))
+                            return true;
+                    }
+                }
+            }
+        }
+        return false;
+    }
+    catch (const uno::Exception&)
+    {
+        TOOLS_WARN_EXCEPTION("oox", "ChartExport: cannot read the chart's data sequences");
+        return false;
+    }
+}
+
+}
+
 void ChartExport::ExportContent()
 {
     Reference< chart2::XChartDocument > xChartDoc( getModel(), uno::UNO_QUERY );
@@ -1581,6 +1748,40 @@ void ChartExport::ExportContent()
     InitRangeSegmentationProperties( xChartDoc );
 
     const bool bIsChartex = isChartexNotChartNS(nullptr);
+
+    // PPTX: write back the workbook the chart was imported with, and link it, while the chart
+    // still shows the data it was imported with. An edited chart is written without it, as all
+    // were before: the old workbook would make PowerPoint's Edit Data show, and refresh the
+    // chart to, the numbers the edit replaced. (DOCX decides this in DocxExport::OutputChart.)
+    // A linked chart's sequences write the c:f they were imported with, or, where they kept none,
+    // the literal they were. A chart is also written without the workbook when none of its
+    // sequences kept a c:f (lcl_someSequenceHasImportedFormula), and when its categories have
+    // levels and kept no c:f: CT_AxDataSource has no multi-level literal, so
+    // exportSeriesCategory would write our own range name ("categories") as their c:f, which
+    // names no cell of the workbook.
+    if (GetDocumentType() == DOCUMENT_PPTX)
+    {
+        mbLinkToExternalData
+            = !bIsChartex && GetFB() && lcl_someSequenceHasImportedFormula(xChartDoc);
+        if (mbLinkToExternalData)
+        {
+            bool bDateCategories = false;
+            const Reference<chart2::data::XLabeledDataSequence> xCategories
+                = lcl_getCategories(xChartDoc->getFirstDiagram(), &bDateCategories);
+            Reference<chart2::data::XDataSequence> xCategoryValues;
+            if (xCategories.is())
+                xCategoryValues = xCategories->getValues();
+            const bool bLevelsWithoutFormula
+                = xCategoryValues.is() && !lcl_hasImportedFormula(xCategoryValues)
+                  && getSplitCategoriesList(xCategoryValues->getSourceRangeRepresentation())
+                             .getLength()
+                         > 1;
+            mbLinkToExternalData
+                = !bLevelsWithoutFormula
+                  && lcl_writeImportedWorkbook(*GetFB(), GetExternalDataPath(), xChartDoc);
+        }
+    }
+
     ExportContent_( bIsChartex );
 }
 
@@ -2154,9 +2355,10 @@ OUString ChartExport::GetExternalDataPath() const
 void ChartExport::exportExternalData(bool bIsChartex)
 {
     if (bIsChartex) return; // TODO!!
-    // Embedded external data is grab bagged for docx file hence adding export part of
-    // external data for docx files only.
-    if(!mbLinkToExternalData || GetDocumentType() != DOCUMENT_DOCX)
+    // Embedded external data is grab bagged: for docx every embedding the import kept is
+    // written by DocxExport::WriteEmbeddings; for pptx ExportContent() wrote this chart's own.
+    if (!mbLinkToExternalData
+        || (GetDocumentType() != DOCUMENT_DOCX && GetDocumentType() != DOCUMENT_PPTX))
         return;
 
     const OUString externalDataPath = GetExternalDataPath();
@@ -4526,6 +4728,17 @@ void ChartExport::exportSeriesText( const Reference< chart2::data::XDataSequence
 
         OUString aCellRange =  xValueSeq->getSourceRangeRepresentation();
         aCellRange = parseFormula( aCellRange );
+        // A linked chart writes a name that kept no c:f (a c:v, or none) as the c:v it was: our
+        // own range name ("label 0") names no cell of the workbook it links.
+        if (mbLinkToExternalData && GetDocumentType() == DOCUMENT_PPTX
+            && !lcl_useImportedFormula(xValueSeq, aCellRange))
+        {
+            pFS->startElement(FSNS(XML_c, XML_v));
+            pFS->writeEscaped( aLabelString );
+            pFS->endElement( FSNS( XML_c, XML_v ) );
+            pFS->endElement( FSNS( XML_c, XML_tx ) );
+            return;
+        }
         pFS->startElement(FSNS(XML_c, XML_strRef));
 
         pFS->startElement(FSNS(XML_c, XML_f));
@@ -4553,6 +4766,12 @@ void ChartExport::exportSeriesCategory( const Reference< chart2::data::XDataSequ
     OUString aCellRange = xValueSeq.is() ? xValueSeq->getSourceRangeRepresentation() : OUString();
     const Sequence< Sequence< OUString >> aFinalSplitSource = (nValueType == XML_cat) ? getSplitCategoriesList(aCellRange) : Sequence< Sequence< OUString>>(0);
     aCellRange = parseFormula( aCellRange );
+    // A linked chart writes categories that kept no c:f (c:strLit data, or made up for a chart
+    // without c:cat) as a literal: our own range name ("categories") names no cell of the
+    // workbook it links. Categories with levels have no literal form; ExportContent does not
+    // link a chart whose categories have levels and no c:f.
+    const bool bLiteral = mbLinkToExternalData && GetDocumentType() == DOCUMENT_PPTX
+                          && !lcl_useImportedFormula(xValueSeq, aCellRange);
 
     if(aFinalSplitSource.getLength() > 1)
     {
@@ -4607,13 +4826,20 @@ void ChartExport::exportSeriesCategory( const Reference< chart2::data::XDataSequ
                 bWriteDateCategories = false;
         }
 
-        pFS->startElement(FSNS(XML_c, bWriteDateCategories ? XML_numRef : XML_strRef));
+        // A literal (c:numLit or c:strLit) holds the points a reference caches, and no c:f.
+        sal_Int32 nDataToken = bWriteDateCategories ? XML_numRef : XML_strRef;
+        if (bLiteral)
+            nDataToken = bWriteDateCategories ? XML_numLit : XML_strLit;
+        pFS->startElement(FSNS(XML_c, nDataToken));
 
-        pFS->startElement(FSNS(XML_c, XML_f));
-        pFS->writeEscaped(aCellRange);
-        pFS->endElement(FSNS(XML_c, XML_f));
+        if (!bLiteral)
+        {
+            pFS->startElement(FSNS(XML_c, XML_f));
+            pFS->writeEscaped(aCellRange);
+            pFS->endElement(FSNS(XML_c, XML_f));
 
-        pFS->startElement(FSNS(XML_c, bWriteDateCategories ? XML_numCache : XML_strCache));
+            pFS->startElement(FSNS(XML_c, bWriteDateCategories ? XML_numCache : XML_strCache));
+        }
         if (bWriteDateCategories)
         {
             pFS->startElement(FSNS(XML_c, XML_formatCode));
@@ -4651,8 +4877,9 @@ void ChartExport::exportSeriesCategory( const Reference< chart2::data::XDataSequ
             }
         }
 
-        pFS->endElement(FSNS(XML_c, bWriteDateCategories ? XML_numCache : XML_strCache));
-        pFS->endElement(FSNS(XML_c, bWriteDateCategories ? XML_numRef : XML_strRef));
+        if (!bLiteral)
+            pFS->endElement(FSNS(XML_c, bWriteDateCategories ? XML_numCache : XML_strCache));
+        pFS->endElement(FSNS(XML_c, nDataToken));
     }
 
     pFS->endElement( FSNS( XML_c, nValueType ) );
@@ -4665,16 +4892,25 @@ void ChartExport::exportSeriesValues( const Reference< chart2::data::XDataSequen
 
     OUString aCellRange = xValueSeq.is() ? xValueSeq->getSourceRangeRepresentation() : OUString();
     aCellRange = parseFormula( aCellRange );
+    // A linked chart writes values that kept no c:f (c:numLit data: a series' values, an error
+    // bar's custom values) as a c:numLit, the points a c:numRef caches and no c:f: our own range
+    // name ("0") names no cell of the workbook it links.
+    const bool bLiteral = mbLinkToExternalData && GetDocumentType() == DOCUMENT_PPTX
+                          && !lcl_useImportedFormula(xValueSeq, aCellRange);
     // TODO: need to handle XML_multiLvlStrRef according to aCellRange
-    pFS->startElement(FSNS(XML_c, XML_numRef));
+    pFS->startElement(FSNS(XML_c, bLiteral ? XML_numLit : XML_numRef));
 
-    pFS->startElement(FSNS(XML_c, XML_f));
-    pFS->writeEscaped( aCellRange );
-    pFS->endElement( FSNS( XML_c, XML_f ) );
+    if (!bLiteral)
+    {
+        pFS->startElement(FSNS(XML_c, XML_f));
+        pFS->writeEscaped( aCellRange );
+        pFS->endElement( FSNS( XML_c, XML_f ) );
+    }
 
     ::std::vector< double > aValues = lcl_getAllValuesFromSequence( xValueSeq );
     sal_Int32 ptCount = aValues.size();
-    pFS->startElement(FSNS(XML_c, XML_numCache));
+    if (!bLiteral)
+        pFS->startElement(FSNS(XML_c, XML_numCache));
     pFS->startElement(FSNS(XML_c, XML_formatCode));
     OUString sNumberFormatString(u"General"_ustr);
     const sal_Int32 nKey = xValueSeq.is() ? xValueSeq->getNumberFormatKeyByIndex(-1) : 0;
@@ -4696,8 +4932,9 @@ void ChartExport::exportSeriesValues( const Reference< chart2::data::XDataSequen
         }
     }
 
-    pFS->endElement( FSNS( XML_c, XML_numCache ) );
-    pFS->endElement( FSNS( XML_c, XML_numRef ) );
+    if (!bLiteral)
+        pFS->endElement( FSNS( XML_c, XML_numCache ) );
+    pFS->endElement( FSNS( XML_c, bLiteral ? XML_numLit : XML_numRef ) );
     pFS->endElement( FSNS( XML_c, nValueType ) );
 }
 

@@ -26,11 +26,11 @@ class MetaSlide {
 		if (this.hasTransition())
 			this._transitionHandler = new SlideTransition(slideInfo);
 
-		// The vector path draws slides as static content and does not
-		// drive shape effects yet, so the animation tree is built for
-		// the bitmap path only. Without the tree an effect dispatch
-		// falls through to the next slide.
-		if (slideInfo.animations && !RenderManager.isVectorRendering()) {
+		// Every show draws from the engine's slide layers (see the
+		// compositor choice in SlideShowPresenter.onSlideShowInfo), so
+		// the tree is built in every render mode. Without it an effect
+		// dispatch falls through to the next slide.
+		if (slideInfo.animations) {
 			this._animationsHandler = new SlideAnimations(
 				this._slideShowHandler.getContext(),
 				this,

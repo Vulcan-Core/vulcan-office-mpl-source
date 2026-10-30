@@ -484,8 +484,13 @@ void AquaSalVirtualDevice::Destroy()
 
     if( mbForeignContext )
     {
-        // Do not delete mxContext that we have received from outside VCL
-        maLayer.set(nullptr);
+        // Do not delete mxContext that we have received from outside VCL, but the
+        // CGLayer we created on top of it is ours (and it retains that context).
+        if (maLayer.isSet())
+        {
+            CGLayerRelease(maLayer.get());
+            maLayer.set(nullptr);
+        }
         return;
     }
 

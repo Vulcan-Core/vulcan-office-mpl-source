@@ -7167,7 +7167,7 @@ msgstr ""
 #~ msgstr "सर्भर रिसाइक्ल हुदैछ र छिट्टै उपलब्ध हुनेछ"
 
 #~ msgid "Oops, there is a problem connecting to Collabora Online : "
-#~ msgstr "उफ्, Collabora Online सँग जोड्न त्यहाँ एउटा समस्या छ : "
+#~ msgstr "उफ्, Vulcan Office सँग जोड्न त्यहाँ एउटा समस्या छ : "
 
 #~ msgid "Number of views"
 #~ msgstr "प्रदर्शन गरिएको गन्ति"

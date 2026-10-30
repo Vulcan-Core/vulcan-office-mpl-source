@@ -26,12 +26,17 @@
 #include <common/Log.hpp>
 #include <common/RegexUtil.hpp>
 
+#include <arpa/inet.h>
+
+#include <cstdint>
+#include <cstring>
 #include <map>
 #include <regex>
 #include <set>
 #include <string>
 
 RegexUtil::RegexListMatcher HostUtil::WopiHosts;
+RegexUtil::RegexListMatcher HostUtil::PublicWopiHosts;
 std::map<std::string, std::string> HostUtil::AliasHosts;
 std::set<std::string> HostUtil::hostList;
 std::string HostUtil::FirstHost;
@@ -42,6 +47,7 @@ void HostUtil::parseWopiHost()
 {
     // Parse the WOPI settings.
     WopiHosts.clear();
+    PublicWopiHosts.clear();
     WopiEnabled = ConfigUtil::getBool("storage.wopi[@allow]", false);
     if (WopiEnabled)
     {
@@ -59,26 +65,47 @@ void HostUtil::parseWopiHost()
     }
 }
 
-void HostUtil::addWopiHost(const std::string& host, bool allow)
+void HostUtil::addWopiHost(const std::string& host, bool allow, bool serverToServerOnly)
 {
     if (!host.empty())
     {
         if (allow)
         {
-            LOG_INF("Adding trusted WOPI host: [" << host << "].");
-            WopiHosts.allow(host);
+            if (serverToServerOnly)
+            {
+                LOG_INF("Adding trusted WOPI host for server-to-server requests only: ["
+                        << host << "].");
+                WopiHosts.allow(host);
+            }
+            else
+            {
+                LOG_INF("Adding trusted WOPI host: [" << host << "].");
+                WopiHosts.allow(host);
+                PublicWopiHosts.allow(host);
+            }
         }
         else
         {
             LOG_INF("Adding blocked WOPI host: [" << host << "].");
             WopiHosts.deny(host);
+            PublicWopiHosts.deny(host);
         }
     }
 }
 
-bool HostUtil::allowedWopiHost(const std::string& host)
+bool HostUtil::allowedWopiHost(const std::string& host, bool serverToServer)
 {
-    return WopiEnabled && WopiHosts.match(host);
+    if (!WopiEnabled || !WopiHosts.match(host))
+        return false;
+
+    if (serverToServer || PublicWopiHosts.match(host))
+        return true;
+
+    LOG_WRN("WOPI host [" << host
+                          << "] is admitted only by an internal alias group, which serves "
+                             "server-to-server requests only (a net.post_allow peer with no "
+                             "X-Forwarded-For); refusing it for this request");
+    return false;
 }
 
 std::string HostUtil::parseAlias(const std::string& aliasPattern)
@@ -147,10 +174,18 @@ void HostUtil::parseAliases(Poco::Util::LayeredConfiguration& conf)
 
     AliasHosts.clear();
     WopiHosts.clear();
+    PublicWopiHosts.clear();
     hostList.clear();
 #if ENABLE_FEATURE_LOCK
     CommandControl::LockManager::unlockLinkMap.clear();
 #endif
+
+    // group[0] holds the public editor domains: any caller may name its host or
+    // aliases. Every later group is internal (e.g. a VPC address range admitted
+    // for WOPI hosts that coolwsd reaches directly), and is honored only for
+    // server-to-server requests unless the admin turns this off.
+    const bool secondaryGroupsInternal =
+        conf.getBool("storage.wopi.alias_groups[@secondary_groups_internal]", true);
 
     for (size_t i = 0;; i++)
     {
@@ -167,6 +202,10 @@ void HostUtil::parseAliases(Poco::Util::LayeredConfiguration& conf)
         }
 
         const bool allow = conf.getBool(path + ".host[@allow]", false);
+        const bool serverToServerOnly = secondaryGroupsInternal && i > 0;
+        if (serverToServerOnly)
+            LOG_INF("parseAliases: alias group [" << i
+                                                  << "] serves server-to-server requests only");
         const Poco::URI realUri(uri);
 
         try
@@ -175,7 +214,7 @@ void HostUtil::parseAliases(Poco::Util::LayeredConfiguration& conf)
             CommandControl::LockManager::mapUnlockLink(realUri.getHost(), path);
 #endif
             HostUtil::hostList.insert(realUri.getHost());
-            HostUtil::addWopiHost(realUri.getHost(), allow);
+            HostUtil::addWopiHost(realUri.getHost(), allow, serverToServerOnly);
         }
         catch (const Poco::Exception& exc)
         {
@@ -221,7 +260,7 @@ void HostUtil::parseAliases(Poco::Util::LayeredConfiguration& conf)
 #if ENABLE_FEATURE_LOCK
                 CommandControl::LockManager::mapUnlockLink(aliasPattern, path);
 #endif
-                HostUtil::addWopiHost(aliasPattern, allow);
+                HostUtil::addWopiHost(aliasPattern, allow, serverToServerOnly);
             }
         }
         warnedInvalidRegex = true;
@@ -340,6 +379,55 @@ bool HostUtil::isForbiddenKitHost(const std::string& host)
 
     static const std::regex allowedRegex(allowlist);
     return !std::regex_match(host, allowedRegex);
+}
+
+namespace
+{
+/// The IPv4 half of HostUtil::isNonPublicAddress(), on the four network-order bytes.
+bool isNonPublicIPv4(const std::uint8_t* a)
+{
+    return a[0] == 0                                  // "this" network, 0.0.0.0
+           || a[0] == 10                              // RFC 1918
+           || (a[0] == 100 && (a[1] & 0xC0) == 64)    // RFC 6598 shared space
+           || a[0] == 127                             // loopback
+           || (a[0] == 169 && a[1] == 254)            // link-local, cloud metadata
+           || (a[0] == 172 && (a[1] & 0xF0) == 16)    // RFC 1918
+           || (a[0] == 192 && a[1] == 0 && a[2] == 0) // IETF protocol assignments
+           || (a[0] == 192 && a[1] == 168)            // RFC 1918
+           || (a[0] == 198 && (a[1] & 0xFE) == 18)    // benchmarking
+           || a[0] >= 224;                            // multicast, reserved, broadcast
+}
+} // namespace
+
+bool HostUtil::isNonPublicAddress(const std::string& address)
+{
+    // An IPv6 zone index ("fe80::1%eth0") does not change what the address is.
+    const std::string bare = address.substr(0, address.find('%'));
+
+    std::uint8_t v4[4];
+    if (inet_pton(AF_INET, bare.c_str(), v4) == 1)
+        return isNonPublicIPv4(v4);
+
+    std::uint8_t v6[16];
+    if (inet_pton(AF_INET6, bare.c_str(), v6) != 1)
+        return true;
+
+    // These carry an IPv4 address that the packet ends up at (or that a translator
+    // forwards to), so that address decides: ::ffff:a.b.c.d (mapped), ::a.b.c.d
+    // (compatible, which also covers :: and ::1) and 64:ff9b::a.b.c.d (NAT64) hold it
+    // in the last four bytes, 2002:AABB:CCDD::/48 (6to4) right after the prefix.
+    static constexpr std::uint8_t zeros[12] = {};
+    static constexpr std::uint8_t nat64[12] = { 0x00, 0x64, 0xff, 0x9b };
+    const bool mapped = std::memcmp(v6, zeros, 10) == 0 && v6[10] == 0xff && v6[11] == 0xff;
+    if (mapped || std::memcmp(v6, zeros, 12) == 0 || std::memcmp(v6, nat64, 12) == 0)
+        return isNonPublicIPv4(v6 + 12);
+    if (v6[0] == 0x20 && v6[1] == 0x02)
+        return isNonPublicIPv4(v6 + 2);
+
+    return (v6[0] & 0xFE) == 0xFC                       // unique-local fc00::/7
+           || (v6[0] == 0xFE && (v6[1] & 0xC0) == 0x80) // link-local fe80::/10
+           || (v6[0] == 0xFE && (v6[1] & 0xC0) == 0xC0) // old site-local fec0::/10
+           || v6[0] == 0xFF;                            // multicast
 }
 
 #endif // !MOBILEAPP

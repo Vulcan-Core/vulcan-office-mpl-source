@@ -1530,7 +1530,9 @@ CPPUNIT_TEST_FIXTURE(SwUiWriterTest5, testTdf145091)
     // delete only table text, but not table
     dispatchCommand(mxComponent, u".uno:SelectAll"_ustr, {});
     dispatchCommand(mxComponent, u".uno:SelectAll"_ustr, {});
-    dispatchCommand(mxComponent, u".uno:Delete"_ustr, {});
+    // VULCAN: SelectAll twice selects the whole table, and .uno:Delete now removes a
+    // wholly selected table, so call what Delete called before (DelRight): it clears the cells.
+    getSwDocShell()->GetWrtShell()->DelRight();
     CPPUNIT_ASSERT(pEditShell->GetRedlineCount() > 0);
 
     // save it to DOCX

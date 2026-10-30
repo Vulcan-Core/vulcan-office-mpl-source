@@ -5105,7 +5105,7 @@ msgid ""
 "Unlinking citations will prevent Collabora Online from updating citations "
 "and bibliography in this document."
 msgstr ""
-"Uklanjanje poveznica citata spriječit će Collabora Online aktualizirati "
+"Uklanjanje poveznica citata spriječit će Vulcan Office aktualizirati "
 "citate i bibliografiju u ovom dokumentu."
 
 #: src/control/HRuler.ts:321
@@ -6668,7 +6668,7 @@ msgstr ""
 #: src/map/handler/Map.VersionBar.js:50
 msgid "Your Collabora Online server needs updating. Version {0} is available."
 msgstr ""
-"Tvoj se Collabora Online server treba aktualizirati. Dostupna je verzija {0}."
+"Tvoj se Vulcan Office server treba aktualizirati. Dostupna je verzija {0}."
 
 #: src/map/handler/Map.WOPI.js:194
 msgid "Creating new file from template..."
@@ -6954,7 +6954,7 @@ msgstr "Žuta ideja"
 
 #: welcome/welcome.html%2Bhtml.head.title:9-3
 msgid "Collabora Online Welcome"
-msgstr "Collabora Online dobrodošlica"
+msgstr "Vulcan Office dobrodošlica"
 
 #: welcome/welcome.html%2Bhtml.body.div.div.div.div.h1:26-7
 msgid "Explore The New {coolversion}"
@@ -6963,7 +6963,7 @@ msgstr "Istraži novu {coolversion}"
 #: welcome/welcome.html%2Bhtml.body.div.div.div.div.h2:27-7
 #: welcome/welcome.html%2Bhtml.body.div.div.div.div.h2:38-7
 msgid "Collabora Online Development Edition"
-msgstr "Razvojno Collabora Online izdanje"
+msgstr "Razvojno Vulcan Office izdanje"
 
 #: welcome/welcome.html%2Bhtml.body.div.div.div.div.p:28-7
 msgid ""
@@ -6992,7 +6992,7 @@ msgid ""
 msgstr ""
 "Pregledaj <a target=\"_blank\" rel=\"noopener\" href=\"https://www."
 "collaboraonline.com/code-26-04-release-notes/\">bilješke uz izdanje</a> i "
-"saznaj sve o najnovijem razvojnom Collabora Online izdanju, koje je "
+"saznaj sve o najnovijem razvojnom Vulcan Office izdanju, koje je "
 "prikladno za obične korisnike i male timove."
 
 #: welcome/welcome.html%2Bhtml.body.div.div.div.div.h1:48-7
@@ -7016,7 +7016,7 @@ msgid ""
 msgstr ""
 "Želiš doprinijeti, ali ne znaš gdje početi? Prijeđi na stranicu s <a target="
 "\"_blank\" rel=\"noopener\" href=\"https://www.collaboraoffice.org/post/"
-"build-code/\">uputama</a> i programiraj razvojno Collabora Online izdanje "
+"build-code/\">uputama</a> i programiraj razvojno Vulcan Office izdanje "
 "(CODE) od nule. Pomoći možeš i putem <a target=\"_blank\" rel=\"noopener\" "
 "href=\"https://www.collaboraoffice.org/post/translate/\">prevođenja</a> "
 "aplikacije ili <a target=\"_blank\" rel=\"noopener\" href=\"https://www."
@@ -7608,7 +7608,7 @@ msgstr ""
 #~ msgstr "Poslužitelj se ponovo pokreće i bit će uskoro dostupan"
 
 #~ msgid "Oops, there is a problem connecting to Collabora Online : "
-#~ msgstr "Ups, postoji problem prilikom povezivanja s Collabora Online: "
+#~ msgstr "Ups, postoji problem prilikom povezivanja s Vulcan Office: "
 
 #~ msgid "Number of views"
 #~ msgstr "Broj pregleda"

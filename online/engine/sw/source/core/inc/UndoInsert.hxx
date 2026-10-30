@@ -90,6 +90,9 @@ public:
     void SetWithRsid() { m_bWithRsid = true; }
 
     bool IsIndependent(const SwUndoInsert& rOther) const;
+
+    /// Vulcan fork: typing touches one node and never adds one (an append does).
+    std::optional<sw::UndoFootprint> GetFootprint() const override;
 };
 
 SwRewriter
@@ -130,6 +133,9 @@ public:
     virtual SwRewriter GetRewriter() const override;
 
     void SetEnd( const SwPaM& rPam );
+
+    /// Vulcan fork: a replace inside one paragraph that splits nothing is node-neutral.
+    std::optional<sw::UndoFootprint> GetFootprint() const override;
 
 private:
     class Impl;

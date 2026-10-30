@@ -1554,7 +1554,7 @@ msgstr "<span class=\"productname\">{productname}</span> Help"
 #: html/cool-help.html%2Bdiv.nav.ul.li:331-13
 #: html/cool-help.html%2Bdiv.div.h3:366-5
 msgid "Collaborative editing"
-msgstr "Collaborative editing"
+msgstr "Vulcan Officetive editing"
 
 #: html/cool-help.html%2Bdiv.nav.ul.li:332-13
 #: html/cool-help.html%2Bdiv.div.h3:376-5

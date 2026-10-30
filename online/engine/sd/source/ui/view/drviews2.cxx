@@ -17,6 +17,10 @@
  *   the License at http://www.apache.org/licenses/LICENSE-2.0 .
  */
 
+#include <set>
+#include <vcl/filter/embedfontinfo.hxx>
+#include <cstdlib>
+#include <cctype>
 #include <config_features.h>
 
 #include <avmedia/mediaplayer.hxx>
@@ -47,6 +51,11 @@
 #include <editeng/contouritem.hxx>
 #include <editeng/editdata.hxx>
 #include <editeng/eeitem.hxx>
+#include <editeng/editdata.hxx>
+#include <svl/itemiter.hxx>
+#include <functional>
+#include <editeng/ulspitem.hxx>
+#include <vcl/metric.hxx>
 #include <editeng/flditem.hxx>
 #include <editeng/section.hxx>
 #include <editeng/editobj.hxx>
@@ -78,10 +87,16 @@
 #include <svx/graphichelper.hxx>
 #include <svx/hlnkitem.hxx>
 #include <svx/imapdlg.hxx>
+#include <svx/sderitm.hxx>
 #include <svx/sdtagitm.hxx>
+#include <svx/sdtaitm.hxx>
+#include <svx/sdtditm.hxx>
+#include <svx/sdtmfitm.hxx>
 #include <svx/svdetc.hxx>
 #include <svx/svdograf.hxx>
 #include <svx/svdoole2.hxx>
+#include <svx/svdocirc.hxx>
+#include <svx/svdorect.hxx>
 #include <svx/svdpagv.hxx>
 #include <svx/svdundo.hxx>
 #include <svx/svxdlg.hxx>
@@ -90,11 +105,16 @@
 #include <svx/sdmetitm.hxx>
 #include <svx/zoomslideritem.hxx>
 #include <svx/xflclit.hxx>
+#include <svx/svdouno.hxx>
+#include <svx/svdobjkind.hxx>
+#include <com/sun/star/beans/XPropertySet.hpp>
+#include <cpo/uno/Any.hxx>
 #include <svx/xlnwtit.hxx>
 #include <svx/chrtitem.hxx>
 #include <svx/xlnclit.hxx>
 #include <svx/xflgrit.hxx>
 #include <svx/xfillit0.hxx>
+#include <svx/xlineit0.hxx>
 
 #include <comphelper/diagnose_ex.hxx>
 #include <tools/json_writer.hxx>
@@ -106,6 +126,11 @@
 #include <vcl/graph.hxx>
 #include <vcl/graphicfilter.hxx>
 #include <vcl/svapp.hxx>
+#include <vcl/outdev.hxx>
+#include <vcl/embeddedfontsmanager.hxx>
+#include <comphelper/base64.hxx>
+#include <cpo/uno/Sequence.hxx>
+#include <osl/file.hxx>
 #include <vcl/unohelp2.hxx>
 #include <vcl/weld.hxx>
 
@@ -132,12 +157,16 @@
 
 #include <app.hrc>
 #include <strings.hrc>
+#include <unmodpg.hxx>
+#include <unokywds.hxx>
+#include <svx/svdlayer.hxx>
 
 #include <AnimationChildWindow.hxx>
 #include <DrawDocShell.hxx>
 #include <DrawViewShell.hxx>
 #include <LayerTabBar.hxx>
 #include <Outliner.hxx>
+#include <VulcanPdfPageModel.hxx>
 #include <ViewShellHint.hxx>
 #include <ViewShellImplementation.hxx>
 #include <Window.hxx>
@@ -207,12 +236,17 @@
 
 #include <ViewShellBase.hxx>
 #include <memory>
+#include <stdexcept>
+#include <string_view>
 
 #include <sfx2/newstyle.hxx>
 #include <SelectLayerDlg.hxx>
 #include <unomodel.hxx>
 
 #include <iostream>
+#include <sstream>
+#include <vector>
+#include <algorithm>
 #include <boost/property_tree/json_parser.hpp>
 #include <rtl/uri.hxx>
 #include <editeng/editeng.hxx>
@@ -334,6 +368,204 @@ void lcl_UnoCommand(const std::string& rText)
             lcl_LogWarning("FillApi SlideCmd: uno command not recognized'" + rText + "'");
         }
     }
+}
+
+// Parses a 6-digit lowercase hex RGB value ("1a2b3c") into an opaque Color.
+// Anything else - wrong length, uppercase, non-hex - is rejected.
+bool lcl_ParseHexColor(const std::string& rText, Color& rColor)
+{
+    if (rText.size() != 6)
+        return false;
+    sal_uInt32 nValue = 0;
+    for (const char c : rText)
+    {
+        nValue <<= 4;
+        if (c >= '0' && c <= '9')
+            nValue += c - '0';
+        else if (c >= 'a' && c <= 'f')
+            nValue += c - 'a' + 10;
+        else
+            return false;
+    }
+    // The sal_uInt32 Color constructor is consteval; build from channels.
+    rColor = Color(static_cast<sal_uInt8>(nValue >> 16),
+                   static_cast<sal_uInt8>(nValue >> 8),
+                   static_cast<sal_uInt8>(nValue));
+    return true;
+}
+
+// Fit means HUG (Vulcan fork): strip the spacing a generator hid at the
+// text's outer edges — space-above on the FIRST paragraph and space-below
+// on the LAST — so FitFrameToTextSize computes the text, not text plus
+// invisible padding ("still has padding in the title text at the top
+// despite ctrl shift f"). Spacing BETWEEN paragraphs is authored rhythm
+// and stays. Callers record CreateUndoObjectSetText first.
+void lcl_StripOuterParaSpacing(SdDrawDocument* pDoc, SdrTextObj* pTextObj)
+{
+    SdOutliner* pOutl = pDoc ? pDoc->GetInternalOutliner() : nullptr;
+    OutlinerParaObject* pOPO = pTextObj ? pTextObj->GetOutlinerParaObject() : nullptr;
+    if (!pOutl || !pOPO)
+        return;
+    pOutl->SetText(*pOPO);
+    const sal_Int32 nParas = pOutl->GetParagraphCount();
+    bool bChanged = false;
+    if (nParas > 0)
+    {
+        SfxItemSet aFirst(pOutl->GetParaAttribs(0));
+        SvxULSpaceItem aFirstUL(aFirst.Get(EE_PARA_ULSPACE));
+        if (aFirstUL.GetUpper() != 0)
+        {
+            aFirstUL.SetUpper(0);
+            aFirst.Put(aFirstUL);
+            pOutl->SetParaAttribs(0, aFirst);
+            bChanged = true;
+        }
+        SfxItemSet aLast(pOutl->GetParaAttribs(nParas - 1));
+        SvxULSpaceItem aLastUL(aLast.Get(EE_PARA_ULSPACE));
+        if (aLastUL.GetLower() != 0)
+        {
+            aLastUL.SetLower(0);
+            aLast.Put(aLastUL);
+            pOutl->SetParaAttribs(nParas - 1, aLast);
+            bChanged = true;
+        }
+        if (bChanged)
+            pTextObj->SetOutlinerParaObject(pOutl->CreateParaObject());
+    }
+    pOutl->Clear();
+}
+
+// The ONE frame-to-text hug, shared by every fit path (the FillApi
+// FitFrameToText verb and SID_FIT_FRAME_TO_TEXT): text-content undo,
+// outer paragraph-spacing strip, vertical inset zeroing, geometry undo,
+// then the fit itself. rAddUndo abstracts the caller's undo recorder so
+// the sequence cannot drift between the two sites.
+void lcl_FitFrameHug(SdDrawDocument* pDoc, SdrTextObj* pTextObj,
+                     const std::function<void(std::unique_ptr<SdrUndoAction>)>& rAddUndo)
+{
+    // Geometry undo is recorded FIRST because undo replays in reverse:
+    // the attr and text restores below re-fire autogrow adjustment on
+    // the way back, so the rect must be the LAST thing restored or a
+    // single undo leaves the box re-shrunk to its text (the toggle
+    // block plays the same trick).
+    rAddUndo(pDoc->GetSdrUndoFactory().CreateUndoGeoObject(*pTextObj));
+    rAddUndo(pDoc->GetSdrUndoFactory().CreateUndoObjectSetText(*pTextObj, 0));
+    lcl_StripOuterParaSpacing(pDoc, pTextObj);
+    // INK-MEASURED top trim: the fit's frame top must land on the
+    // first line's tallest DRAWN pixel the way the sides land on glyph
+    // edges — not on the line box, which reserves ascent slack above
+    // the caps ("what is it going to take to get this content fit
+    // right"). GetTextBoundRect measures the exact ink of the first
+    // paragraph's own text in its own font, so an accented capital in
+    // THIS title raises the measured ink and shrinks the trim by
+    // itself — accent-safe by measurement, not by guesswork. Falls
+    // back to the font's internal leading when the ink measurement is
+    // unavailable (empty text, degenerate device).
+    tools::Long nTopTrim = 0;
+    if (SdOutliner* pMetricOutl = pDoc->GetInternalOutliner())
+    {
+        if (OutputDevice* pRef = pMetricOutl->GetRefDevice())
+        {
+            EditEngine& rEE
+                = const_cast<EditEngine&>(pMetricOutl->GetEditEngine());
+            if (OutlinerParaObject* pOPO = pTextObj->GetOutlinerParaObject())
+            {
+                pMetricOutl->SetText(*pOPO);
+                vcl::Font aFirstFont = rEE.GetStandardFont(0);
+                const OUString aFirstText = rEE.GetText(0);
+                pRef->Push(vcl::PushFlags::FONT);
+                pRef->SetFont(aFirstFont);
+                tools::Rectangle aInk;
+                if (!aFirstText.isEmpty()
+                    && pRef->GetTextBoundRect(aInk, aFirstText)
+                    && !aInk.IsEmpty() && aInk.Top() > 0)
+                {
+                    // DrawText's origin is the top-left of the text
+                    // cell, so the ink rect's Top IS the cell-top to
+                    // ink-top gap.
+                    nTopTrim = aInk.Top();
+                }
+                else
+                {
+                    const FontMetric aMetric(pRef->GetFontMetric());
+                    if (aMetric.GetInternalLeading() > 0)
+                        nTopTrim = aMetric.GetInternalLeading();
+                }
+                pRef->Pop();
+                pMetricOutl->Clear();
+            }
+        }
+    }
+    rAddUndo(pDoc->GetSdrUndoFactory().CreateUndoAttrObject(*pTextObj));
+    pTextObj->SetMergedItem(makeSdrTextUpperDistItem(-nTopTrim));
+    pTextObj->SetMergedItem(makeSdrTextLowerDistItem(0));
+    pTextObj->FitFrameToTextSize();
+    // "When I start typing the box should expand to fit the new amount
+    // of text": the hug leaves the box ARMED to keep hugging — autogrow
+    // height on, its floor zeroed AFTER the flip (enabling the mode
+    // reseeds the minimum from the current rect, which the zero must
+    // outlive), and a conflicting shrink-autofit cleared. Width stays
+    // as authored: it is the wrap width.
+    if (pTextObj->GetMergedItemSet()
+            .GetItem<SdrTextFitToSizeTypeItem>(SDRATTR_TEXT_FITTOSIZE)
+            ->GetValue()
+        != drawing::TextFitToSizeType_NONE)
+        pTextObj->SetMergedItem(
+            SdrTextFitToSizeTypeItem(drawing::TextFitToSizeType_NONE));
+    pTextObj->SetMergedItem(makeSdrTextAutoGrowHeightItem(true));
+    pTextObj->SetMergedItem(makeSdrTextMinFrameHeightItem(0));
+}
+
+// Parses one optional trailing style token of the insert commands' value
+// grammar (Slide Studio library styling): "s<pt>" font size in points,
+// "b" bold, "c<6hex>" text color. Returns false for anything else.
+bool lcl_ParseInsertStyleToken(const std::string& rToken, sal_Int32& rSizePt, bool& rBold,
+                               bool& rHasColor, Color& rColor)
+{
+    if (rToken == "b")
+    {
+        rBold = true;
+        return true;
+    }
+    if (rToken.size() >= 2 && rToken[0] == 's'
+        && rToken.find_first_not_of("0123456789", 1) == std::string::npos)
+    {
+        try
+        {
+            const int nSize = stoi(rToken.substr(1));
+            if (nSize <= 0 || nSize > 999)
+                return false;
+            rSizePt = nSize;
+            return true;
+        }
+        catch (const std::exception&)
+        {
+            return false;
+        }
+    }
+    if (rToken.size() == 7 && rToken[0] == 'c')
+    {
+        Color aColor;
+        if (!lcl_ParseHexColor(rToken.substr(1), aColor))
+            return false;
+        rColor = aColor;
+        rHasColor = true;
+        return true;
+    }
+    return false;
+}
+
+// EE_CHAR_FONTHEIGHT rides the drawing pool's 1/100 mm metric: pt to
+// 1/100 mm is *2540/72.
+void lcl_PutInsertStyleItems(SfxItemSet& rSet, sal_Int32 nSizePt, bool bBold, bool bHasColor,
+                             const Color& rColor)
+{
+    if (nSizePt > 0)
+        rSet.Put(SvxFontHeightItem(nSizePt * 2540 / 72, 100, EE_CHAR_FONTHEIGHT));
+    if (bBold)
+        rSet.Put(SvxWeightItem(WEIGHT_BOLD, EE_CHAR_WEIGHT));
+    if (bHasColor)
+        rSet.Put(SvxColorItem(rColor, EE_CHAR_COLOR));
 }
 
 bool lcl_ReplaceWithImage(SdDrawDocument* pDoc, SdPage* pPage, int nObjId,
@@ -717,6 +949,147 @@ public:
             }
         }
     }
+
+void lcl_NotifySpeakerNotesChanged(sal_uInt64 nSlideId, std::string_view rRequestId)
+{
+    tools::JsonWriter aState;
+    aState.put("slideId", nSlideId);
+    aState.put("requestId", rRequestId);
+
+    tools::JsonWriter aPayload;
+    aPayload.put("commandName", ".uno:KitSpeakerNotesChanged");
+    aPayload.put("state", aState.finishAndGetAsOString());
+    KitHelper::notifyAllViews(KIT_CALLBACK_STATE_CHANGED, aPayload.finishAndGetAsOString());
+}
+
+OUString lcl_GetSpeakerNotesText(const SdrTextObj& rNotesText)
+{
+    if (rNotesText.IsEmptyPresObj())
+        return OUString();
+
+    const OutlinerParaObject* pParagraphs = rNotesText.GetOutlinerParaObject();
+    if (!pParagraphs)
+        return OUString();
+
+    OUStringBuffer aText;
+    const EditTextObject& rTextObject = pParagraphs->GetTextObject();
+    for (sal_Int32 nParagraph = 0; nParagraph < rTextObject.GetParagraphCount(); ++nParagraph)
+    {
+        if (nParagraph > 0)
+            aText.append('\n');
+        aText.append(rTextObject.GetText(nParagraph));
+    }
+    return aText.makeStringAndClear();
+}
+
+SdrTextObj* lcl_FindSpeakerNotesText(SdPage& rNotesPage)
+{
+    SdrObject* pNotes = rNotesPage.GetPresObj(PresObjKind::Notes);
+    if (!pNotes)
+    {
+        // Match presentation-info readback for imported presentations whose
+        // notes text object was not registered as a presentation object.
+        for (size_t nNote = 0; nNote < rNotesPage.GetObjCount(); ++nNote)
+        {
+            SdrObject* pCandidate = rNotesPage.GetObj(nNote);
+            if (pCandidate && !rNotesPage.IsPresObj(pCandidate) && pCandidate->HasText()
+                && (pCandidate->GetObjIdentifier() == SdrObjKind::Text
+                    || pCandidate->GetObjIdentifier() == SdrObjKind::TitleText
+                    || pCandidate->GetObjIdentifier() == SdrObjKind::OutlineText))
+            {
+                pNotes = pCandidate;
+                break;
+            }
+        }
+    }
+
+    return DynCastSdrTextObj(pNotes);
+}
+
+bool lcl_SetSpeakerNotes(DrawViewShell& rViewShell, sal_uInt64 nSlideId,
+                         const OUString& rNotes, std::string_view rRequestId)
+{
+    SdDrawDocument* pDocument = rViewShell.GetDoc();
+    if (!pDocument)
+        return false;
+
+    SdPage* pStandardPage = nullptr;
+    sal_uInt16 nSlideIndex = 0;
+    const sal_uInt16 nPageCount = pDocument->GetSdPageCount(PageKind::Standard);
+    for (; nSlideIndex < nPageCount; ++nSlideIndex)
+    {
+        SdPage* pCandidate = pDocument->GetSdPage(nSlideIndex, PageKind::Standard);
+        if (pCandidate && pCandidate->GetUniqueID() == nSlideId)
+        {
+            pStandardPage = pCandidate;
+            break;
+        }
+    }
+
+    if (!pStandardPage)
+    {
+        lcl_LogWarning("FillApi SlideCmd SetSpeakerNotes: stable slide ID not found: "
+                       + std::to_string(nSlideId));
+        return false;
+    }
+
+    SdPage* pNotesPage = pDocument->GetSdPage(nSlideIndex, PageKind::Notes);
+    SdrTextObj* pNotesText = pNotesPage ? lcl_FindSpeakerNotesText(*pNotesPage) : nullptr;
+    if (!pNotesPage || !pNotesText)
+    {
+        lcl_LogWarning("FillApi SlideCmd SetSpeakerNotes: notes placeholder missing for slide ID "
+                       + std::to_string(nSlideId));
+        return false;
+    }
+
+    // Blur and slide navigation can flush the same textarea draft more than
+    // once. Treat the placeholder as empty and avoid polluting Undo/modified
+    // state when the normalized paragraph text is already authoritative.
+    if (lcl_GetSpeakerNotesText(*pNotesText) == rNotes)
+        return true;
+
+    if (pNotesPage->GetPresObj(PresObjKind::Notes) != pNotesText)
+    {
+        // Repair the semantic registration in imported decks. This makes
+        // subsequent empty/nonempty writes resolve the same object without
+        // broad scans which could select a date, footer, or page label.
+        pNotesPage->InsertPresObj(pNotesText, PresObjKind::Notes);
+    }
+
+    // A speaker-note edit is one document-level undo action even though it
+    // targets a notes page which is not currently displayed.
+    pDocument->BegUndo(SdResId(STR_TRANSFORM));
+    comphelper::ScopeGuard aEndUndo([pDocument]() { pDocument->EndUndo(); });
+    pDocument->AddUndo(
+        pDocument->GetSdrUndoFactory().CreateUndoObjectSetText(*pNotesText, 0));
+
+    if (rNotes.isEmpty())
+    {
+        if (!pNotesPage->RestoreDefaultText(
+                pNotesText, pNotesText->GetCustomPromptText()))
+        {
+            // Never hide stale content if a malformed imported object cannot
+            // restore the normal notes prompt.
+            pNotesText->SetText(OUString());
+        }
+        pNotesText->SetEmptyPresObj(true);
+    }
+    else
+    {
+        pNotesText->SetText(rNotes);
+        pNotesText->SetEmptyPresObj(false);
+    }
+
+    pDocument->EndUndo();
+    aEndUndo.dismiss();
+    pNotesText->ActionChanged();
+    pNotesText->BroadcastObjectChange();
+    if (DrawDocShell* pDocShell = rViewShell.GetDocSh())
+        pDocShell->SetModified();
+
+    lcl_NotifySpeakerNotesChanged(nSlideId, rRequestId);
+    return true;
+}
 }
 
 void DrawViewShell::FuTransformDocumentStructure(SfxRequest& rReq)
@@ -739,6 +1112,11 @@ void DrawViewShell::FuTransformDocumentStructure(SfxRequest& rReq)
         (std::string(OUStringToOString(aDataJson, RTL_TEXTENCODING_UTF8))));
     try
     {
+        // read_json recurses once per nesting level: a client-relayed body
+        // nested deep enough would exhaust the stack, so it is refused as
+        // malformed first.
+        if (!sd::pdfpage::JsonNestingWithin(aStream.str(), sd::pdfpage::MODEL_MAX_JSON_NESTING))
+            throw boost::property_tree::json_parser::json_parser_error("nested too deeply", "", 0);
         boost::property_tree::read_json(aStream, aTree);
     }
     catch (...)
@@ -747,6 +1125,60 @@ void DrawViewShell::FuTransformDocumentStructure(SfxRequest& rReq)
         throw;
     }
 
+    const auto aRequestId = aTree.get_optional<std::string>("RequestId");
+    const auto aResponseChannel = aTree.get_optional<std::string>("ResponseChannel");
+    bool bSuccess = true;
+    bool bHasSpeakerNotesSlideId = false;
+    sal_uInt64 nSpeakerNotesSlideId = 0;
+
+    // Where the user's view was when the batch arrived, plus the batch's
+    // final slide-command key: agent batches must not hijack the user's view
+    // (the co-working contract), so unless the batch ENDS in a bare
+    // JumpToSlide/JumpToSlideByName - the one sanctioned way for a batch to
+    // navigate - the view is switched back to this page after the commands.
+    // The page is captured by IDENTITY, not position: Insert/Duplicate/
+    // Move/DeleteSlide renumber positions, and an index restore would land
+    // the user one slide off. Restore only applies in Page edit mode - the
+    // tab position in MasterPage mode indexes a different page list.
+    const sal_uInt16 nEntryPageId = maTabControl->GetCurPagePos();
+    const bool bEntryPageMode = GetEditMode() == EditMode::Page;
+    const SdPage* pEntryPage
+        = bEntryPageMode && nEntryPageId < GetDoc()->GetSdPageCount(PageKind::Standard)
+              ? GetDoc()->GetSdPage(nEntryPageId, PageKind::Standard)
+              : nullptr;
+    std::string aLastCommandKey;
+
+    // Objects created by this batch (InsertTextBox), reported back to the
+    // caller as slide index + ordinal so follow-up commands can address them.
+    std::vector<std::pair<int, sal_uInt32>> aCreatedObjects;
+    // The same objects by identity, for MarkCreated: ordNums shift when a
+    // FormatGroup in the same batch collapses members into a group object,
+    // pointers do not (the page keeps a reference).
+    std::vector<SdrObject*> aCreatedSdrObjects;
+
+    // Every undo action the transform's sub-commands generate lands inside
+    // ONE list action tagged with THIS view's id. The nested UnoCommand
+    // dispatches record their actions under whatever SfxViewShell::Current()
+    // is at creation time, which is not reliably the requesting view — the
+    // resulting top-of-stack entry then failed ImpSidUndo's COKit ownership
+    // check, and a plain .uno:Undo after an agent batch popped the
+    // document-repair dialog instead of undoing. One list action also makes
+    // one batch = one honest undo step. LeaveListAction prunes the entry
+    // when a read-only transform added no actions.
+    SfxUndoManager* pBatchUndoManager
+        = GetDocSh() ? GetDocSh()->GetUndoManager() : nullptr;
+    if (pBatchUndoManager)
+        pBatchUndoManager->EnterListAction(SdResId(STR_TRANSFORM), u""_ustr, 0,
+                                           GetViewShellBase().GetViewShellId());
+    comphelper::ScopeGuard aBatchUndoGuard(
+        [pBatchUndoManager]()
+        {
+            if (pBatchUndoManager)
+                pBatchUndoManager->LeaveListAction();
+        });
+
+    try
+    {
     // Iterate through the JSON data loaded into a tree structure
     for (const auto& aItem : aTree)
     {
@@ -772,16 +1204,31 @@ void DrawViewShell::FuTransformDocumentStructure(SfxRequest& rReq)
                                                  ? *aItem3Obj.second.ordered_begin()
                                                  : aItem3Obj;
 
+                        aLastCommandKey = aItem3.first;
+
                         sal_uInt16 nPageCount
                             = GetDoc()->GetSdPageCount(PageKind::Standard);
                         sal_uInt16 nMasterPageCount
                             = GetDoc()->GetMasterSdPageCount(PageKind::Standard);
 
-                        // InsertImageAt targets a specific page directly,
-                        // so skip view navigation to avoid jumping away
-                        // from the user's current slide.
+                        // These commands target a specific page directly, so
+                        // skip view navigation to avoid jumping away from the
+                        // user's current slide. The PDF canvas verbs name
+                        // their page in the value (BuildPdfPageModel
+                        // "<page>|...", DecomposePdfPages "a-b") or none at
+                        // all (AddWebFont registers a font process-wide);
+                        // the client posts them on its own, often while the
+                        // user is on another page, so a lazy SwitchPage here
+                        // would bounce the view (and end a live text edit)
+                        // before the entry-page restore below.
                         bool bDirectPageTarget
-                            = aItem3.first.starts_with("InsertImageAt.");
+                            = aItem3.first.starts_with("InsertImageAt.")
+                              || aItem3.first.starts_with("InsertTextBox.")
+                              || aItem3.first.starts_with("InsertShape.")
+                              || aItem3.first.starts_with("SetSpeakerNotes.")
+                              || aItem3.first == "DecomposePdfPages"
+                              || aItem3.first == "BuildPdfPageModel"
+                              || aItem3.first == "AddWebFont";
 
                         if (!bDirectPageTarget && nActPageId != nNextPageId)
                         {
@@ -792,11 +1239,29 @@ void DrawViewShell::FuTransformDocumentStructure(SfxRequest& rReq)
                                 nNextPageId = nPageCount - 1;
 
                             nActPageId = nNextPageId;
-                            // Make sure nActPageId is the current Page
-                            maTabControl->SetCurPageId(nActPageId);
-                            SdPage* pPageStandard
-                                = GetDoc()->GetSdPage(nActPageId, PageKind::Standard);
-                            mpDrawView->ShowSdrPage(pPageStandard);
+                            // Switch through the SHELL's own page navigation.
+                            // The raw SetCurPageId + ShowSdrPage pair this
+                            // replaced tore down the SdrPageView underneath
+                            // the current function's state: after ANY
+                            // interactive batch, rubber-band marking (and
+                            // with it marquee selection) was dead for the
+                            // rest of the session. SwitchPage is what a tab
+                            // click runs - it no-ops on the current page and
+                            // does the full bookkeeping across pages. It can
+                            // REFUSE (nested call, mid-paint deferral): then
+                            // view-addressed verbs would pair objects with
+                            // the wrong SdrPageView, so skip the command
+                            // rather than run it against the wrong page
+                            // (adversarial review #6).
+                            if (!SwitchPage(static_cast<sal_uInt16>(nActPageId),
+                                            /*bAllowChangeFocus=*/false)
+                                && maTabControl->GetCurPagePos() != nActPageId)
+                            {
+                                lcl_LogWarning(
+                                    "FillApi SlideCmd: page switch refused; skipping command");
+                                nActPageId = -1;
+                                continue;
+                            }
                         }
 
                         if (aItem3.first == "JumpToSlide")
@@ -900,6 +1365,15 @@ void DrawViewShell::FuTransformDocumentStructure(SfxRequest& rReq)
 
                             SdPage* pMPage = GetDoc()->GetMasterSdPage(nMasterPageId,
                                                                        PageKind::Standard);
+                            // The notes master paired with that slide master (masters
+                            // come in standard/notes pairs, as SdDrawPage::
+                            // setMasterPage pairs them). Handing the notes page the
+                            // SLIDE master made its next layout pass find no notes
+                            // placeholder there and create one ON the slide master,
+                            // so every slide showed "Click to edit the notes format"
+                            // and the export wrote it as plain text.
+                            SdPage* pNotesMPage
+                                = GetDoc()->GetMasterSdPage(nMasterPageId, PageKind::Notes);
                             SdPage* pPage
                                 = GetDoc()->GetSdPage(nActPageId, PageKind::Standard);
 
@@ -914,9 +1388,12 @@ void DrawViewShell::FuTransformDocumentStructure(SfxRequest& rReq)
                             SdPage* pPageNote
                                 = GetDoc()->GetSdPage(nNextPageId, PageKind::Notes);
 
-                            // Change master value
+                            // Change master value. Without a paired notes master the
+                            // notes page keeps the one CreatePage gave it (the
+                            // current slide's), never the slide master.
                             pPageStandard->TRG_SetMasterPage(*pMPage);
-                            pPageNote->TRG_SetMasterPage(*pMPage);
+                            if (pNotesMPage)
+                                pPageNote->TRG_SetMasterPage(*pNotesMPage);
                         }
                         else if (aItem3.first == "DeleteSlide")
                         {
@@ -942,6 +1419,33 @@ void DrawViewShell::FuTransformDocumentStructure(SfxRequest& rReq)
                                                    + aItem3.first + ": "
                                                    + std::to_string(nPageIdToDel) + "'");
                                     nPageIdToDel = 0;
+                                }
+                                // The undo actions take a reference on the
+                                // removed pages (standard + notes), making
+                                // the batch's list action restore them.
+                                //
+                                // ORDER IS LOAD-BEARING, and it is the notes
+                                // page FIRST. Both actions record their index
+                                // before either RemovePage runs, and the list
+                                // action replays children in REVERSE, so
+                                // registering notes first restores standard at
+                                // 2k+1 and only then notes at 2k+2 -- the
+                                // pairing every positional notes lookup depends
+                                // on (SdDrawPage::getNotesPage computes
+                                // (GetPageNum()-1)>>1). Registered the other
+                                // way round, undo interleaves the two lists and
+                                // the next save writes each slide its
+                                // neighbour's speaker notes. Upstream says the
+                                // same at unomodel.cxx:6043/:6320 ("The order
+                                // of adding the undo actions is important").
+                                if (pBatchUndoManager)
+                                {
+                                    pBatchUndoManager->AddUndoAction(
+                                        GetDoc()->GetSdrUndoFactory().CreateUndoDeletePage(
+                                            *GetDoc()->GetPage(nPageIdToDel * 2 + 2)));
+                                    pBatchUndoManager->AddUndoAction(
+                                        GetDoc()->GetSdrUndoFactory().CreateUndoDeletePage(
+                                            *GetDoc()->GetPage(nPageIdToDel * 2 + 1)));
                                 }
                                 GetDoc()->RemovePage(nPageIdToDel * 2 + 1);
                                 GetDoc()->RemovePage(nPageIdToDel * 2 + 1);
@@ -997,6 +1501,17 @@ void DrawViewShell::FuTransformDocumentStructure(SfxRequest& rReq)
                                 }
                                 int nSecond = 3 - nFirst;
 
+                                if (pBatchUndoManager)
+                                {
+                                    pBatchUndoManager->AddUndoAction(
+                                        GetDoc()->GetSdrUndoFactory().CreateUndoSetPageNum(
+                                            *GetDoc()->GetPage(nMoveFrom * 2 + nFirst),
+                                            nMoveFrom * 2 + nFirst, nMoveTo * 2 + nFirst));
+                                    pBatchUndoManager->AddUndoAction(
+                                        GetDoc()->GetSdrUndoFactory().CreateUndoSetPageNum(
+                                            *GetDoc()->GetPage(nMoveFrom * 2 + nSecond),
+                                            nMoveFrom * 2 + nSecond, nMoveTo * 2 + nSecond));
+                                }
                                 GetDoc()->MovePage(nMoveFrom * 2 + nFirst,
                                                    nMoveTo * 2 + nFirst);
                                 GetDoc()->MovePage(nMoveFrom * 2 + nSecond,
@@ -1041,6 +1556,17 @@ void DrawViewShell::FuTransformDocumentStructure(SfxRequest& rReq)
                                 nDupSlideId = 0;
                             }
                             GetDoc()->DuplicatePage(nDupSlideId);
+                            // Register the created standard + notes pages so
+                            // one undo removes the duplicate again.
+                            if (pBatchUndoManager)
+                            {
+                                pBatchUndoManager->AddUndoAction(
+                                    GetDoc()->GetSdrUndoFactory().CreateUndoCopyPage(
+                                        *GetDoc()->GetPage((nDupSlideId + 1) * 2 + 1)));
+                                pBatchUndoManager->AddUndoAction(
+                                    GetDoc()->GetSdrUndoFactory().CreateUndoCopyPage(
+                                        *GetDoc()->GetPage((nDupSlideId + 1) * 2 + 2)));
+                            }
                             // Jump to the created page.
                             nNextPageId = nDupSlideId + 1;
                             // Make sure the current page will be set also.
@@ -1089,9 +1615,63 @@ void DrawViewShell::FuTransformDocumentStructure(SfxRequest& rReq)
                         {
                             SdPage* pPageStandard
                                 = GetDoc()->GetSdPage(nActPageId, PageKind::Standard);
-                            pPageStandard->SetName(
-                                OStringToOUString(aItem3.second.get_value<std::string>(),
-                                                  RTL_TEXTENCODING_UTF8));
+                            const OUString aNewName = OStringToOUString(
+                                aItem3.second.get_value<std::string>(),
+                                RTL_TEXTENCODING_UTF8);
+                            // ModifyPageUndoAction reads the OLD name off the
+                            // page, so it must be created before SetName. The
+                            // visibility args mirror the interactive rename
+                            // (drviewsb.cxx): current master-layer state, so
+                            // undo/redo only ever changes the name.
+                            if (pBatchUndoManager)
+                            {
+                                SdrLayerAdmin& rLayerAdmin
+                                    = GetDoc()->GetLayerAdmin();
+                                const SdrLayerIDSet aVisibleLayers
+                                    = pPageStandard
+                                          ->TRG_GetMasterPageVisibleLayers();
+                                pBatchUndoManager->AddUndoAction(
+                                    std::make_unique<ModifyPageUndoAction>(
+                                        *GetDoc(), pPageStandard, aNewName,
+                                        pPageStandard->GetAutoLayout(),
+                                        aVisibleLayers.IsSet(
+                                            rLayerAdmin.GetLayerID(
+                                                sUNO_LayerName_background)),
+                                        aVisibleLayers.IsSet(
+                                            rLayerAdmin.GetLayerID(
+                                                sUNO_LayerName_background_objects))));
+                            }
+                            pPageStandard->SetName(aNewName);
+                        }
+                        else if (aItem3.first.starts_with("SetSpeakerNotes."))
+                        {
+                            const std::string aStableId = aItem3.first.substr(16);
+                            try
+                            {
+                                size_t nParsed = 0;
+                                nSpeakerNotesSlideId = std::stoull(aStableId, &nParsed);
+                                if (nParsed != aStableId.size())
+                                    throw std::invalid_argument("trailing characters");
+                                bHasSpeakerNotesSlideId = true;
+
+                                const OUString aNotes = OStringToOUString(
+                                    aItem3.second.get_value<std::string>(),
+                                    RTL_TEXTENCODING_UTF8);
+                                if (!lcl_SetSpeakerNotes(
+                                        *this, nSpeakerNotesSlideId, aNotes,
+                                        aRequestId ? std::string_view(*aRequestId)
+                                                   : std::string_view()))
+                                {
+                                    bSuccess = false;
+                                }
+                            }
+                            catch (const std::exception&)
+                            {
+                                lcl_LogWarning(
+                                    "FillApi SlideCmd SetSpeakerNotes: invalid stable slide ID in '"
+                                    + aItem3.first + "'");
+                                bSuccess = false;
+                            }
                         }
                         else if (aItem3.first.starts_with("SetText."))
                         {
@@ -1111,10 +1691,44 @@ void DrawViewShell::FuTransformDocumentStructure(SfxRequest& rReq)
                                 if (pSdrObj->IsSdrTextObj())
                                 {
                                     SdrTextObj* pSdrTxt = static_cast<SdrTextObj*>(pSdrObj);
-                                    pSdrTxt->SetText(OStringToOUString(
+                                    // Capture the old text BEFORE mutating so
+                                    // the batch's list action can revert it -
+                                    // SetText alone records nothing and the
+                                    // ack had to carry undoReliable:false.
+                                    if (pBatchUndoManager)
+                                        pBatchUndoManager->AddUndoAction(
+                                            GetDoc()->GetSdrUndoFactory()
+                                                .CreateUndoObjectSetText(*pSdrObj, 0));
+                                    // Keep the look. SdrTextObj::SetText replaces
+                                    // the runs with default-formatted text, so an
+                                    // object whose font / size / weight / colour
+                                    // ride the CHARACTER attributes (every imported
+                                    // PDF text run) came back in the default face —
+                                    // a one-pager headline re-set by the agent
+                                    // exported in Carlito. Replace the text the way
+                                    // typing does: through the outliner, over a
+                                    // selection of the whole text, so the inserted
+                                    // text inherits the attributes at the start.
+                                    const OUString aNewText = OStringToOUString(
                                         aItem3.second.get_value<std::string>(),
-                                        RTL_TEXTENCODING_UTF8));
-
+                                        RTL_TEXTENCODING_UTF8);
+                                    const OutlinerParaObject* pOPO
+                                        = pSdrTxt->GetOutlinerParaObject();
+                                    if (pOPO && pOPO->GetTextObject().GetParagraphCount() > 0)
+                                    {
+                                        // The model's draw outliner, configured for
+                                        // this text object (ImpGetDrawOutliner is
+                                        // svx-internal).
+                                        SdrOutliner& rOutl = GetDoc()->GetDrawOutliner(pSdrTxt);
+                                        rOutl.SetText(*pOPO);
+                                        rOutl.QuickInsertText(
+                                            aNewText,
+                                            ESelection(0, 0, EE_PARA_MAX, EE_TEXTPOS_MAX));
+                                        pSdrTxt->SetOutlinerParaObject(rOutl.CreateParaObject());
+                                        rOutl.Clear();
+                                    }
+                                    else
+                                        pSdrTxt->SetText(aNewText);
                                     // Todo: maybe with empty string it should work elseway?
                                     pSdrObj->SetEmptyPresObj(false);
                                 }
@@ -1125,6 +1739,87 @@ void DrawViewShell::FuTransformDocumentStructure(SfxRequest& rReq)
                                     "FillApi SlideCmd SetText: Object idx >= Object Count. '"
                                     + aItem3.first
                                     + "' (Object Count = " + std::to_string(nObjCount) + ")");
+                            }
+                        }
+                        else if (aItem3.first.starts_with("FitFrameToText."))
+                        {
+                            // Composable fit action (Slide Studio W1): size
+                            // the addressed text frame to its text, both
+                            // axes. ".all" walks every text frame on the
+                            // slide - the cleanup flow's first step.
+                            SdPage* pPageStandard
+                                = GetDoc()->GetSdPage(nActPageId, PageKind::Standard);
+                            const std::string aTarget = aItem3.first.substr(15);
+                            const int nObjCount = static_cast<int>(pPageStandard->GetObjCount());
+                            int nFrom = 0;
+                            int nTo = nObjCount - 1;
+                            if (aTarget != "all")
+                            {
+                                int nObjId = -1;
+                                try
+                                {
+                                    nObjId = stoi(aTarget);
+                                }
+                                catch (const std::exception&)
+                                {
+                                    lcl_LogWarning(
+                                        "FillApi SlideCmd FitFrameToText: invalid object index in '"
+                                        + aItem3.first + "'");
+                                    continue;
+                                }
+                                if (nObjId < 0 || nObjId >= nObjCount)
+                                {
+                                    lcl_LogWarning(
+                                        "FillApi SlideCmd FitFrameToText: Object idx out of range. '"
+                                        + aItem3.first
+                                        + "' (Object Count = " + std::to_string(nObjCount) + ")");
+                                    continue;
+                                }
+                                nFrom = nObjId;
+                                nTo = nObjId;
+                            }
+                            const bool bAllObjects = (aTarget == "all");
+                            for (int nIdx = nFrom; nIdx <= nTo; ++nIdx)
+                            {
+                                SdrObject* pSdrObj = pPageStandard->GetObj(nIdx);
+                                SdrTextObj* pSdrTxt = DynCastSdrTextObj(pSdrObj);
+                                if (!pSdrTxt || !pSdrTxt->HasText())
+                                    continue;
+                                // Tables: HasText() is unconditionally true
+                                // and getActiveText() is ONE CELL, so a fit
+                                // would relay the table to minimum-content
+                                // width from a single cell's text, discarding
+                                // authored column widths (review P1-6).
+                                if (pSdrTxt->GetObjIdentifier()
+                                    == SdrObjKind::Table)
+                                    continue;
+                                // ".all" keeps clear of FILLED design
+                                // shapes (a banner must not shrink to its
+                                // caption). Discriminate on the fill, not on
+                                // IsTextFrame: pptx text boxes import as
+                                // unfilled custom shapes, which is most of
+                                // every deck (adversarial review #5).
+                                if (bAllObjects && !pSdrTxt->IsTextFrame()
+                                    && pSdrTxt->GetObjIdentifier() != SdrObjKind::Text
+                                    && (pSdrTxt->GetMergedItem(XATTR_FILLSTYLE).GetValue()
+                                            != drawing::FillStyle_NONE
+                                        || pSdrTxt->GetMergedItem(XATTR_LINESTYLE).GetValue()
+                                               != drawing::LineStyle_NONE))
+                                    continue;
+                                // Fit means HUG: zero the vertical text
+                                // insets first so the fitted frame is the
+                                // text, not text plus padding a generator
+                                // baked in ("the bottom fits but not top" —
+                                // the top gap was the stored upper inset,
+                                // which the fit honored). Horizontal insets
+                                // stay: they set the wrap width, and
+                                // zeroing them reflows the text.
+                                lcl_FitFrameHug(GetDoc(), pSdrTxt,
+                                    [pBatchUndoManager](std::unique_ptr<SdrUndoAction> pUndo)
+                                    {
+                                        if (pBatchUndoManager)
+                                            pBatchUndoManager->AddUndoAction(std::move(pUndo));
+                                    });
                             }
                         }
                         else if (aItem3.first.starts_with("InsertImage."))
@@ -1241,6 +1936,469 @@ void DrawViewShell::FuTransformDocumentStructure(SfxRequest& rReq)
                                 }
                             }
                         }
+                        else if (aItem3.first.starts_with("InsertTextBox."))
+                        {
+                            // Format: InsertTextBox.SLIDE with value
+                            // "<x>,<y>[,<width>]|<text>" (Slide Studio W1).
+                            // Creates an unfilled, unstroked text box on the
+                            // addressed slide without moving the user's view.
+                            // x/y/width are 1/100 mm in the margin-INCLUSIVE
+                            // frame ExtractDocumentStructure reports, so the
+                            // page borders are subtracted before use. Literal
+                            // \n in the text become outliner paragraphs
+                            // (Outliner::SetText splits on LF - the same
+                            // mechanism SetText.OBJ above rides on).
+                            int nSlideId;
+                            try
+                            {
+                                nSlideId = stoi(aItem3.first.substr(14));
+                            }
+                            catch (const std::exception&)
+                            {
+                                lcl_LogWarning(
+                                    "FillApi SlideCmd InsertTextBox: invalid "
+                                    "slide index in '"
+                                    + aItem3.first + "'");
+                                continue;
+                            }
+                            if (nSlideId < 0 || nSlideId >= nPageCount)
+                            {
+                                lcl_LogWarning(
+                                    "FillApi SlideCmd InsertTextBox: slide "
+                                    "idx out of range. '"
+                                    + aItem3.first + "' (PageCount = "
+                                    + std::to_string(nPageCount) + ")");
+                                continue;
+                            }
+                            const std::string aValue
+                                = aItem3.second.get_value<std::string>();
+                            const std::size_t nSep = aValue.find('|');
+                            if (nSep == std::string::npos)
+                            {
+                                lcl_LogWarning(
+                                    "FillApi SlideCmd InsertTextBox: missing "
+                                    "'|' separator in '"
+                                    + aItem3.first + "' value");
+                                continue;
+                            }
+                            std::vector<::tools::Long> aCoords;
+                            sal_Int32 nStylePt = 0;
+                            bool bStyleBold = false;
+                            bool bStyleColor = false;
+                            Color aStyleColor;
+                            bool bBadCoords = false;
+                            std::stringstream aCoordList(
+                                aValue.substr(0, nSep));
+                            std::string aToken;
+                            while (std::getline(aCoordList, aToken, ','))
+                            {
+                                // Numeric fields are geometry; the optional
+                                // trailing style tokens (s<pt>, b, c<6hex>)
+                                // style the whole box's text.
+                                if (!aToken.empty()
+                                    && aToken.find_first_not_of(
+                                           "-0123456789")
+                                           == std::string::npos)
+                                {
+                                    try
+                                    {
+                                        aCoords.push_back(stoi(aToken));
+                                        continue;
+                                    }
+                                    catch (const std::exception&)
+                                    {
+                                        bBadCoords = true;
+                                        break;
+                                    }
+                                }
+                                if (!lcl_ParseInsertStyleToken(
+                                        aToken, nStylePt, bStyleBold,
+                                        bStyleColor, aStyleColor))
+                                {
+                                    bBadCoords = true;
+                                    break;
+                                }
+                            }
+                            if (bBadCoords || aCoords.size() < 2
+                                || aCoords.size() > 3)
+                            {
+                                lcl_LogWarning(
+                                    "FillApi SlideCmd InsertTextBox: invalid "
+                                    "geometry in '"
+                                    + aItem3.first
+                                    + "' value (expected "
+                                      "x,y[,width][,style...])");
+                                continue;
+                            }
+
+                            SdPage* pPage = GetDoc()->GetSdPage(
+                                nSlideId, PageKind::Standard);
+                            const ::tools::Long nX
+                                = aCoords[0] - pPage->GetLeftBorder();
+                            const ::tools::Long nY
+                                = aCoords[1] - pPage->GetUpperBorder();
+                            const bool bHasWidth = aCoords.size() == 3;
+                            // Provisional rect: the given width plus a dummy
+                            // height, or the page size so unwrapped text can
+                            // measure its natural width (the text paste
+                            // recipe, svdxcgv.cxx); the fit below settles it.
+                            ::tools::Rectangle aRect(
+                                Point(nX, nY),
+                                bHasWidth ? Size(aCoords[2], 1000)
+                                          : pPage->GetSize());
+                            rtl::Reference<SdrRectObj> pObj = new SdrRectObj(
+                                *GetDoc(), aRect, SdrObjKind::Text);
+                            // SetText before SetAttr (svdxcgv.cxx).
+                            pObj->NbcSetText(OStringToOUString(
+                                aValue.substr(nSep + 1),
+                                RTL_TEXTENCODING_UTF8));
+
+                            SfxItemSet aBoxAttr(GetDoc()->GetItemPool());
+                            aBoxAttr.Put(
+                                XLineStyleItem(drawing::LineStyle_NONE));
+                            aBoxAttr.Put(
+                                XFillStyleItem(drawing::FillStyle_NONE));
+                            aBoxAttr.Put(makeSdrTextAutoGrowHeightItem(true));
+                            if (bHasWidth)
+                                aBoxAttr.Put(
+                                    makeSdrTextAutoGrowWidthItem(false));
+                            aBoxAttr.Put(makeSdrTextMinFrameHeightItem(0));
+                            aBoxAttr.Put(makeSdrTextMinFrameWidthItem(0));
+                            lcl_PutInsertStyleItems(aBoxAttr, nStylePt,
+                                                    bStyleBold, bStyleColor,
+                                                    aStyleColor);
+                            pObj->SetMergedItemSet(aBoxAttr);
+
+                            pPage->InsertObject(pObj.get());
+                            if (pBatchUndoManager)
+                                pBatchUndoManager->AddUndoAction(
+                                    GetDoc()->GetSdrUndoFactory()
+                                        .CreateUndoNewObject(*pObj));
+
+                            if (bHasWidth)
+                            {
+                                // Keep the given width; settle the height on
+                                // the wrapped text.
+                                pObj->AdjustTextFrameWidthAndHeight();
+                            }
+                            else
+                            {
+                                // Hug the text on both axes, top-left
+                                // anchored, then let the box keep hugging
+                                // it: autogrow width is enabled only now so
+                                // the page-wide provisional rect never
+                                // shrinks center-anchored.
+                                // (The insert undo covers the new object
+                                // wholesale, so the hug's undo recorder is
+                                // a no-op here.)
+                                lcl_FitFrameHug(GetDoc(), pObj.get(),
+                                    [](std::unique_ptr<SdrUndoAction>) {});
+                                pObj->SetMergedItem(
+                                    makeSdrTextAutoGrowWidthItem(true));
+                                // The fit ran through SetLogicRect, whose
+                                // AdaptTextMinSize reseeded the min-frame
+                                // floor from the fitted rect; zero it again
+                                // so the box can shrink with its text.
+                                pObj->SetMergedItem(
+                                    makeSdrTextMinFrameHeightItem(0));
+                                pObj->SetMergedItem(
+                                    makeSdrTextMinFrameWidthItem(0));
+                            }
+
+                            aCreatedObjects.emplace_back(nSlideId,
+                                                         pObj->GetOrdNum());
+                            aCreatedSdrObjects.push_back(pObj.get());
+                            KitHelper::notifyInvalidation(&GetViewShellBase(),
+                                                          nSlideId, nullptr);
+                        }
+                        else if (aItem3.first.starts_with("InsertShape."))
+                        {
+                            // Format: InsertShape.SLIDE with value
+                            // "<kind>,<x>,<y>,<w>,<h>,<fill>,<line>
+                            // [,<textColor>][|<text>]" (Slide Studio asset
+                            // library: pre-grouped assets are built from
+                            // these plus InsertTextBox above). kind is
+                            // ellipse|rect|rounded. x/y are 1/100 mm in the
+                            // margin-INCLUSIVE frame (borders subtracted,
+                            // as InsertTextBox); w/h must be positive and
+                            // stay authoritative - the shape never
+                            // autogrows. fill/line/textColor are 6-digit
+                            // lowercase hex RGB or "none". The optional
+                            // |<text> is centered on both axes; literal \n
+                            // become outliner paragraphs.
+                            int nSlideId;
+                            try
+                            {
+                                nSlideId = stoi(aItem3.first.substr(12));
+                            }
+                            catch (const std::exception&)
+                            {
+                                lcl_LogWarning(
+                                    "FillApi SlideCmd InsertShape: invalid "
+                                    "slide index in '"
+                                    + aItem3.first + "'");
+                                continue;
+                            }
+                            if (nSlideId < 0 || nSlideId >= nPageCount)
+                            {
+                                lcl_LogWarning(
+                                    "FillApi SlideCmd InsertShape: slide "
+                                    "idx out of range. '"
+                                    + aItem3.first + "' (PageCount = "
+                                    + std::to_string(nPageCount) + ")");
+                                continue;
+                            }
+                            const std::string aValue
+                                = aItem3.second.get_value<std::string>();
+                            const std::size_t nSep = aValue.find('|');
+                            const bool bHasText
+                                = nSep != std::string::npos;
+
+                            std::vector<std::string> aFields;
+                            std::stringstream aFieldList(
+                                bHasText ? aValue.substr(0, nSep) : aValue);
+                            std::string aToken;
+                            while (std::getline(aFieldList, aToken, ','))
+                                aFields.push_back(aToken);
+                            if (aFields.size() < 7 || aFields.size() > 10)
+                            {
+                                lcl_LogWarning(
+                                    "FillApi SlideCmd InsertShape: invalid "
+                                    "value (expected kind,x,y,w,h,fill,line"
+                                    "[,textColor][,style...][|text])");
+                                continue;
+                            }
+                            const std::string& aKind = aFields[0];
+                            // formtext / formcheck: a real form control
+                            // (field authoring from the page canvas).
+                            const bool bFormKind
+                                = aKind == "formtext" || aKind == "formcheck";
+                            if (aKind != "ellipse" && aKind != "rect"
+                                && aKind != "rounded" && !bFormKind)
+                            {
+                                lcl_LogWarning(
+                                    "FillApi SlideCmd InsertShape: unknown "
+                                    "kind '" + aKind + "'");
+                                continue;
+                            }
+                            ::tools::Long nX = 0;
+                            ::tools::Long nY = 0;
+                            ::tools::Long nW = 0;
+                            ::tools::Long nH = 0;
+                            try
+                            {
+                                nX = stoi(aFields[1]);
+                                nY = stoi(aFields[2]);
+                                nW = stoi(aFields[3]);
+                                nH = stoi(aFields[4]);
+                            }
+                            catch (const std::exception&)
+                            {
+                                lcl_LogWarning(
+                                    "FillApi SlideCmd InsertShape: invalid "
+                                    "geometry in '"
+                                    + aItem3.first + "' value");
+                                continue;
+                            }
+                            if (nW <= 0 || nH <= 0)
+                            {
+                                lcl_LogWarning(
+                                    "FillApi SlideCmd InsertShape: width "
+                                    "and height must be positive");
+                                continue;
+                            }
+                            Color aFillColor;
+                            Color aLineColor;
+                            Color aTextColor;
+                            const bool bFillNone = aFields[5] == "none";
+                            const bool bLineNone = aFields[6] == "none";
+                            if ((!bFillNone
+                                 && !lcl_ParseHexColor(aFields[5],
+                                                       aFillColor))
+                                || (!bLineNone
+                                    && !lcl_ParseHexColor(aFields[6],
+                                                          aLineColor)))
+                            {
+                                lcl_LogWarning(
+                                    "FillApi SlideCmd InsertShape: invalid "
+                                    "color (expected 6-digit lowercase hex "
+                                    "or 'none')");
+                                continue;
+                            }
+                            // Tail fields: at most one bare 6-hex (or
+                            // 'none') textColor - kept for the original
+                            // 8-field grammar - plus the shared style
+                            // tokens (s<pt>, b, c<6hex>; the c token is
+                            // textColor too).
+                            bool bHasTextColor = false;
+                            sal_Int32 nStylePt = 0;
+                            bool bStyleBold = false;
+                            bool bBadTail = false;
+                            for (size_t nTail = 7; nTail < aFields.size();
+                                 ++nTail)
+                            {
+                                const std::string& rField = aFields[nTail];
+                                if (rField == "none")
+                                    continue;
+                                Color aParsed;
+                                if (!bHasTextColor
+                                    && lcl_ParseHexColor(rField, aParsed))
+                                {
+                                    aTextColor = aParsed;
+                                    bHasTextColor = true;
+                                    continue;
+                                }
+                                if (lcl_ParseInsertStyleToken(
+                                        rField, nStylePt, bStyleBold,
+                                        bHasTextColor, aTextColor))
+                                    continue;
+                                bBadTail = true;
+                                break;
+                            }
+                            if (bBadTail)
+                            {
+                                lcl_LogWarning(
+                                    "FillApi SlideCmd InsertShape: invalid "
+                                    "tail field (expected textColor or "
+                                    "style tokens)");
+                                continue;
+                            }
+
+                            SdPage* pPage = GetDoc()->GetSdPage(
+                                nSlideId, PageKind::Standard);
+                            const ::tools::Rectangle aRect(
+                                Point(nX - pPage->GetLeftBorder(),
+                                      nY - pPage->GetUpperBorder()),
+                                Size(nW, nH));
+                            if (bFormKind)
+                            {
+                                // Form-field AUTHORING (edit behaviour): a
+                                // movable form control that exports as an
+                                // AcroForm field (ExportFormFields) and
+                                // re-imports as one (svdpdf.cxx). |text is
+                                // the field name. Filling is the viewer's.
+                                const bool bCheck = aKind == "formcheck";
+                                rtl::Reference<SdrObject> pCtl
+                                    = SdrObjFactory::MakeNewObject(
+                                        *GetDoc(), SdrInventor::FmForm,
+                                        bCheck ? SdrObjKind::FormCheckbox
+                                               : SdrObjKind::FormEdit);
+                                SdrUnoObj* pUno
+                                    = dynamic_cast<SdrUnoObj*>(pCtl.get());
+                                if (!pUno)
+                                {
+                                    rtl::Reference<SdrUnoObj> pPlain
+                                        = new SdrUnoObj(
+                                            *GetDoc(),
+                                            bCheck ? u"com.sun.star.form.component.CheckBox"_ustr
+                                                   : u"com.sun.star.form.component.TextField"_ustr);
+                                    pUno = pPlain.get();
+                                    pCtl = pPlain.get();
+                                }
+                                pUno->SetLogicRect(aRect);
+                                css::uno::Reference<css::beans::XPropertySet>
+                                    xProps(pUno->GetUnoControlModel(),
+                                           css::uno::UNO_QUERY);
+                                if (xProps.is())
+                                {
+                                    try
+                                    {
+                                        if (bHasText)
+                                            xProps->setPropertyValue(
+                                                u"Name"_ustr,
+                                                cpo::uno::Any(OStringToOUString(
+                                                    aValue.substr(nSep + 1),
+                                                    RTL_TEXTENCODING_UTF8)));
+                                        xProps->setPropertyValue(
+                                            u"Border"_ustr,
+                                            cpo::uno::Any(sal_Int16(2)));
+                                        if (bCheck)
+                                            xProps->setPropertyValue(
+                                                u"Label"_ustr,
+                                                cpo::uno::Any(OUString()));
+                                    }
+                                    catch (const css::uno::Exception&)
+                                    {
+                                    }
+                                }
+                                pPage->InsertObject(pCtl.get());
+                                if (pBatchUndoManager)
+                                    pBatchUndoManager->AddUndoAction(
+                                        GetDoc()->GetSdrUndoFactory()
+                                            .CreateUndoNewObject(*pCtl));
+                                aCreatedObjects.emplace_back(
+                                    nSlideId, pCtl->GetOrdNum());
+                                aCreatedSdrObjects.push_back(pCtl.get());
+                                KitHelper::notifyInvalidation(
+                                    &GetViewShellBase(), nSlideId, nullptr);
+                                continue;
+                            }
+                            rtl::Reference<SdrRectObj> pObj;
+                            if (aKind == "ellipse")
+                                pObj = new SdrCircObj(
+                                    *GetDoc(), SdrCircKind::Full, aRect);
+                            else
+                                pObj = new SdrRectObj(*GetDoc(), aRect);
+                            // SetText before SetAttr (svdxcgv.cxx); the
+                            // EE_CHAR_COLOR below lands on existing
+                            // paragraphs via TextProperties::ItemSetChanged.
+                            if (bHasText)
+                                pObj->NbcSetText(OStringToOUString(
+                                    aValue.substr(nSep + 1),
+                                    RTL_TEXTENCODING_UTF8));
+
+                            SfxItemSet aShapeAttr(GetDoc()->GetItemPool());
+                            if (bFillNone)
+                                aShapeAttr.Put(
+                                    XFillStyleItem(drawing::FillStyle_NONE));
+                            else
+                            {
+                                aShapeAttr.Put(XFillStyleItem(
+                                    drawing::FillStyle_SOLID));
+                                aShapeAttr.Put(XFillColorItem(OUString(),
+                                                              aFillColor));
+                            }
+                            if (bLineNone)
+                                aShapeAttr.Put(
+                                    XLineStyleItem(drawing::LineStyle_NONE));
+                            else
+                            {
+                                aShapeAttr.Put(XLineStyleItem(
+                                    drawing::LineStyle_SOLID));
+                                aShapeAttr.Put(XLineColorItem(OUString(),
+                                                              aLineColor));
+                            }
+                            // Assets keep their drawn size: no autogrow on
+                            // either axis, text centered inside the shape.
+                            aShapeAttr.Put(
+                                makeSdrTextAutoGrowWidthItem(false));
+                            aShapeAttr.Put(
+                                makeSdrTextAutoGrowHeightItem(false));
+                            aShapeAttr.Put(SdrTextVertAdjustItem(
+                                SDRTEXTVERTADJUST_CENTER));
+                            aShapeAttr.Put(SdrTextHorzAdjustItem(
+                                SDRTEXTHORZADJUST_CENTER));
+                            if (aKind == "rounded")
+                                aShapeAttr.Put(makeSdrEckenradiusItem(
+                                    std::min(nW, nH) / 8));
+                            lcl_PutInsertStyleItems(aShapeAttr, nStylePt,
+                                                    bStyleBold,
+                                                    bHasTextColor,
+                                                    aTextColor);
+                            pObj->SetMergedItemSet(aShapeAttr);
+
+                            pPage->InsertObject(pObj.get());
+                            if (pBatchUndoManager)
+                                pBatchUndoManager->AddUndoAction(
+                                    GetDoc()->GetSdrUndoFactory()
+                                        .CreateUndoNewObject(*pObj));
+
+                            aCreatedObjects.emplace_back(nSlideId,
+                                                         pObj->GetOrdNum());
+                            aCreatedSdrObjects.push_back(pObj.get());
+                            KitHelper::notifyInvalidation(&GetViewShellBase(),
+                                                          nSlideId, nullptr);
+                        }
                         else if (aItem3.first == "MarkObject"
                                  || aItem3.first == "UnMarkObject")
                         {
@@ -1272,7 +2430,667 @@ void DrawViewShell::FuTransformDocumentStructure(SfxRequest& rReq)
                                     + "' (Object Count = " + std::to_string(nObjId));
                             }
                         }
+                        else if (aItem3.first == "MarkObjectPath")
+                        {
+                            // "<page ordinal>/<member ordinal>[/...]": a member
+                            // of a group the view has ENTERED — the browser's
+                            // owned press inside a group selects it by path,
+                            // the way MarkObject selects a page object by
+                            // ordinal. The leaf is marked; a broken path marks
+                            // nothing (and says so).
+                            SdPage* pPageStandard
+                                = GetDoc()->GetSdPage(nActPageId, PageKind::Standard);
+                            SdrObjList* pList = pPageStandard;
+                            SdrObject* pLeaf = nullptr;
+                            bool bWalked = true;
+                            std::stringstream aPath(aItem3.second.get_value<std::string>());
+                            std::string aToken;
+                            while (bWalked && std::getline(aPath, aToken, '/'))
+                            {
+                                int nId = -1;
+                                try
+                                {
+                                    nId = stoi(aToken);
+                                }
+                                catch (const std::exception&)
+                                {
+                                    bWalked = false;
+                                    break;
+                                }
+                                if (!pList || nId < 0
+                                    || static_cast<size_t>(nId) >= pList->GetObjCount())
+                                {
+                                    bWalked = false;
+                                    break;
+                                }
+                                pLeaf = pList->GetObj(nId);
+                                pList = pLeaf ? pLeaf->GetSubList() : nullptr;
+                            }
+                            if (bWalked && pLeaf)
+                                mpDrawView->MarkObj(pLeaf, mpDrawView->GetSdrPageView());
+                            else
+                                lcl_LogWarning("FillApi SlideCmd MarkObjectPath: no object at '"
+                                               + aItem3.second.get_value<std::string>() + "'");
+                        }
+                        else if (aItem3.first == "UnmarkAll")
+                        {
+                            // A command batch must start from a clean
+                            // selection: MarkObject appends to the session's
+                            // live marks, and JumpToSlide only clears them
+                            // when it actually navigates to another page.
+                            //
+                            // A live text edit ends first, the way a click
+                            // away ends it (FuText::MouseButtonDown): the
+                            // browser's owned press gesture re-aims the
+                            // selection with this verb while the caret is in
+                            // another box ("type here, grab that"), and an
+                            // edit left running on an object the batch just
+                            // unmarked is a state no user gesture can reach.
+                            // On a deck the text function stays current, so
+                            // the click the browser forwards after the batch
+                            // starts editing the box it lands on.
+                            //
+                            // On the PDF page canvas (Draw) the browser
+                            // instead replays a double-click on the object
+                            // the batch marks (VulcanImpressSelectEcho
+                            // enterTextAt), and with the text function current
+                            // a double-click re-enters that function's own
+                            // text object (FuText::MouseButtonDown, two
+                            // clicks), the box this batch or an Escape just
+                            // left, wherever the click landed: the caret came
+                            // back at the end of the old box, and when that
+                            // failed the new one stayed marked for Backspace
+                            // to delete. The function also outlives the gesture
+                            // (an owned press sends core no mouse-up), so the
+                            // selection function takes over here, as a second
+                            // Escape would (FuPoor::cancel), before the
+                            // replayed click arrives.
+                            //
+                            // This verb runs inside FuTemporary, which has put
+                            // the permanent function aside (it is the OLD
+                            // function until Cancel() restores it after the
+                            // batch), unless a verb earlier in the batch has
+                            // already restored it (.uno:LeaveGroup's own
+                            // Cancel()): the text function is whichever of the
+                            // two holds it. FuPermanent makes the selection
+                            // function the permanent one in either case and
+                            // disposes the text function, so Cancel() restores
+                            // selection.
+                            if (mpDrawView->IsTextEdit())
+                                mpDrawView->SdrEndTextEdit();
+                            mpDrawView->UnmarkAll();
+                            const rtl::Reference<FuPoor> xPermanentFunction
+                                = HasCurrentFunction() ? GetCurrentFunction()
+                                                       : GetOldFunction();
+                            if (GetDoc()->GetDocumentType() == DocumentType::Draw
+                                && dynamic_cast<FuText*>(xPermanentFunction.get()))
+                            {
+                                SfxRequest aSelectReq(SID_OBJECT_SELECT, SfxCallMode::SLOT,
+                                                      GetDoc()->GetItemPool());
+                                FuPermanent(aSelectReq);
+                            }
+                        }
 
+                        else if (aItem3.first == "DecomposePdfPages")
+                        {
+                            // A PDF opens as ONE protected graphic per page
+                            // (SdPdfFilter). To edit it, every page's graphic
+                            // is decomposed into drawing-level objects - text,
+                            // paths, images - the way the Break action does
+                            // for a marked graphic, but for the whole document
+                            // at once, page-addressed (no view navigation), and
+                            // WITHOUT touching the undo stack or the modified
+                            // flag: opening a PDF to edit it is not itself an
+                            // edit (an untouched document closes without a
+                            // save, byte-identical), and there is no "undo"
+                            // back into an uneditable picture. Pages already
+                            // decomposed are skipped, so a second call (a
+                            // second editor joining) is a no-op.
+                            // Undo, the doc shell's modified tracking and
+                            // the modified flag are restored however the
+                            // block exits (a throw included - the batch
+                            // rethrows, and undo must not stay off for the
+                            // rest of the session).
+                            const bool bUndoEnabled = GetDoc()->IsUndoEnabled();
+                            const bool bWasChanged = GetDoc()->IsChanged();
+                            DrawDocShell* const pOpenDocShell = GetDocSh();
+                            const bool bSetModifiedEnabled
+                                = pOpenDocShell && pOpenDocShell->IsEnableSetModified();
+                            GetDoc()->EnableUndo(false);
+                            if (pOpenDocShell)
+                                pOpenDocShell->EnableSetModified(false);
+                            comphelper::ScopeGuard aOpenRestore(
+                                [this, pOpenDocShell, bSetModifiedEnabled, bUndoEnabled,
+                                 bWasChanged]()
+                                {
+                                    if (pOpenDocShell)
+                                        pOpenDocShell->EnableSetModified(bSetModifiedEnabled);
+                                    GetDoc()->EnableUndo(bUndoEnabled);
+                                    GetDoc()->SetChanged(bWasChanged);
+                                });
+                            sal_uInt16 nDecomposed = 0;
+                            // The value picks the pages: true = every page
+                            // (one long verb on a big document), a number =
+                            // that page, "a-b" = that range. The client asks
+                            // for the page in view first and sweeps the rest
+                            // in ranges, so a 150-page PDF is editable where
+                            // the reader is within a moment instead of after
+                            // the whole document has been taken apart.
+                            sal_uInt16 nFirst = 0;
+                            sal_uInt16 nLast = nPageCount ? nPageCount - 1 : 0;
+                            {
+                                const std::string aWhich
+                                    = aItem3.second.get_value<std::string>();
+                                const size_t nDash = aWhich.find('-');
+                                if (!aWhich.empty() && aWhich != "true"
+                                    && std::isdigit(static_cast<unsigned char>(aWhich[0])))
+                                {
+                                    const int nA = std::atoi(aWhich.c_str());
+                                    const int nB = nDash == std::string::npos
+                                                       ? nA
+                                                       : std::atoi(aWhich.c_str() + nDash + 1);
+                                    nFirst = static_cast<sal_uInt16>(
+                                        std::clamp(nA, 0, std::max(0, nPageCount - 1)));
+                                    nLast = static_cast<sal_uInt16>(
+                                        std::clamp(nB, static_cast<int>(nFirst),
+                                                   std::max(0, nPageCount - 1)));
+                                }
+                            }
+                            // One family-name font map per PDF, kept across
+                            // calls (sd::pdfpage::SharedImportFonts): the
+                            // importer walks the whole document's text to
+                            // build it, which done per page - or per range
+                            // call of the client's sweep - was quadratic in
+                            // pages.
+                            for (sal_uInt16 nPage = nFirst; nPage <= nLast && nPage < nPageCount; ++nPage)
+                            {
+                                SdPage* pPage = GetDoc()->GetSdPage(nPage, PageKind::Standard);
+                                SdrGrafObj* pGraf = pPage ? pPage->GetPdfPageGraphic() : nullptr;
+                                if (!pGraf)
+                                    continue;
+                                const size_t nGrafPos = pGraf->GetOrdNum();
+                                const size_t nInserted = SdrEditView::ImportPdfGraphic(
+                                    *pGraf, *pPage, nGrafPos + 1,
+                                    sd::pdfpage::SharedImportFonts(*pGraf));
+                                if (nInserted == 0)
+                                {
+                                    lcl_LogWarning(
+                                        "FillApi SlideCmd DecomposePdfPages: page "
+                                        + std::to_string(nPage) + " could not be decomposed");
+                                    continue;
+                                }
+                                // The graphic kept its position; the imported
+                                // objects follow it.
+                                pPage->RemoveObject(nGrafPos);
+                                ++nDecomposed;
+                                // What the PDF stores is not what a person
+                                // calls the page's objects — but that reading
+                                // is the host's now: an editor with a host asks
+                                // for the page's raw model (.uno:PdfPageModel
+                                // raw=1) and builds the host's analysis of it
+                                // (BuildPdfPageModel). This verb is the fallback
+                                // without a host, and it leaves the importer's
+                                // objects as they are.
+                                // Tell EVERY view the page changed. The model
+                                // broadcasts alone do not reach the clients
+                                // here: the imported objects arrive through
+                                // NbcInsertObject (no broadcast), and the
+                                // removed graphic's ObjectRemoved hint carries
+                                // its LAST bound rect, which a vector-rendering
+                                // kit that never painted the page leaves
+                                // empty - so nothing invalidated, and a client
+                                // kept its picture payload until something
+                                // else repainted (slot-03, 2026-09-03: the page
+                                // decomposed in the model, the canvas showed
+                                // the flagged picture for 90 s). Whole-part
+                                // invalidation, the way InsertTextBox/
+                                // InsertShape announce their objects.
+                                SfxViewShell* pThisView = &GetViewShellBase();
+                                KitHelper::notifyInvalidation(pThisView, nPage, nullptr);
+                                KitHelper::forEachOtherView(
+                                    pThisView, [nPage](SfxViewShell* pOtherView) {
+                                        KitHelper::notifyInvalidation(pOtherView, nPage,
+                                                                      nullptr);
+                                    });
+                            }
+                            if (nDecomposed == 0)
+                                lcl_LogWarning(
+                                    "FillApi SlideCmd DecomposePdfPages: no page graphic to decompose");
+                        }
+
+                        else if (aItem3.first == "BuildPdfPageModel")
+                        {
+                            // A PDF the one-pager skill made carries the
+                            // editor's object model as an embedded file; the
+                            // host serves it and the client hands it here as
+                            // "<page>|<base64 json>". The page's objects are
+                            // built from the model — the importer's own
+                            // recipe with explicit attributes — and the
+                            // protected page graphic is dropped, exactly as
+                            // DecomposePdfPages does, but with no pdfium
+                            // heuristics and no structuring pass: what the
+                            // renderer measured is what the page shows. Undo
+                            // and the modified flag stay untouched (opening
+                            // is not an edit). A model that builds nothing
+                            // leaves the graphic in place, so the client's
+                            // decompose fallback still has a page to take apart.
+                            const std::string aVal = aItem3.second.get_value<std::string>();
+                            const size_t nBar = aVal.find('|');
+                            int nPage = -1;
+                            if (nBar != std::string::npos && nBar > 0)
+                            {
+                                try
+                                {
+                                    nPage = std::stoi(aVal.substr(0, nBar));
+                                }
+                                catch (const std::exception&)
+                                {
+                                    nPage = -1;
+                                }
+                            }
+                            if (nPage < 0 || nPage >= nPageCount)
+                            {
+                                lcl_LogWarning("FillApi SlideCmd BuildPdfPageModel: malformed value "
+                                               "(expected <page>|<base64 json>)");
+                                continue;
+                            }
+                            boost::property_tree::ptree aModel;
+                            bool bParsed = false;
+                            {
+                                cpo::uno::Sequence<sal_Int8> aBytes;
+                                comphelper::Base64::decode(aBytes, std::string_view(aVal).substr(nBar + 1));
+                                if (aBytes.hasElements())
+                                {
+                                    std::string aJson(reinterpret_cast<const char*>(aBytes.getConstArray()),
+                                                      static_cast<size_t>(aBytes.getLength()));
+                                    std::istringstream aModelStream(aJson);
+                                    try
+                                    {
+                                        // Bounded before read_json recurses
+                                        // into it (one level per nesting).
+                                        if (!sd::pdfpage::JsonNestingWithin(
+                                                aJson, sd::pdfpage::MODEL_MAX_JSON_NESTING))
+                                            throw boost::property_tree::json_parser::
+                                                json_parser_error("nested too deeply", "", 0);
+                                        boost::property_tree::read_json(aModelStream, aModel);
+                                        bParsed = true;
+                                    }
+                                    catch (const std::exception& e)
+                                    {
+                                        lcl_LogWarning(std::string("FillApi SlideCmd BuildPdfPageModel: "
+                                                                   "model is not JSON: ")
+                                                       + e.what());
+                                    }
+                                }
+                                else
+                                    lcl_LogWarning("FillApi SlideCmd BuildPdfPageModel: empty model");
+                            }
+                            if (!bParsed)
+                                continue;
+                            SdPage* pPage = GetDoc()->GetSdPage(static_cast<sal_uInt16>(nPage),
+                                                                PageKind::Standard);
+                            SdrGrafObj* pGraf = pPage ? pPage->GetPdfPageGraphic() : nullptr;
+                            if (!pGraf)
+                            {
+                                lcl_LogWarning("FillApi SlideCmd BuildPdfPageModel: page "
+                                               + std::to_string(nPage) + " has no page graphic");
+                                continue;
+                            }
+                            // Restored however the block exits, as in
+                            // DecomposePdfPages; the scratch import dies first
+                            // (declared after the guard).
+                            const bool bUndoEnabled = GetDoc()->IsUndoEnabled();
+                            const bool bWasChanged = GetDoc()->IsChanged();
+                            DrawDocShell* const pOpenDocShell = GetDocSh();
+                            const bool bSetModifiedEnabled
+                                = pOpenDocShell && pOpenDocShell->IsEnableSetModified();
+                            GetDoc()->EnableUndo(false);
+                            if (pOpenDocShell)
+                                pOpenDocShell->EnableSetModified(false);
+                            comphelper::ScopeGuard aOpenRestore(
+                                [this, pOpenDocShell, bSetModifiedEnabled, bUndoEnabled,
+                                 bWasChanged]()
+                                {
+                                    if (pOpenDocShell)
+                                        pOpenDocShell->EnableSetModified(bSetModifiedEnabled);
+                                    GetDoc()->EnableUndo(bUndoEnabled);
+                                    GetDoc()->SetChanged(bWasChanged);
+                                });
+                            const size_t nGrafPos = pGraf->GetOrdNum();
+                            const tools::Rectangle aFrame = pGraf->GetLogicRect();
+                            // A model that points at importer objects (form
+                            // controls, which it cannot express) gets them
+                            // from a fresh import on a scratch page, by the
+                            // ordinal the raw model gave them.
+                            rtl::Reference<SdPage> xImported;
+                            if (sd::pdfpage::ModelKeepsImportedObjects(aModel))
+                            {
+                                xImported = GetDoc()->AllocSdPage(false);
+                                xImported->SetSize(pPage->GetSize());
+                                SdrEditView::ImportPdfGraphic(*pGraf, *xImported, 0,
+                                                              sd::pdfpage::SharedImportFonts(*pGraf));
+                            }
+                            const sd::pdfpage::ModelBuildStats aBuilt = sd::pdfpage::BuildPdfPageModel(
+                                *GetDoc(), *pPage, aFrame, nGrafPos + 1, aModel, xImported.get());
+                            if (aBuilt.built() == 0)
+                            {
+                                lcl_LogWarning("FillApi SlideCmd BuildPdfPageModel: page "
+                                               + std::to_string(nPage) + ": " + aBuilt.sError);
+                                continue;
+                            }
+                            pPage->RemoveObject(nGrafPos);
+                            SfxViewShell* pThisView = &GetViewShellBase();
+                            KitHelper::notifyInvalidation(pThisView, nPage, nullptr);
+                            KitHelper::forEachOtherView(
+                                pThisView, [nPage](SfxViewShell* pOtherView) {
+                                    KitHelper::notifyInvalidation(pOtherView, nPage, nullptr);
+                                });
+                            if (aBuilt.nSkipped)
+                                lcl_LogWarning("FillApi SlideCmd BuildPdfPageModel: page "
+                                               + std::to_string(nPage) + ": "
+                                               + std::to_string(aBuilt.nSkipped)
+                                               + " model entries could not be built");
+                        }
+                        else if (aItem3.first == "AddWebFont")
+                        {
+                            // A decomposed PDF names each run's font by the
+                            // family the PDF carries. The client downloads any
+                            // family the image does not ship (from Google
+                            // Fonts) and hands the full TTF here, so the EDIT
+                            // re-flow lays text out in the real font instead of
+                            // a wider generic substitute (the balloon). This is
+                            // the full-font path - not the embedded glyph
+                            // SUBSET (that reconstruction is what crashes, and
+                            // is skipped on import) - so AddTempDevFont, which
+                            // the document-embedded-fonts path itself uses, is
+                            // safe. Registered under the wire family name so the
+                            // object's font attribute resolves to it. Fail-open:
+                            // a malformed value or a failed add leaves the
+                            // fallback in place and never aborts the batch.
+                            // Value: "<fontName>|<base64 ttf>".
+                            const std::string aVal
+                                = aItem3.second.get_value<std::string>();
+                            const size_t nBar = aVal.find('|');
+                            OutputDevice* pDevice = Application::GetDefaultDevice();
+                            if (nBar == std::string::npos || nBar == 0
+                                || nBar + 1 >= aVal.size() || !pDevice)
+                            {
+                                lcl_LogWarning(
+                                    "FillApi SlideCmd AddWebFont: malformed value "
+                                    "or no device");
+                            }
+                            else
+                            {
+                                const OUString aFontName = OUString::fromUtf8(
+                                    std::string_view(aVal).substr(0, nBar));
+                                // A FAMILY is not one font. Arial arrives as
+                                // four faces, and asking only whether the
+                                // FAMILY is available registered the first and
+                                // dropped the rest — so bold and italic text
+                                // was laid out in the regular face, which for
+                                // an embedded subset holds none of its glyphs
+                                // and loses the text entirely. Skip only a
+                                // face already registered from these exact
+                                // bytes; the payload identifies itself, so
+                                // name plus length separates the faces.
+                                static std::set<OUString> aRegisteredFaces;
+                                const OUString aFaceKey
+                                    = aFontName + ":"
+                                      + OUString::number(
+                                          static_cast<sal_Int64>(aVal.size() - nBar));
+                                // An installed family of the same NAME is not
+                                // a reason to refuse either: a document's
+                                // Arial is its own embedded subset, not the
+                                // metric look-alike the image ships.
+                                if (aRegisteredFaces.insert(aFaceKey).second)
+                                {
+                                    cpo::uno::Sequence<sal_Int8> aBytes;
+                                    comphelper::Base64::decode(
+                                        aBytes,
+                                        std::string_view(aVal).substr(nBar + 1));
+                                    // The temporary file is named per FACE,
+                                    // not per family: four faces of Arial
+                                    // would otherwise want one filename, and
+                                    // the second write fails on a file that
+                                    // already exists — leaving bold and
+                                    // italic unregistered while the family
+                                    // looked served. AddTempDevFont still
+                                    // takes the FAMILY name; weight and slant
+                                    // it reads from the file itself.
+                                    // Named as its own OUString: the helper
+                                    // takes string_views, which a
+                                    // concatenation does not convert to.
+                                    const OUString aFaceFile
+                                        = aFontName + "-"
+                                          + OUString::number(
+                                              static_cast<sal_Int64>(aBytes.getLength()));
+                                    OUString aUrl;
+                                    if (aBytes.hasElements())
+                                        aUrl = EmbeddedFontsManager::
+                                            getFileUrlForTemporaryFont(aFaceFile, u".ttf");
+                                    osl::File aFile(aUrl);
+                                    if (aBytes.hasElements() && !aUrl.isEmpty()
+                                        && aFile.open(osl_File_OpenFlag_Write
+                                                      | osl_File_OpenFlag_Create)
+                                               == osl::File::E_None)
+                                    {
+                                        sal_uInt64 nWritten = 0;
+                                        aFile.write(
+                                            aBytes.getConstArray(),
+                                            static_cast<sal_uInt64>(
+                                                aBytes.getLength()),
+                                            nWritten);
+                                        aFile.close();
+                                        if (!pDevice->AddTempDevFont(aUrl,
+                                                                     aFontName))
+                                            lcl_LogWarning(
+                                                "FillApi SlideCmd AddWebFont: "
+                                                "AddTempDevFont failed");
+                                        else
+                                        {
+                                            // A font added this way is not
+                                            // seen by the font caches that
+                                            // already resolved the family to
+                                            // a fallback; refresh them the
+                                            // way the embedded-fonts path
+                                            // does, or the kit keeps laying
+                                            // out in the fallback.
+                                            OutputDevice::ImplClearAllFontData(true);
+                                            OutputDevice::ImplRefreshAllFontData(true);
+                                        }
+                                    }
+                                    else
+                                        lcl_LogWarning(
+                                            "FillApi SlideCmd AddWebFont: "
+                                            "decode/write failed");
+                                }
+                            }
+                        }
+
+                        else if (aItem3.first == "MarkObjects")
+                        {
+                            // Mark the listed objects (comma-separated page
+                            // indices) so the selection-scoped UNO verbs -
+                            // align, distribute, group, z-order - compose in
+                            // batches exactly like a user's multi-select.
+                            // The counterpart of UnmarkAll.
+                            SdPage* pPageStandard
+                                = GetDoc()->GetSdPage(nActPageId, PageKind::Standard);
+                            SdrPageView* pPageView = mpDrawView->GetSdrPageView();
+                            const int nObjCount
+                                = static_cast<int>(pPageStandard->GetObjCount());
+                            std::stringstream aList(
+                                aItem3.second.get_value<std::string>());
+                            std::string aToken;
+                            while (std::getline(aList, aToken, ','))
+                            {
+                                int nObjId = -1;
+                                try
+                                {
+                                    nObjId = stoi(aToken);
+                                }
+                                catch (const std::exception&)
+                                {
+                                    lcl_LogWarning(
+                                        "FillApi SlideCmd MarkObjects: invalid index '"
+                                        + aToken + "'");
+                                    continue;
+                                }
+                                if (nObjId < 0 || nObjId >= nObjCount)
+                                {
+                                    lcl_LogWarning(
+                                        "FillApi SlideCmd MarkObjects: index out of range '"
+                                        + aToken + "' (Object Count = "
+                                        + std::to_string(nObjCount) + ")");
+                                    continue;
+                                }
+                                SdrObject* pSdrObj = pPageStandard->GetObj(nObjId);
+                                if (pSdrObj && pPageView)
+                                    mpDrawView->MarkObj(pSdrObj, pPageView);
+                            }
+                        }
+                        else if (aItem3.first == "MarkCreated")
+                        {
+                            // Mark objects created EARLIER IN THIS BATCH by
+                            // their index in creation order. Lets one batch
+                            // insert a scaffold and group it atomically -
+                            // one list action, ONE undo - without a client
+                            // round-trip for the created ordNums. Identity-
+                            // based: unlike MarkObjects' page indices, the
+                            // references stay valid across FormatGroup
+                            // renumbering. Lazy like MarkObjects: JumpToSlide
+                            // to the target page first.
+                            SdPage* pPageStandard
+                                = GetDoc()->GetSdPage(nActPageId, PageKind::Standard);
+                            SdrPageView* pPageView = mpDrawView->GetSdrPageView();
+                            std::stringstream aList(
+                                aItem3.second.get_value<std::string>());
+                            std::string aToken;
+                            while (std::getline(aList, aToken, ','))
+                            {
+                                int nCreatedId = -1;
+                                try
+                                {
+                                    nCreatedId = stoi(aToken);
+                                }
+                                catch (const std::exception&)
+                                {
+                                    lcl_LogWarning(
+                                        "FillApi SlideCmd MarkCreated: invalid index '"
+                                        + aToken + "'");
+                                    continue;
+                                }
+                                if (nCreatedId < 0
+                                    || static_cast<size_t>(nCreatedId)
+                                           >= aCreatedSdrObjects.size())
+                                {
+                                    lcl_LogWarning(
+                                        "FillApi SlideCmd MarkCreated: index out of range '"
+                                        + aToken + "' (created = "
+                                        + std::to_string(aCreatedSdrObjects.size()) + ")");
+                                    continue;
+                                }
+                                SdrObject* pSdrObj = aCreatedSdrObjects[nCreatedId];
+                                if (pSdrObj->getSdrPageFromSdrObject() != pPageStandard)
+                                {
+                                    lcl_LogWarning(
+                                        "FillApi SlideCmd MarkCreated: object '" + aToken
+                                        + "' is not on the current page");
+                                    continue;
+                                }
+                                // Resolve to the TOP-LEVEL container: after an
+                                // earlier FormatGroup in this batch the leaf
+                                // lives inside a group, and marking the leaf's
+                                // outermost ancestor is what lets one batch
+                                // build LAYERED groups (cards, then the row of
+                                // cards) - a second FormatGroup over one
+                                // representative leaf per card groups the
+                                // card-groups themselves.
+                                while (SdrObject* pParent
+                                       = pSdrObj->getParentSdrObjectFromSdrObject())
+                                    pSdrObj = pParent;
+                                if (pPageView)
+                                    mpDrawView->MarkObj(pSdrObj, pPageView);
+                            }
+                        }
+                        else if (aItem3.first == "MatchSizes")
+                        {
+                            // Equalize the listed objects to the LARGEST
+                            // width and height among them, keeping each
+                            // position - "whatever the longest block is, the
+                            // rest should be the same size as that one".
+                            SdPage* pPageStandard
+                                = GetDoc()->GetSdPage(nActPageId, PageKind::Standard);
+                            const int nObjCount
+                                = static_cast<int>(pPageStandard->GetObjCount());
+                            std::vector<SdrObject*> aTargets;
+                            std::stringstream aList(
+                                aItem3.second.get_value<std::string>());
+                            std::string aToken;
+                            while (std::getline(aList, aToken, ','))
+                            {
+                                int nObjId = -1;
+                                try
+                                {
+                                    nObjId = stoi(aToken);
+                                }
+                                catch (const std::exception&)
+                                {
+                                    lcl_LogWarning(
+                                        "FillApi SlideCmd MatchSizes: invalid index '"
+                                        + aToken + "'");
+                                    continue;
+                                }
+                                if (nObjId < 0 || nObjId >= nObjCount)
+                                {
+                                    lcl_LogWarning(
+                                        "FillApi SlideCmd MatchSizes: index out of range '"
+                                        + aToken + "' (Object Count = "
+                                        + std::to_string(nObjCount) + ")");
+                                    continue;
+                                }
+                                if (SdrObject* pSdrObj = pPageStandard->GetObj(nObjId))
+                                {
+                                    // Rotated/sheared objects are excluded
+                                    // ENTIRELY: their axis-aligned snap rect
+                                    // would donate an inflated target size to
+                                    // the rest (review F4), and applying to
+                                    // them shears/corrupts (review F2).
+                                    if (pSdrObj->GetRotateAngle() != 0_deg100
+                                        || pSdrObj->GetShearAngle() != 0_deg100)
+                                    {
+                                        lcl_LogWarning(
+                                            "FillApi SlideCmd MatchSizes: skipping rotated/sheared object");
+                                        continue;
+                                    }
+                                    aTargets.push_back(pSdrObj);
+                                }
+                            }
+                            if (aTargets.size() >= 2)
+                            {
+                                ::tools::Long nMaxW = 0;
+                                ::tools::Long nMaxH = 0;
+                                for (SdrObject* pSdrObj : aTargets)
+                                {
+                                    const ::tools::Rectangle aRect = pSdrObj->GetSnapRect();
+                                    nMaxW = std::max(nMaxW, aRect.GetWidth());
+                                    nMaxH = std::max(nMaxH, aRect.GetHeight());
+                                }
+                                for (SdrObject* pSdrObj : aTargets)
+                                {
+                                    ::tools::Rectangle aRect = pSdrObj->GetSnapRect();
+                                    if (aRect.GetWidth() == nMaxW
+                                        && aRect.GetHeight() == nMaxH)
+                                        continue;
+                                    if (pBatchUndoManager)
+                                        pBatchUndoManager->AddUndoAction(
+                                            GetDoc()->GetSdrUndoFactory().CreateUndoGeoObject(
+                                                *pSdrObj));
+                                    aRect.SetSize(Size(nMaxW, nMaxH));
+                                    pSdrObj->SetSnapRect(aRect);
+                                }
+                            }
+                        }
                         else if (aItem3.first.starts_with("EditTextObject."))
                         {
                             int nObjId = stoi(aItem3.first.substr(15));
@@ -1389,6 +3207,18 @@ void DrawViewShell::FuTransformDocumentStructure(SfxRequest& rReq)
                             lcl_UnoCommand(aText);
                         }
                     }
+
+                    // A trailing bare JumpToSlide/JumpToSlideByName is the
+                    // one sanctioned way for a batch to navigate the user's
+                    // view. Its page switch is normally applied lazily at
+                    // the head of the NEXT command, so flush it here.
+                    if ((aLastCommandKey == "JumpToSlide"
+                         || aLastCommandKey == "JumpToSlideByName")
+                        && nActPageId != nNextPageId)
+                    {
+                        SwitchPage(static_cast<sal_uInt16>(nNextPageId),
+                                   /*bAllowChangeFocus=*/false);
+                    }
                 }
             }
         }
@@ -1397,15 +3227,67 @@ void DrawViewShell::FuTransformDocumentStructure(SfxRequest& rReq)
             KitHelper::dispatchUnoCommand(aItem.second);
         }
     }
+    }
+    catch (...)
+    {
+        if (!aResponseChannel)
+            throw;
+        lcl_LogWarning("FillApi Transform failed; returning correlated broker failure.");
+        bSuccess = false;
+    }
+
+    // Agent batches must not hijack the user's view (the co-working
+    // contract): unless the batch explicitly ended in a bare JumpToSlide /
+    // JumpToSlideByName, return the view to the PAGE it was on at entry.
+    // The entry page is found by identity (deck-mutating commands renumber
+    // positions); a deleted entry page falls back to its old position,
+    // clamped. Page edit mode only - see the capture site.
+    if (bEntryPageMode
+        && aLastCommandKey != "JumpToSlide" && aLastCommandKey != "JumpToSlideByName")
+    {
+        const sal_uInt16 nRestorePageCount
+            = GetDoc()->GetSdPageCount(PageKind::Standard);
+        sal_uInt16 nRestorePageId = nEntryPageId;
+        bool bFound = false;
+        for (sal_uInt16 nPos = 0; pEntryPage && nPos < nRestorePageCount; ++nPos)
+        {
+            if (GetDoc()->GetSdPage(nPos, PageKind::Standard) == pEntryPage)
+            {
+                nRestorePageId = nPos;
+                bFound = true;
+                break;
+            }
+        }
+        if (!bFound && nRestorePageCount > 0 && nRestorePageId >= nRestorePageCount)
+            nRestorePageId = nRestorePageCount - 1;
+        if (maTabControl->GetCurPagePos() != nRestorePageId)
+            SwitchPage(nRestorePageId, /*bAllowChangeFocus=*/false);
+    }
 
     // Build a JSON result so the caller knows what happened.
     tools::JsonWriter aJson;
-    aJson.put("success", true);
+    aJson.put("success", bSuccess);
+    if (aRequestId)
+        aJson.put("requestId", *aRequestId);
+    if (bHasSpeakerNotesSlideId)
+        aJson.put("slideId", nSpeakerNotesSlideId);
+    if (aResponseChannel)
+        aJson.put("responseChannel", *aResponseChannel);
     if (!aWarnings.getWarnings().empty())
     {
         auto aNode = aJson.startArray("warnings");
         for (const auto& rWarn : aWarnings.getWarnings())
             aJson.putSimpleValue(OUString::fromUtf8(rWarn));
+    }
+    if (!aCreatedObjects.empty())
+    {
+        auto aNode = aJson.startArray("createdObjects");
+        for (const auto& rCreated : aCreatedObjects)
+        {
+            auto aObjNode = aJson.startStruct();
+            aJson.put("slide", rCreated.first);
+            aJson.put("ordNum", static_cast<sal_Int64>(rCreated.second));
+        }
     }
     rReq.SetReturnValue(SfxStringItem(FN_PARAM_1, OUString::fromUtf8(aJson.finishAndGetAsOString())));
 }
@@ -1453,6 +3335,142 @@ void DrawViewShell::FuTemporary(SfxRequest& rReq)
 
                 pObj->SetMergedItem(SdrTextFitToSizeTypeItem(bSet ? drawing::TextFitToSizeType_NONE : drawing::TextFitToSizeType_AUTOFIT));
 
+                mpDrawView->EndUndo();
+                pUndoManager->LeaveListAction();
+            }
+            Cancel();
+            rReq.Done();
+        }
+        break;
+
+        case SID_FIT_FRAME_TO_TEXT:
+        {
+            // One-shot frame-to-text fit (Vulcan fork): resize every marked
+            // text frame to hug its text on both axes. The vertical text
+            // insets are zeroed first so the fitted frame is the TEXT, not
+            // text plus generator-baked padding; horizontal insets stay
+            // (they set the wrap width). The persistent autogrow attributes
+            // stay untouched. Wrapped in a view-tagged list action so the
+            // requesting LOK view owns the single undo step (the ImpSidUndo
+            // ownership check).
+            SfxUndoManager* pUndoManager = GetDocSh()->GetUndoManager();
+            const size_t nMarkCount = rMarkList.GetMarkCount();
+            if (nMarkCount > 0 && !mpDrawView->IsTextEdit())
+            {
+                pUndoManager->EnterListAction(u""_ustr, u""_ustr, 0, GetViewShellBase().GetViewShellId());
+                mpDrawView->BegUndo();
+                for (size_t i = 0; i < nMarkCount; ++i)
+                {
+                    SdrObject* pObj = rMarkList.GetMark(i)->GetMarkedSdrObj();
+                    SdrTextObj* pTextObj = DynCastSdrTextObj(pObj);
+                    // Tables report HasText() unconditionally and expose one
+                    // cell as active text - fitting or autogrow-toggling
+                    // would relay the whole table from a single cell
+                    // (review P1-6).
+                    if (pTextObj
+                        && pTextObj->GetObjIdentifier() == SdrObjKind::Table)
+                        continue;
+                    // Any text-bearing object: the selection is explicit
+                    // intent, and pptx text boxes import as custom shapes
+                    // (IsTextFrame() false), which is most of every deck.
+                    if (!pTextObj || !pTextObj->HasText())
+                        continue;
+                    lcl_FitFrameHug(GetDoc(), pTextObj,
+                        [this](std::unique_ptr<SdrUndoAction> pUndo)
+                        { mpDrawView->AddUndo(std::move(pUndo)); });
+                }
+                mpDrawView->EndUndo();
+                pUndoManager->LeaveListAction();
+            }
+            Cancel();
+            rReq.Done();
+        }
+        break;
+
+        case SID_TOGGLE_AUTO_WIDTH:
+        case SID_TOGGLE_AUTO_HEIGHT:
+        {
+            // Per-box resize-mode toggle (Vulcan fork): flip the autogrow
+            // attribute on one axis for every marked text object, empty
+            // boxes included - the resize mode of a box about to be typed
+            // into is the point of toggling it. Turning a mode ON also
+            // zeroes the matching min-frame item (the floor AdaptTextMinSize
+            // seeded from the drawn rectangle) so the box can shrink to its
+            // content, and clears an active autofit first - the two
+            // mechanisms are mutually exclusive, mirroring
+            // SID_OUTLINE_TEXT_AUTOFIT above.
+            const bool bWidth = (nSId == SID_TOGGLE_AUTO_WIDTH);
+            SfxUndoManager* pUndoManager = GetDocSh()->GetUndoManager();
+            const size_t nMarkCount = rMarkList.GetMarkCount();
+            if (nMarkCount > 0 && !mpDrawView->IsTextEdit())
+            {
+                pUndoManager->EnterListAction(u""_ustr, u""_ustr, 0, GetViewShellBase().GetViewShellId());
+                mpDrawView->BegUndo();
+                for (size_t i = 0; i < nMarkCount; ++i)
+                {
+                    SdrObject* pObj = rMarkList.GetMark(i)->GetMarkedSdrObj();
+                    SdrTextObj* pTextObj = DynCastSdrTextObj(pObj);
+                    // Tables report HasText() unconditionally and expose one
+                    // cell as active text - fitting or autogrow-toggling
+                    // would relay the whole table from a single cell
+                    // (review P1-6).
+                    if (pTextObj
+                        && pTextObj->GetObjIdentifier() == SdrObjKind::Table)
+                        continue;
+                    // Pictures and OLE objects derive from SdrRectObj, so
+                    // the cast alone admits them - require a text frame or
+                    // carried text, or the toggle records a do-nothing
+                    // undo step. Empty TEXT FRAMES stay toggleable.
+                    if (!pTextObj
+                        || (!pTextObj->IsTextFrame() && !pTextObj->HasText()))
+                        continue;
+                    // Geometry first, attributes second: undo runs in
+                    // reverse, so the exact old rectangle is restored after
+                    // the attribute restore re-triggers auto-adjustment.
+                    mpDrawView->AddUndo(GetDoc()->GetSdrUndoFactory().CreateUndoGeoObject(*pTextObj));
+                    mpDrawView->AddUndo(GetDoc()->GetSdrUndoFactory().CreateUndoAttrObject(*pTextObj));
+                    const SfxItemSet& rObjSet = pTextObj->GetMergedItemSet();
+                    const bool bOn = bWidth
+                        ? !rObjSet.GetItem<SdrOnOffItem>(SDRATTR_TEXT_AUTOGROWWIDTH)->GetValue()
+                        : !rObjSet.GetItem<SdrOnOffItem>(SDRATTR_TEXT_AUTOGROWHEIGHT)->GetValue();
+                    if (bOn && rObjSet.GetItem<SdrTextFitToSizeTypeItem>(SDRATTR_TEXT_FITTOSIZE)->GetValue() != drawing::TextFitToSizeType_NONE)
+                        pTextObj->SetMergedItem(SdrTextFitToSizeTypeItem(drawing::TextFitToSizeType_NONE));
+                    if (bWidth)
+                        pTextObj->SetMergedItem(makeSdrTextAutoGrowWidthItem(bOn));
+                    else
+                        pTextObj->SetMergedItem(makeSdrTextAutoGrowHeightItem(bOn));
+                    if (bOn)
+                    {
+                        // Zero the floor AFTER the autogrow flip: enabling
+                        // the mode on a custom shape reseeds the minimum
+                        // from the current rect (AdaptTextMinSize), which
+                        // the zero must outlive.
+                        if (bWidth)
+                            pTextObj->SetMergedItem(makeSdrTextMinFrameWidthItem(0));
+                        else
+                            pTextObj->SetMergedItem(makeSdrTextMinFrameHeightItem(0));
+                    }
+                    pTextObj->AdjustTextFrameWidthAndHeight();
+                    // Custom shapes (every pptx text box) return early from
+                    // SdrTextObj's frame adjustment (mbTextFrame false), so
+                    // an enabling toggle would flip the attribute with no
+                    // visible effect. Settle the enabled axis explicitly;
+                    // the geometry undo above already covers it.
+                    if (bOn && !pTextObj->IsTextFrame() && pTextObj->HasText())
+                    {
+                        const Size aFitSize = pTextObj->CalcFitToTextSize();
+                        if (!aFitSize.IsEmpty())
+                        {
+                            ::tools::Rectangle aFitRect = pTextObj->GetLogicRect();
+                            if (bWidth)
+                                aFitRect.SetSize(Size(aFitSize.Width(), aFitRect.GetHeight()));
+                            else
+                                aFitRect.SetSize(Size(aFitRect.GetWidth(), aFitSize.Height()));
+                            if (aFitRect != pTextObj->GetLogicRect())
+                                pTextObj->SetLogicRect(aFitRect);
+                        }
+                    }
+                }
                 mpDrawView->EndUndo();
                 pUndoManager->LeaveListAction();
             }
@@ -1563,6 +3581,13 @@ void DrawViewShell::FuTemporary(SfxRequest& rReq)
         {
             FuTransformDocumentStructure(rReq);
             rReq.Done();
+            // Every sibling case ends with Cancel(): it disposes the
+            // request's temporary function and RE-ACTIVATES the permanent
+            // FuSelection. This was the only case that skipped it, and the
+            // slot bisect pinned the fallout: after ANY interactive batch —
+            // even an empty one — rubber-band marking was dead for the rest
+            // of the session (clicks still worked, marquee never did).
+            Cancel();
         }
         break;
 

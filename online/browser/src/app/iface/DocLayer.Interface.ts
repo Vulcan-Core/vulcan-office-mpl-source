@@ -126,6 +126,16 @@ interface DocLayerInterface {
 		runAtFinish: () => void,
 		noGap?: boolean,
 	): void;
+	// Phone pinch release: ease the fractional-to-rung correction through
+	// zoomStep frames before committing via zoomStepEnd.
+	runVulcanPinchSettleAnimation(
+		fromZoom: number,
+		zoomEnd: number,
+		center: InternPointLike,
+		mapUpdater: MapUpdaterType,
+		runAtFinish: () => void,
+	): void;
+	flushVulcanPinchSettle(): void;
 	postZoomAnimation(): void;
 	_checkSelectedPart(): void;
 	requestNewFiledBasedViewTiles(): void;

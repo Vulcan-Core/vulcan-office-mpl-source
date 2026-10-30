@@ -107,12 +107,10 @@ void DrawViewShell::DeleteActualPage()
         rtl::Reference<SdXImpressDocument> xDrawPagesSupplier( GetDoc()->getUnoModel() );
         if (!xDrawPagesSupplier)
             return;
-        Reference<XDrawPages> xPages( xDrawPagesSupplier->getDrawPages(), UNO_SET_THROW );
+        rtl::Reference<SdDrawPagesAccess> xPages(xDrawPagesSupplier->getSdDrawPages());
         sal_uInt16 nPageCount   = GetDoc()->GetSdPageCount(mePageKind);
         SdPage* pPage = nullptr;
         std::vector<Reference<XDrawPage>> pagesToDelete;
-
-        GetView()->BegUndo(SdResId(STR_UNDO_DELETEPAGES));
 
         for (sal_uInt16 i = 0; i < nPageCount; i++)
         {
@@ -130,12 +128,7 @@ void DrawViewShell::DeleteActualPage()
                 pagesToDelete.push_back(xPage);
             }
         }
-        for (const auto &xPage: pagesToDelete)
-        {
-            xPages->remove(xPage);
-        }
-
-        GetView()->EndUndo();
+        xPages->removePages(pagesToDelete);
     }
     catch( Exception& )
     {

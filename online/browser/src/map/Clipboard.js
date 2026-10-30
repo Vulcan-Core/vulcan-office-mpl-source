@@ -719,6 +719,12 @@ window.L.Clipboard = window.L.Class.extend({
 
 		this._unoCommandForCopyCutPaste = cmd;
 
+		// Vulcan fork: menu/uno-initiated copy & cut may bypass _doCopyCut
+		// (navigator.clipboard path), so mark the ants source here too.
+		// Marking twice in one gesture is harmless: the source is replaced.
+		if (operation === 'copy' || operation === 'cut')
+			this._markCalcCopySource(operation === 'cut');
+
 		if (operation !== 'paste' && cmd !== undefined && this._navigatorClipboardWrite(params)) {
 			// This is the codepath where an UNO command initiates the clipboard
 			// operation.
@@ -1060,6 +1066,15 @@ window.L.Clipboard = window.L.Class.extend({
 		return true;
 	},
 
+	// B-0074: is this the Android host, where the WebView refuses every
+	// clipboard read? The phone chrome and TextInput's B-0094 platform gate.
+	_vulcanAndroidReadRefused: function() {
+		var ti = this._map && this._map._textInput;
+		return !!window.vulcanPhoneChrome && !!ti &&
+			typeof ti.vulcanAndroidKeyboardBranch === 'function' &&
+			ti.vulcanAndroidKeyboardBranch();
+	},
+
 	_MobileAppReadClipboard: function(encodedClipboardData) {
 		if (encodedClipboardData === "(internal)") {
 			return null;
@@ -1130,6 +1145,22 @@ window.L.Clipboard = window.L.Class.extend({
 			if (isSpecial) {
 				// Fallback to the old code, as in filterExecCopyPaste().
 				this._openPasteSpecialPopup();
+			} else if (this._vulcanAndroidReadRefused() && this._map._docLayer &&
+				this._map._docLayer._docType === 'spreadsheet') {
+				// Vulcan fork, B-0074 (lane B): the Android WebView REFUSES the
+				// clipboard read, and no host permission can grant it (the
+				// B-0254 finding). The fallback below then raised the 'very
+				// limited access to the clipboard' sheet and never pasted: on a
+				// phone, Copy then Paste from the cell bar did nothing (redroid,
+				// runs/run2/b0074). Core still holds what .uno:Copy put in its
+				// own clipboard, so paste that, as the internal paste does.
+				// Android only (the B-0094 gate): desktop, where a refusal is
+				// the user's own permission answer, keeps the fallback.
+				// Spreadsheets only: in documents and slide text the fallback's
+				// sheet points to the keyboard's paste button, which still
+				// reaches what another app copied. The filmstrip has its own
+				// refused-read branch (Control.PartsPreview _pasteSlide).
+				this._doInternalPaste(this._map, false);
 			} else {
 				// Fallback to the old code, as in _execCopyCutPaste().
 				this._afterCopyCutPaste('paste');
@@ -1254,6 +1285,8 @@ window.L.Clipboard = window.L.Class.extend({
 		} else {
 			this._unoCommandForCopyCutPaste = `.uno:${unoName}`;
 			this._checkSelection();
+			// Vulcan fork: anchor the Calc marching-ants overlay on the copied range.
+			this._markCalcCopySource(unoName === 'Cut');
 
 			// This is the codepath (_navigatorClipboardWrite) where the browser initiates the clipboard operation, e.g. the keyboard is used.
 			if (!this._navigatorClipboardWrite()) {
@@ -1274,7 +1307,29 @@ window.L.Clipboard = window.L.Class.extend({
 		}
 	},
 
+	// Vulcan fork (Excel parity): remember the Calc range a copy/cut was taken
+	// from, so CalcCopySourceSection paints the marching-ants border there.
+	_markCalcCopySource: function(isCut) {
+		var docLayer = this._map._docLayer;
+		if (!docLayer || docLayer._docType !== 'spreadsheet')
+			return;
+		app.definitions.calcCopySourceSection.setSourceFromSelection(isCut);
+	},
+
+	// Vulcan fork: any paste into the document dismisses the marching ants
+	// (a cut source is consumed by the paste anyway).
+	_clearCalcCopySourceOnPaste: function() {
+		var docLayer = this._map._docLayer;
+		if (!docLayer || docLayer._docType !== 'spreadsheet')
+			return;
+		app.definitions.calcCopySourceSection.onPasteCompleted();
+	},
+
 	_doInternalPaste: function(map, usePasteKeyEvent) {
+		// Vulcan fork: pasting into the document dismisses the Calc ants;
+		// usePasteKeyEvent pastes into a dialog, not the sheet.
+		if (!usePasteKeyEvent)
+			this._clearCalcCopySourceOnPaste();
 		if (usePasteKeyEvent) {
 			// paste into dialog
 			var KEY_PASTE = 1299;
@@ -1309,6 +1364,20 @@ window.L.Clipboard = window.L.Class.extend({
 
 		if (this._map._activeDialog)
 			ev.usePasteKeyEvent = true;
+
+		// Telemetry: payload TYPE only (from the DataTransfer type list) —
+		// the clipboard content itself is never read here.
+		if (ev.clipboardData && app.telemetry) {
+			var pasteTypes = Array.prototype.slice.call(ev.clipboardData.types || []);
+			var pasteKind = 'other';
+			if (pasteTypes.indexOf('Files') !== -1)
+				pasteKind = 'image';
+			else if (pasteTypes.indexOf('text/html') !== -1)
+				pasteKind = 'html';
+			else if (pasteTypes.indexOf('text/plain') !== -1)
+				pasteKind = 'text';
+			app.telemetry.record('paste', { kind: pasteKind });
+		}
 
 		if (ev.clipboardData) {
 			ev.preventDefault();
@@ -1504,7 +1573,7 @@ window.L.Clipboard = window.L.Class.extend({
 	},
 
 	_substProductName: function (msg) {
-		var productName = (typeof brandProductName !== 'undefined') ? brandProductName : 'Collabora Online Development Edition (unbranded)';
+		var productName = (typeof brandProductName !== 'undefined') ? brandProductName : 'Vulcan Office';
 		return msg.replace('{productname}', productName);
 	},
 

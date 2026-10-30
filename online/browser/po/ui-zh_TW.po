@@ -5057,7 +5057,7 @@ msgstr "解除連結引用"
 msgid ""
 "Unlinking citations will prevent Collabora Online from updating citations "
 "and bibliography in this document."
-msgstr "取消引用連結將阻止 Collabora Online 更新此文件中的引用與參考文獻。"
+msgstr "取消引用連結將阻止 Vulcan Office 更新此文件中的引用與參考文獻。"
 
 #: src/control/HRuler.ts:321
 msgid "First line"
@@ -6552,7 +6552,7 @@ msgstr "更新投影片"
 
 #: src/map/handler/Map.VersionBar.js:50
 msgid "Your Collabora Online server needs updating. Version {0} is available."
-msgstr "您的 Collabora Online 伺服器需要更新。已有版本 {0}。"
+msgstr "您的 Vulcan Office 伺服器需要更新。已有版本 {0}。"
 
 #: src/map/handler/Map.WOPI.js:194
 msgid "Creating new file from template..."
@@ -6837,7 +6837,7 @@ msgstr "黃光好點子"
 
 #: welcome/welcome.html%2Bhtml.head.title:9-3
 msgid "Collabora Online Welcome"
-msgstr "歡迎使用 Collabora Online"
+msgstr "歡迎使用 Vulcan Office"
 
 #: welcome/welcome.html%2Bhtml.body.div.div.div.div.h1:26-7
 msgid "Explore The New {coolversion}"
@@ -6846,7 +6846,7 @@ msgstr "探索新的 {coolversion}"
 #: welcome/welcome.html%2Bhtml.body.div.div.div.div.h2:27-7
 #: welcome/welcome.html%2Bhtml.body.div.div.div.div.h2:38-7
 msgid "Collabora Online Development Edition"
-msgstr "Collabora Online 開發版"
+msgstr "Vulcan Office 開發版"
 
 #: welcome/welcome.html%2Bhtml.body.div.div.div.div.p:28-7
 msgid ""
@@ -6874,7 +6874,7 @@ msgid ""
 msgstr ""
 "檢查<a target=\"_blank\" rel=\"noopener\" href=\"https://www.collaboraonline."
 "com/code-26-04-release-notes/\">發行說明</a>並了解關於："
-"針對家庭使用者與小型團隊的最新 Collabora Online 開發版。"
+"針對家庭使用者與小型團隊的最新 Vulcan Office 開發版。"
 
 #: welcome/welcome.html%2Bhtml.body.div.div.div.div.h1:48-7
 msgid "Get Involved"
@@ -7329,7 +7329,7 @@ msgstr ""
 #~ msgstr "伺服器正在重啟循環，即將無法使用"
 
 #~ msgid "Oops, there is a problem connecting to Collabora Online : "
-#~ msgstr "糟糕，連接至 Collabora Online 時發生問題： "
+#~ msgstr "糟糕，連接至 Vulcan Office 時發生問題： "
 
 #~ msgid "Number of views"
 #~ msgstr "檢視的次數"

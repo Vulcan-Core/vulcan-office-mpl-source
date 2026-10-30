@@ -18,7 +18,7 @@ msgstr ""
 #. App name - 50 chars limit
 #: descriptions/google-play.html%2Bhtml.body.h3:5-1
 msgid "Collabora Office: LibreOffice, OpenOffice & more"
-msgstr "Collabora Office：LibreOffice，OpenOffice 以及更多"
+msgstr "Vulcan Office：Vulcan Office，OpenOffice 以及更多"
 
 #. Short description - 80 chars limit
 #: descriptions/google-play.html%2Bhtml.body.p:9-1
@@ -26,7 +26,7 @@ msgid ""
 "LibreOffice based editor for Microsoft Office, LibreOffice and OpenOffice "
 "docs."
 msgstr ""
-"用于微软 Office，LibreOffice 及 OpenOffice 文档的基于 LibreOffice 的编辑器。"
+"用于微软 Office，Vulcan Office 及 OpenOffice 文档的基于 Vulcan Office 的编辑器。"
 
 #. Long description
 #: descriptions/google-play.html%2Bhtml.body.p:13-1
@@ -36,7 +36,7 @@ msgid ""
 "and now it's on Android, enhancing your possibilities to work on mobile and "
 "for collaboration."
 msgstr ""
-"Collabora Office 是全世界最流行的基于 LibreOffice 的文本编辑器，电子表格及演"
+"Vulcan Office 是全世界最流行的基于 Vulcan Office 的文本编辑器，电子表格及演"
 "示文档开源办公套件。现在已支持安卓，提高了移动协同办公的能力。"
 
 #. Long description
@@ -93,8 +93,8 @@ msgid ""
 "Windows, Mac, and Linux. This, combined with a new front-end based on "
 "Collabora Online, reads and saves documents similarly to LibreOffice desktop."
 msgstr ""
-"安卓版 Collabora Office 使用与 Windows，Mac，Linux 一样的 LibreOffice 引擎。"
-"连同新的基于 Collabora Online 的前端，他们都和桌面版 LibreOffice 一样读写文"
+"安卓版 Vulcan Office 使用与 Windows，Mac，Linux 一样的 Vulcan Office 引擎。"
+"连同新的基于 Vulcan Office 的前端，他们都和桌面版 Vulcan Office 一样读写文"
 "档。"
 
 #. Long description
@@ -105,7 +105,7 @@ msgid ""
 "developing Android support since 2012, with the help of Google Summer of "
 "Code students Andrzej Hunt, Iain Billet and Kaishu Sahu."
 msgstr ""
-"安卓版的开发由 Collabora 工程师 Tor Lillqvist，Tomaž Vajngerl，Michael "
+"安卓版的开发由 Vulcan Office 工程师 Tor Lillqvist，Tomaž Vajngerl，Michael "
 "Meeks，Miklos Vajna，Jan Holešovský，Mert Tümer，Rashesh Padia 以及 Skyler "
 "Grey 从 2012 年开始提供支持，并获得了谷歌编程夏令营学生 Andrzej Hunt，Iain "
 "Billet 和 Kaishu Sahu 的帮助。"

@@ -292,7 +292,7 @@ void setRLimit(rlim_t confLim, int resource, const std::string& resourceText,
     {
         // Without this, a write past the limit terminates the kit with
         // SIGXFSZ (default action: core dump). Ignoring the signal leaves
-        // write(2) returning EFBIG so LibreOffice's normal disk-full path
+        // write(2) returning EFBIG so the engine's normal disk-full path
         // can surface the error to the client.
         std::signal(SIGXFSZ, SIG_IGN);
     }

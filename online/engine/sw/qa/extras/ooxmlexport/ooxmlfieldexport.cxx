@@ -319,6 +319,26 @@ CPPUNIT_TEST_FIXTURE(Test, testPageref)
     assertXPathContent(pXmlDoc, "/w:document/w:body/w:sdt/w:sdtContent/w:p[2]/w:hyperlink/w:r[3]/w:instrText", u"PAGEREF _Toc355095261 \\h");
 }
 
+CPPUNIT_TEST_FIXTURE(Test, testTocAnchorLinksOutsideIndex)
+{
+    // "Contents", then three entries built without a TOC field (each one
+    // run inside a link to its heading's "_Toc" bookmark), then two entries of a TOC field.
+    createSwDoc("toc-anchor-links-outside-index.docx");
+    saveAndReload(TestFilter::DOCX);
+    xmlDocUniquePtr pXmlDoc = parseExport(u"word/document.xml"_ustr);
+
+    // The export took the entry's only run for a page number and wrapped it in a webHidden
+    // "PAGEREF _Toc10000001 \h" field, so the reload showed a hidden page number instead.
+    assertXPath(pXmlDoc, "//w:hyperlink[@w:anchor='_Toc10000001']", 1);
+    assertXPathContent(pXmlDoc, "//w:hyperlink[@w:anchor='_Toc10000001']/w:r/w:t", u"Scope of the plan");
+    assertXPath(pXmlDoc, "//w:hyperlink[@w:anchor='_Toc10000001']/w:r/w:instrText", 0);
+    assertXPath(pXmlDoc, "//w:hyperlink[@w:anchor='_Toc10000001']/w:r/w:rPr/w:webHidden", 0);
+    getParagraph(2, u"Scope of the plan"_ustr);
+
+    // An entry of the TOC field keeps its page number field.
+    assertXPathContent(pXmlDoc, "//w:hyperlink[@w:anchor='_Toc10000004']/w:r/w:instrText", u"PAGEREF _Toc10000004 \\h");
+}
+
 CPPUNIT_TEST_FIXTURE(Test, testAlphabeticalIndex_AutoColumn)
 {
     createSwDoc("alphabeticalIndex_AutoColumn.docx");

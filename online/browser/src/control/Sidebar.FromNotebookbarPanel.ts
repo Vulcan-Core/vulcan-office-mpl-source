@@ -97,6 +97,33 @@ class SidebarFromNotebookbarPanel extends Sidebar {
 		return super.onJSAction(e);
 	}
 
+	/** The deck this panel currently shows, for toolbar-button toggling. */
+	private currentDeckId: string | null = null;
+
+	private isShowing(): boolean {
+		return !!(this.wrapper && this.wrapper.classList.contains('visible'));
+	}
+
+	public toggleTransitionsSidebar() {
+		// The toolbar button both opens and closes the deck, like the core
+		// deck buttons do (there is no other close affordance here).
+		if (this.currentDeckId === 'transitions' && this.isShowing()) {
+			this.currentDeckId = null;
+			this.closeSidebar();
+			return;
+		}
+		this.openTransitionsSidebar();
+	}
+
+	public toggleAnimationsSidebar() {
+		if (this.currentDeckId === 'animations' && this.isShowing()) {
+			this.currentDeckId = null;
+			this.closeSidebar();
+			return;
+		}
+		this.openAnimationsSidebar();
+	}
+
 	public openTransitionsSidebar() {
 		// we need to clean the core based sidebars
 		this.closeSidebar();
@@ -109,6 +136,7 @@ class SidebarFromNotebookbarPanel extends Sidebar {
 			_('Transitions'),
 			this.models.get(NotebookbarBasedSidebarId.Transitions)?.getSnapshot(),
 		);
+		this.currentDeckId = 'transitions';
 	}
 
 	public openAnimationsSidebar() {
@@ -123,6 +151,7 @@ class SidebarFromNotebookbarPanel extends Sidebar {
 			_('Animations'),
 			this.models.get(NotebookbarBasedSidebarId.Animations)?.getSnapshot(),
 		);
+		this.currentDeckId = 'animations';
 	}
 
 	// reuse Sidebar container

@@ -210,6 +210,10 @@ class SwUINumRuleItem;
 #define FN_RECORD_TRACKED_CHANGES_MENU         (FN_VIEW + 71)  /* Menu for the track changes record modes */
 #define FN_TRACK_CHANGES_IN_THIS_VIEW          (FN_VIEW + 72)  /* Record track changes only in this view */
 #define FN_TRACK_CHANGES_IN_ALL_VIEWS          (FN_VIEW + 73)  /* Record track changes only in all views */
+/* VULCAN: .uno:BrowseWidth -- the browse-mode (web view) reflow width in
+ * twips, stated by the COKit client. Write-only; no StateMethod. Consumed by
+ * SwRootFrame::ImplCalcBrowseWidth via SwViewShell::setKitBrowseWidth. */
+#define FN_BROWSE_WIDTH                        (FN_VIEW + 74)
 
 // Region: Insert
 #define FN_INSERT_BOOKMARK      (FN_INSERT + 2 )  /* Bookmark */

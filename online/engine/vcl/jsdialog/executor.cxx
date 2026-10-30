@@ -99,7 +99,12 @@ void SendNavigatorForView(const sal_uInt64 nShellId)
 
 void SendSidebarForView(const sal_uInt64 nShellId)
 {
-    jsdialog::SendFullUpdate(OUString::number(nShellId) + "sidebar", u"Panel"_ustr);
+    SendSidebarForView(nShellId, false);
+}
+
+void SendSidebarForView(const sal_uInt64 nShellId, bool bForce)
+{
+    jsdialog::SendFullUpdate(OUString::number(nShellId) + "sidebar", u"Panel"_ustr, bForce);
 }
 
 void SendQuickFindForView(const sal_uInt64 nShellId)
@@ -109,10 +114,15 @@ void SendQuickFindForView(const sal_uInt64 nShellId)
 
 void SendFullUpdate(const OUString& nWindowId, const OUString& rWidget)
 {
+    SendFullUpdate(nWindowId, rWidget, false);
+}
+
+void SendFullUpdate(const OUString& nWindowId, const OUString& rWidget, bool bForce)
+{
     auto aWidgetMap = JSInstanceBuilder::Widgets().Find(nWindowId);
     weld::Widget* pWidget = aWidgetMap ? aWidgetMap->Find(rWidget) : nullptr;
     if (auto pJSWidget = dynamic_cast<BaseJSWidget*>(pWidget))
-        pJSWidget->sendFullUpdate();
+        pJSWidget->sendFullUpdate(bForce);
 }
 
 void SendFullUpdate(weld::Widget& rWidget)

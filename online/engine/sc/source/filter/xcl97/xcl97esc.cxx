@@ -240,10 +240,21 @@ EscherExHostAppData* XclEscherEx::StartShape( const Reference< XShape >& rxShape
             {
                 SAL_WARN("sc", "XclEscherEx::StartShape, this control can't get the property ControlTypeinMSO!");
             }
-            if( nMsCtlType == 2 )  //OCX Form Control
-                pCurrXclObj = CreateOCXCtrlObj( rxShape, pChildAnchor ).release();
-            else  //TBX Form Control
-                pCurrXclObj = CreateTBXCtrlObj( rxShape, pChildAnchor ).release();
+            // An ActiveX control the xlsx import kept goes back to xlsx/xlsm as ActiveX. Anything that
+            // cannot be written so takes the paths below, as before (TBX: form control; OCX: .xls only).
+            if( GetOutput() != EXC_OUTPUT_BINARY && XclExpOcxXmlControlObj::IsImportedActiveX( rxShape ) )
+            {
+                auto xAxCtrl = std::make_unique< XclExpOcxXmlControlObj >( mrObjMgr, rxShape, pChildAnchor );
+                if( xAxCtrl->IsValid() )
+                    pCurrXclObj = xAxCtrl.release();
+            }
+            if( !pCurrXclObj )
+            {
+                if( nMsCtlType == 2 )  //OCX Form Control
+                    pCurrXclObj = CreateOCXCtrlObj( rxShape, pChildAnchor ).release();
+                else  //TBX Form Control
+                    pCurrXclObj = CreateTBXCtrlObj( rxShape, pChildAnchor ).release();
+            }
             if( !pCurrXclObj )
                 pCurrXclObj = new XclObjAny( mrObjMgr, rxShape, &GetDoc() ); // just a metafile
         }

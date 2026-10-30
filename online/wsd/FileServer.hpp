@@ -145,12 +145,6 @@ private:
                                          const RequestDetails& requestDetails,
                                          std::istream& message,
                                          const std::shared_ptr<StreamSocket>& socket);
-    void preprocessWelcomeFile(const Poco::Net::HTTPRequest& request,
-                               http::Response& httpResponse,
-                               const RequestDetails& requestDetails,
-                               std::istream& message,
-                               const std::shared_ptr<StreamSocket>& socket);
-
     void replaceServiceRoot(const Poco::Net::HTTPRequest& request, http::Response& httpResponse,
                             const RequestDetails& requestDetails,
                             const std::shared_ptr<StreamSocket>& socket);
@@ -162,14 +156,16 @@ private:
     /// Persist a viewsetting.json upload. Secrets the browser asked to keep are
     /// restored from the currently stored file (fetched from currentFileUrl)
     /// before the merged body is written back, so the browser never has to hold
-    /// them. Reports the outcome on the socket.
+    /// them. Reports the outcome on the socket. serverToServer is the upload
+    /// request's trust, which vets both URLs' hosts.
     static void handleViewSettingUpload(const std::string& wopiSettingBaseUrl,
                                         const std::string& fileId, const std::string& accessToken,
                                         const std::string& currentFileUrl,
                                         const std::string& uploadedFilePath,
                                         std::shared_ptr<FileUtil::OwnedFile> uploadedFileOwnership,
                                         const std::string& requestPath,
-                                        const std::shared_ptr<StreamSocket>& socket);
+                                        const std::shared_ptr<StreamSocket>& socket,
+                                        bool serverToServer);
 
     static void fetchWopiSettingConfigs(const Poco::Net::HTTPRequest& request,
                                         std::istream& message,

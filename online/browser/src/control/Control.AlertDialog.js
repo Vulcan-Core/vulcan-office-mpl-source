@@ -52,6 +52,44 @@ window.L.Control.AlertDialog = window.L.Control.extend({
 				messageText = window.errorMessages.invalidLink;
 			}
 
+			/*
+			 * P1. THIS MODAL HAD NO WAY OUT ON A PHONE.
+			 *
+			 * Measured on the built image at 393x852: #mobile-wizard came up
+			 * position:fixed, z-index 2001, 393x800 -- the whole frame -- with
+			 * "Open link" as its only control. Five touch gestures (tap below
+			 * the content, tap top-left, swipe down, tap the grabber, tap the
+			 * host header) all failed; only a hardware Escape closed it, and a
+			 * phone does not have one. The only remaining move was to follow a
+			 * link the dialog exists to let you decline.
+			 *
+			 * withCancel puts a second button in the modal's OWN buttonbox, and
+			 * that button is wired without touching any of the chrome the other
+			 * fixes in this change add: showInfoModal passes `openlink-cancel`
+			 * to showModal as cancelButtonId, and showModal registers
+			 * {id: cancelButtonId, func: () => this.closeModal(dialogId)}
+			 * unconditionally (Control.UIManager.ts). So this path fires even if
+			 * the sheet is mis-sized, the scrim is unreachable and the close
+			 * control never renders -- which is the property worth having on the
+			 * one defect where a plausible-looking fix that does not fire leaves
+			 * a user trapped.
+			 *
+			 * Gated on isSmallScreenDevice() ALONE, deliberately unlike the
+			 * sheet geometry and the close control, which are also gated on
+			 * html.vulcan-mobile-chrome because they have CSS behind them. The
+			 * full-frame wizard path is taken by every small-screen device
+			 * (Util.MessageRouter routes modalpopup to the wizard on that test
+			 * by itself), so a phone loaded with `?vulcanChrome=desktop` is in
+			 * the trap with none of the chrome-class fixes applying to it. This
+			 * button is pure dialog JSON with no stylesheet dependency, so it is
+			 * the one path that can cover that configuration too — and it is the
+			 * path worth having cover it.
+			 *
+			 * Desktop is untouched: its dialog is a small centred box with a
+			 * titlebar ✕ and a reachable scrim already.
+			 */
+			var isSmallScreen = window.mode.isSmallScreenDevice();
+
 			this._map.uiManager.showInfoModal('openlink', _('External link'), messageText, url,
 				isLinkValid ? _('Open link') : _('OK'), function() {
 					if (!isLinkValid)
@@ -60,8 +98,22 @@ window.L.Control.AlertDialog = window.L.Control.extend({
 						url = window.processCoolUrl({ url: url, type: 'doc' });
 					}
 
-					window.open(url, '_blank');
-				});
+					// SANITIZE THE URL WE ACTUALLY OPEN. `sanitizeUrl(url)`
+					// above is computed only to pick the dialog's wording --
+					// its result was thrown away and the RAW url was opened, so
+					// the check told the user a link was unsafe and then
+					// followed it anyway if they tapped through. It also has to
+					// happen AFTER processCoolUrl, which can rewrite the url.
+					// The sibling call site gets this right
+					// (Control.UIManager.ts:2817).
+					//
+					// `noopener` closes reverse tabnabbing: without it the page
+					// we open inherits window.opener and can navigate THIS tab
+					// -- the one holding the document -- to anywhere it likes.
+					// A .docx is untrusted input that arrives by email, so a
+					// link in one is exactly the vector that matters here.
+					window.open(sanitizeUrl(url), '_blank', 'noopener');
+				}, /* withCancel: */ isSmallScreen);
 		} else if (e.kind == 'network' && e.code == 24581) {
 			if (e.cmd == 'paste') {
 				var alertId = 'paste_network_access_error';

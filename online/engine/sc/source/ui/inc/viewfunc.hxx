@@ -195,6 +195,9 @@ public:
 
     void            SetNumberFormat( SvNumFormatType nFormatType, sal_uLong nAdd = 0 );
     void            SetNumFmtByStr( const OUString& rCode );
+    // Vulcan fork: an en-US format code; the cells' key in rKey when Applied (viewfunc.cxx).
+    enum class EnglishNumFmtResult { Applied, Protected, Unreadable };
+    EnglishNumFmtResult SetNumFmtByEnglishCode( const OUString& rCode, sal_uInt32& rKey );
     void            ChangeNumFmtDecimals( bool bIncrement );
 
     void            SetValidation( const ScValidationData& rNew );

@@ -68,6 +68,9 @@ public:
 
     void clear()
     {
+        // Drop the memoized answers too: a list re-parsed with no entries
+        // must not keep answering from the old ones.
+        _matchedMemo.clear();
         _allowed.clear();
         _denied.clear();
     }

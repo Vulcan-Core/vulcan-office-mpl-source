@@ -24,11 +24,16 @@
 #include <svl/stritem.hxx>
 #include <svl/numformat.hxx>
 #include <svl/zformat.hxx>
+#include <sot/formats.hxx>
 #include <COKit/COKitEnums.h>
 #include <vcl/scheduler.hxx>
 #include <comphelper/kit.hxx>
 #include <comphelper/propertyvalue.hxx>
 #include <comphelper/dispatchcommand.hxx>
+#include <cppuhelper/implbase.hxx>
+#include <com/sun/star/frame/DispatchResultEvent.hpp>
+#include <com/sun/star/frame/DispatchResultState.hpp>
+#include <com/sun/star/frame/XDispatchResultListener.hpp>
 #include <sfx2/msgpool.hxx>
 #include <sfx2/childwin.hxx>
 #include <sfx2/kit/helper.hxx>
@@ -49,6 +54,7 @@
 #include <editutil.hxx>
 #include <undomanager.hxx>
 #include <docsh.hxx>
+#include <impex.hxx>
 #include <tabvwsh.hxx>
 #include <dbdocfun.hxx>
 #include <dbdata.hxx>
@@ -230,6 +236,114 @@ CPPUNIT_TEST_FIXTURE(ScTiledRenderingTest, testEmptyColumnSelection)
 
     // should be an empty string
     CPPUNIT_ASSERT_EQUAL(OString(), apitest::helper::transferable::getTextSelection(pModelObj->getSelection(), "text/plain;charset=utf-8"_ostr));
+}
+
+namespace
+{
+// The AI bridge's range-addressed cell reader (ScModelObj::getCommandValues,
+// .uno:ExtractCellValues / .uno:ExtractCellFormulas), parsed back.
+boost::property_tree::ptree lcl_cellGrid(ScModelObj* pModelObj, const OString& rCommand,
+                                         const char* pNode)
+{
+    tools::JsonWriter aJsonWriter;
+    pModelObj->getCommandValues(aJsonWriter, rCommand);
+    std::stringstream aStream((std::string(aJsonWriter.finishAndGetAsOString())));
+    boost::property_tree::ptree aTree;
+    boost::property_tree::read_json(aStream, aTree);
+    return aTree.get_child(pNode);
+}
+
+std::vector<std::vector<std::string>> lcl_cellRows(const boost::property_tree::ptree& rGrid)
+{
+    std::vector<std::vector<std::string>> aRows;
+    for (const auto& rRow : rGrid.get_child("rows"))
+    {
+        std::vector<std::string> aCells;
+        for (const auto& rCell : rRow.second)
+            aCells.push_back(rCell.second.get_value<std::string>());
+        aRows.push_back(aCells);
+    }
+    return aRows;
+}
+}
+
+CPPUNIT_TEST_FIXTURE(ScTiledRenderingTest, testExtractCellValuesKeepsTheAskedShapePastTheDataArea)
+{
+    // The clipboard's text export clamps a block to the sheet's data
+    // rectangle; the range-addressed reader answers the rectangle it was
+    // asked for, empty trailing row included, and echoes the request.
+    ScModelObj* pModelObj = createDoc("empty.ods");
+    ScDocument* pDoc = pModelObj->GetDocument();
+    pDoc->SetString(ScAddress(0, 0, 0), u"hello"_ustr);
+    pDoc->SetString(ScAddress(1, 0, 0), u"edited"_ustr);
+    pDoc->SetString(ScAddress(0, 1, 0), u"42"_ustr);
+
+    const auto aGrid = lcl_cellGrid(pModelObj, ".uno:ExtractCellValues?range=Hoja1.A1:B3&tag=7"_ostr, "Values");
+    CPPUNIT_ASSERT_EQUAL(std::string("Hoja1.A1:B3"), aGrid.get<std::string>("range"));
+    CPPUNIT_ASSERT_EQUAL(std::string("7"), aGrid.get<std::string>("tag"));
+    CPPUNIT_ASSERT_EQUAL(std::string("Hoja1"), aGrid.get<std::string>("sheet"));
+    CPPUNIT_ASSERT_EQUAL(0, aGrid.get<int>("startCol"));
+    CPPUNIT_ASSERT_EQUAL(0, aGrid.get<int>("startRow"));
+    CPPUNIT_ASSERT_EQUAL(1, aGrid.get<int>("endCol"));
+    CPPUNIT_ASSERT_EQUAL(2, aGrid.get<int>("endRow"));
+    CPPUNIT_ASSERT_EQUAL(false, aGrid.get<bool>("truncated"));
+    const auto aRows = lcl_cellRows(aGrid);
+    CPPUNIT_ASSERT_EQUAL(size_t(3), aRows.size());
+    CPPUNIT_ASSERT_EQUAL(std::string("hello"), aRows[0][0]);
+    CPPUNIT_ASSERT_EQUAL(std::string("edited"), aRows[0][1]);
+    CPPUNIT_ASSERT_EQUAL(std::string("42"), aRows[1][0]);
+    CPPUNIT_ASSERT_EQUAL(std::string(), aRows[1][1]);
+    CPPUNIT_ASSERT_EQUAL(size_t(2), aRows[2].size());
+    CPPUNIT_ASSERT_EQUAL(std::string(), aRows[2][0]);
+    CPPUNIT_ASSERT_EQUAL(std::string(), aRows[2][1]);
+
+    // The second oracle: the clipboard text export of the same block is the
+    // shrunk one -- two lines, not three -- the reply the bridge's shape
+    // check could never accept.
+    ScImportExport aExport(*pDoc, ScRange(0, 0, 0, 1, 2, 0));
+    OUString aTsv;
+    CPPUNIT_ASSERT(aExport.ExportString(aTsv, SotClipboardFormatId::STRING));
+    sal_Int32 nLines = 0;
+    for (sal_Int32 i = 0; i < aTsv.getLength(); ++i)
+        if (aTsv[i] == '\n')
+            ++nLines;
+    CPPUNIT_ASSERT_EQUAL(sal_Int32(2), nLines);
+}
+
+CPPUNIT_TEST_FIXTURE(ScTiledRenderingTest, testExtractCellValuesStartsOutsideTheDataArea)
+{
+    // Data at B2 only: the clipboard block for A1:C3 came back anchored at
+    // B2, which no client-side pad could place. The reader answers A1:C3.
+    ScModelObj* pModelObj = createDoc("empty.ods");
+    pModelObj->GetDocument()->SetString(ScAddress(1, 1, 0), u"x"_ustr);
+    const auto aGrid = lcl_cellGrid(pModelObj, ".uno:ExtractCellValues?range=Hoja1.A1:C3"_ostr, "Values");
+    CPPUNIT_ASSERT_EQUAL(0, aGrid.get<int>("startCol"));
+    CPPUNIT_ASSERT_EQUAL(0, aGrid.get<int>("startRow"));
+    const auto aRows = lcl_cellRows(aGrid);
+    CPPUNIT_ASSERT_EQUAL(size_t(3), aRows.size());
+    CPPUNIT_ASSERT_EQUAL(size_t(3), aRows[1].size());
+    CPPUNIT_ASSERT_EQUAL(std::string(), aRows[0][0]);
+    CPPUNIT_ASSERT_EQUAL(std::string("x"), aRows[1][1]);
+    CPPUNIT_ASSERT_EQUAL(std::string(), aRows[2][2]);
+}
+
+CPPUNIT_TEST_FIXTURE(ScTiledRenderingTest, testExtractCellValuesReturnsDisplayedTextNotFormulaText)
+{
+    ScModelObj* pModelObj = createDoc("empty.ods");
+    pModelObj->GetDocument()->SetString(ScAddress(0, 0, 0), u"=1+1"_ustr);
+    const auto aValues = lcl_cellRows(lcl_cellGrid(pModelObj, ".uno:ExtractCellValues?range=Hoja1.A1:A1"_ostr, "Values"));
+    const auto aFormulas = lcl_cellRows(lcl_cellGrid(pModelObj, ".uno:ExtractCellFormulas?range=Hoja1.A1:A1"_ostr, "Formulas"));
+    CPPUNIT_ASSERT_EQUAL(std::string("2"), aValues[0][0]);
+    CPPUNIT_ASSERT_EQUAL(std::string("=1+1"), aFormulas[0][0]);
+}
+
+CPPUNIT_TEST_FIXTURE(ScTiledRenderingTest, testExtractCellValuesRefusesAnUnparseableRangeInsteadOfServingTheUsedRange)
+{
+    ScModelObj* pModelObj = createDoc("empty.ods");
+    pModelObj->GetDocument()->SetString(ScAddress(0, 0, 0), u"hello"_ustr);
+    const auto aGrid = lcl_cellGrid(pModelObj, ".uno:ExtractCellValues?range=Nope"_ostr, "Values");
+    CPPUNIT_ASSERT(bool(aGrid.get_child_optional("error")));
+    CPPUNIT_ASSERT(!aGrid.get_child_optional("rows"));
 }
 
 CPPUNIT_TEST_FIXTURE(ScTiledRenderingTest, testViewCursors)
@@ -1292,11 +1406,9 @@ CPPUNIT_TEST_FIXTURE(ScTiledRenderingTest, testDisableUndoRepair)
         pView2->GetSlotState(SID_UNDO, nullptr, &aSet2);
         CPPUNIT_ASSERT_EQUAL(SfxItemState::SET, aSet1.GetItemState(SID_UNDO));
         CPPUNIT_ASSERT(dynamic_cast< const SfxStringItem* >(aSet1.GetItem(SID_UNDO)));
-        CPPUNIT_ASSERT_EQUAL(SfxItemState::SET, aSet2.GetItemState(SID_UNDO));
-        CPPUNIT_ASSERT(dynamic_cast< const SfxUInt32Item* >(aSet2.GetItem(SID_UNDO)));
-        const SfxUInt32Item* pUInt32Item = dynamic_cast<const SfxUInt32Item*>(aSet2.GetItem(SID_UNDO));
-        CPPUNIT_ASSERT(pUInt32Item);
-        CPPUNIT_ASSERT_EQUAL(static_cast< sal_uInt32 >(SID_REPAIRPACKAGE), pUInt32Item->GetValue());
+        // Vulcan fork: view2 has nothing of its own to undo: disabled, not the
+        // SID_REPAIRPACKAGE "conflict" state behind the stock conflict dialog.
+        CPPUNIT_ASSERT_EQUAL(SfxItemState::DISABLED, aSet2.GetItemState(SID_UNDO));
     }
 
     // text edit a cell in view #2
@@ -2844,6 +2956,196 @@ CPPUNIT_TEST_FIXTURE(ScTiledRenderingTest, testUndoReordering)
     dispatchCommand(mxComponent, u".uno:Undo"_ustr, {});
     // check that undo has been executed on view #2
     CPPUNIT_ASSERT_EQUAL(std::size_t(0), pUndoManager->GetUndoActionCount());
+}
+
+namespace
+{
+/// Vulcan fork: captures a refused undo's JSON answer (SfxViewUndoLookupToJson).
+class VulcanUndoResultListener : public cppu::WeakImplHelper<css::frame::XDispatchResultListener>
+{
+public:
+    OUString m_aResult;
+    bool m_bNumeric = false;
+
+    virtual void SAL_CALL dispatchFinished(const css::frame::DispatchResultEvent& rEvent) override
+    {
+        m_aResult.clear();
+        sal_uInt32 nNumber = 0;
+        m_bNumeric = (rEvent.Result >>= nNumber);
+        if (!m_bNumeric)
+            rEvent.Result >>= m_aResult;
+    }
+
+    virtual void SAL_CALL disposing(const css::lang::EventObject&) override {}
+};
+
+void lcl_VulcanTypeInCell(ScModelObj* pModelObj, sal_Unicode c)
+{
+    pModelObj->postKeyEvent(KIT_KEYEVENT_KEYINPUT, c, 0);
+    pModelObj->postKeyEvent(KIT_KEYEVENT_KEYUP, c, 0);
+    pModelObj->postKeyEvent(KIT_KEYEVENT_KEYINPUT, 0, awt::Key::RETURN);
+    pModelObj->postKeyEvent(KIT_KEYEVENT_KEYUP, 0, awt::Key::RETURN);
+    Scheduler::ProcessEventsToIdle();
+}
+}
+
+CPPUNIT_TEST_FIXTURE(ScTiledRenderingTest, testVulcanUndoPastAgentBatch)
+{
+    ScModelObj* pModelObj = createDoc("small.ods");
+    CPPUNIT_ASSERT(pModelObj);
+    ScDocument* pDoc = pModelObj->GetDocument();
+    ScUndoManager* pUndoManager = pDoc->GetUndoManager();
+    CPPUNIT_ASSERT(pUndoManager);
+
+    int nView1 = KitHelper::getCurrentView();
+    ScTestViewCallback aView1;
+    KitHelper::createView();
+    int nView2 = KitHelper::getCurrentView();
+    pModelObj->initializeForTiledRendering(cpo::uno::Sequence<beans::PropertyValue>());
+    ScTestViewCallback aView2;
+
+    // Given view 1 typed into A1:
+    KitHelper::setView(nView1);
+    lcl_VulcanTypeInCell(pModelObj, 'x');
+    CPPUNIT_ASSERT_EQUAL(u"x"_ustr, pDoc->GetString(ScAddress(0, 0, 0)));
+
+    // And then view 2 (standing in for the AI's view) wrote two cells far away, inside ONE
+    // undo batch -- a list action with two children, which upstream could not look into, so
+    // every later undo by anyone else was refused as a conflict:
+    KitHelper::setView(nView2);
+    dispatchCommand(mxComponent, u".uno:Vulcan_BeginUndoBatch"_ustr, {});
+    for (const auto& [aCell, aText] : { std::pair(u"$D$10"_ustr, u"ai"_ustr), std::pair(u"$E$10"_ustr, u"ai2"_ustr) })
+    {
+        cpo::uno::Sequence<beans::PropertyValue> aGoTo
+            = { comphelper::makePropertyValue(u"ToPoint"_ustr, aCell) };
+        dispatchCommand(mxComponent, u".uno:GoToCell"_ustr, aGoTo);
+        cpo::uno::Sequence<beans::PropertyValue> aEnter
+            = { comphelper::makePropertyValue(u"StringName"_ustr, aText) };
+        dispatchCommand(mxComponent, u".uno:EnterString"_ustr, aEnter);
+    }
+    dispatchCommand(mxComponent, u".uno:Vulcan_EndUndoBatch"_ustr, {});
+    CPPUNIT_ASSERT_EQUAL(u"ai"_ustr, pDoc->GetString(ScAddress(3, 9, 0)));
+    CPPUNIT_ASSERT_EQUAL(ViewShellId(nView2), pUndoManager->GetUndoAction()->GetViewShellId());
+    const size_t nActions = pUndoManager->GetUndoActionCount();
+
+    // When view 1 presses undo:
+    KitHelper::setView(nView1);
+    rtl::Reference<VulcanUndoResultListener> pResult = new VulcanUndoResultListener();
+    comphelper::dispatchCommand(u".uno:Undo"_ustr, {}, pResult);
+    Scheduler::ProcessEventsToIdle();
+
+    // Then view 1's own typing is taken back, out of order, and the AI's cells stay:
+    CPPUNIT_ASSERT(pDoc->GetString(ScAddress(0, 0, 0)) != u"x");
+    CPPUNIT_ASSERT_EQUAL(u"ai"_ustr, pDoc->GetString(ScAddress(3, 9, 0)));
+    CPPUNIT_ASSERT_EQUAL(u"ai2"_ustr, pDoc->GetString(ScAddress(4, 9, 0)));
+    CPPUNIT_ASSERT_EQUAL(nActions - 1, pUndoManager->GetUndoActionCount());
+    CPPUNIT_ASSERT(!pResult->m_bNumeric);
+    CPPUNIT_ASSERT(pResult->m_aResult.isEmpty());
+
+    SfxViewShell::Current()->setCOKitViewCallback(nullptr);
+    KitHelper::setView(nView2);
+    SfxViewShell::Current()->setCOKitViewCallback(nullptr);
+}
+
+CPPUNIT_TEST_FIXTURE(ScTiledRenderingTest, testVulcanUndoBlockedSameCell)
+{
+    ScModelObj* pModelObj = createDoc("small.ods");
+    CPPUNIT_ASSERT(pModelObj);
+    ScDocument* pDoc = pModelObj->GetDocument();
+    ScUndoManager* pUndoManager = pDoc->GetUndoManager();
+    CPPUNIT_ASSERT(pUndoManager);
+
+    int nView1 = KitHelper::getCurrentView();
+    SfxViewShell* pView1 = SfxViewShell::Current();
+    ScTestViewCallback aView1;
+    KitHelper::createView();
+    int nView2 = KitHelper::getCurrentView();
+    pModelObj->initializeForTiledRendering(cpo::uno::Sequence<beans::PropertyValue>());
+    ScTestViewCallback aView2;
+
+    // Given view 1 typed into A1, and then view 2 overwrote A1:
+    KitHelper::setView(nView1);
+    lcl_VulcanTypeInCell(pModelObj, 'x');
+    KitHelper::setView(nView2);
+    cpo::uno::Sequence<beans::PropertyValue> aGoTo
+        = { comphelper::makePropertyValue(u"ToPoint"_ustr, u"$A$1"_ustr) };
+    dispatchCommand(mxComponent, u".uno:GoToCell"_ustr, aGoTo);
+    lcl_VulcanTypeInCell(pModelObj, 'y');
+    CPPUNIT_ASSERT_EQUAL(u"y"_ustr, pDoc->GetString(ScAddress(0, 0, 0)));
+    const size_t nActions = pUndoManager->GetUndoActionCount();
+
+    // Then view 1's Undo is disabled, not in the "conflict" state:
+    {
+        SfxItemSet aSet1(pView1->GetPool(), svl::Items<SID_UNDO, SID_UNDO>);
+        pView1->GetSlotState(SID_UNDO, nullptr, &aSet1);
+        CPPUNIT_ASSERT_EQUAL(SfxItemState::DISABLED, aSet1.GetItemState(SID_UNDO));
+    }
+
+    // When view 1 presses undo anyway:
+    KitHelper::setView(nView1);
+    rtl::Reference<VulcanUndoResultListener> pResult = new VulcanUndoResultListener();
+    comphelper::dispatchCommand(u".uno:Undo"_ustr, {}, pResult);
+    Scheduler::ProcessEventsToIdle();
+
+    // Then nothing is undone, and the answer is JSON naming the view in the way:
+    CPPUNIT_ASSERT_EQUAL(u"y"_ustr, pDoc->GetString(ScAddress(0, 0, 0)));
+    CPPUNIT_ASSERT_EQUAL(nActions, pUndoManager->GetUndoActionCount());
+    CPPUNIT_ASSERT(!pResult->m_bNumeric);
+    const OUString aExpected = OUString::Concat(u"{\"vulcanUndo\":{\"status\":\"blocked\",\"otherViewId\":")
+                               + OUString::number(nView2) + u",\"command\":\"undo\"}}";
+    CPPUNIT_ASSERT_EQUAL(aExpected, pResult->m_aResult);
+
+    SfxViewShell::Current()->setCOKitViewCallback(nullptr);
+    KitHelper::setView(nView2);
+    SfxViewShell::Current()->setCOKitViewCallback(nullptr);
+}
+
+CPPUNIT_TEST_FIXTURE(ScTiledRenderingTest, testVulcanUndoCountStopsAtOtherView)
+{
+    ScModelObj* pModelObj = createDoc("small.ods");
+    CPPUNIT_ASSERT(pModelObj);
+    ScDocument* pDoc = pModelObj->GetDocument();
+    ScUndoManager* pUndoManager = pDoc->GetUndoManager();
+    CPPUNIT_ASSERT(pUndoManager);
+
+    int nView1 = KitHelper::getCurrentView();
+    ScTestViewCallback aView1;
+    KitHelper::createView();
+    int nView2 = KitHelper::getCurrentView();
+    pModelObj->initializeForTiledRendering(cpo::uno::Sequence<beans::PropertyValue>());
+    ScTestViewCallback aView2;
+
+    // Given view 1 typed into A1, view 2 into D10, and then view 1 into A2:
+    KitHelper::setView(nView1);
+    lcl_VulcanTypeInCell(pModelObj, 'x');
+    KitHelper::setView(nView2);
+    cpo::uno::Sequence<beans::PropertyValue> aGoTo
+        = { comphelper::makePropertyValue(u"ToPoint"_ustr, u"$D$10"_ustr) };
+    dispatchCommand(mxComponent, u".uno:GoToCell"_ustr, aGoTo);
+    lcl_VulcanTypeInCell(pModelObj, 'y');
+    KitHelper::setView(nView1);
+    lcl_VulcanTypeInCell(pModelObj, 'w');
+    CPPUNIT_ASSERT_EQUAL(u"w"_ustr, pDoc->GetString(ScAddress(0, 1, 0)));
+    const size_t nActions = pUndoManager->GetUndoActionCount();
+
+    // When view 1 asks to undo 2 steps at once: only the topmost one is its own.
+    cpo::uno::Sequence<beans::PropertyValue> aArgs
+        = { comphelper::makePropertyValue(u"Undo"_ustr, static_cast<sal_uInt16>(2)) };
+    rtl::Reference<VulcanUndoResultListener> pResult = new VulcanUndoResultListener();
+    comphelper::dispatchCommand(u".uno:Undo"_ustr, aArgs, pResult);
+    Scheduler::ProcessEventsToIdle();
+
+    // Then nothing is undone -- above all not view 2's D10 -- and the answer names view 2:
+    CPPUNIT_ASSERT_EQUAL(u"w"_ustr, pDoc->GetString(ScAddress(0, 1, 0)));
+    CPPUNIT_ASSERT_EQUAL(u"y"_ustr, pDoc->GetString(ScAddress(3, 9, 0)));
+    CPPUNIT_ASSERT_EQUAL(nActions, pUndoManager->GetUndoActionCount());
+    const OUString aExpected = OUString::Concat(u"{\"vulcanUndo\":{\"status\":\"blocked\",\"otherViewId\":")
+                               + OUString::number(nView2) + u",\"command\":\"undo\"}}";
+    CPPUNIT_ASSERT_EQUAL(aExpected, pResult->m_aResult);
+
+    SfxViewShell::Current()->setCOKitViewCallback(nullptr);
+    KitHelper::setView(nView2);
+    SfxViewShell::Current()->setCOKitViewCallback(nullptr);
 }
 
 CPPUNIT_TEST_FIXTURE(ScTiledRenderingTest, testUndoReorderingRedo)

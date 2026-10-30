@@ -77,11 +77,12 @@ JSDialog.grid = function (
 	table.id = data.id;
 
 	if (data.allyRole) {
-		table.role = data.allyRole;
+		table.setAttribute('role', data.allyRole);
 
 		if (data.allyRole === 'listbox' && data.initialSelectedId)
 			table.setAttribute('aria-activedescendant', data.initialSelectedId);
 	}
+	if (data.aria?.label) table.setAttribute('aria-label', data.aria.label);
 
 	if (data.tabIndex !== undefined)
 		table.setAttribute('tabindex', data.tabIndex);

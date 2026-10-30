@@ -20,7 +20,14 @@ namespace cool {
 
 export class CornerHeader extends CanvasSectionObject {
 	anchor: any = [[app.CSections.ColumnGroup.name, 'bottom', 'top'], [app.CSections.RowGroup.name, 'right', 'left']];
-	size: number[] = [48 * app.dpiScale, 19 * app.dpiScale]; // These values are static.
+	// Height MUST track ColumnHeader's -- see Header.columnHeaderHeight().
+	// RowHeader anchors to this section's bottom while TilesSection anchors to
+	// ColumnHeader's, so a mismatch offsets every row label from its row.
+	// Width MUST track RowHeader's -- see Header.rowHeaderWidth(). TilesSection
+	// anchors its left to RowHeader's right while ColumnHeader anchors its left
+	// to this section's right, so a mismatch offsets every column label from
+	// its column.
+	size: number[] = [Header.rowHeaderWidth(), Header.columnHeaderHeight()];
 	processingOrder: number = app.CSections.CornerHeader.processingOrder;
 	drawingOrder: number = app.CSections.CornerHeader.drawingOrder;
 	zIndex: number = app.CSections.CornerHeader.zIndex;

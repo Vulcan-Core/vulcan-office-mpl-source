@@ -5104,7 +5104,7 @@ msgid ""
 "Unlinking citations will prevent Collabora Online from updating citations "
 "and bibliography in this document."
 msgstr ""
-"Desligar as citas impedirá que Collabora Online actualice as citas e a "
+"Desligar as citas impedirá que Vulcan Office actualice as citas e a "
 "bibliografía deste documento."
 
 #: src/control/HRuler.ts:321
@@ -6681,7 +6681,7 @@ msgstr ""
 #: src/map/handler/Map.VersionBar.js:50
 msgid "Your Collabora Online server needs updating. Version {0} is available."
 msgstr ""
-"O seu servidor Collabora Online precisa de ser actualizado. Está dispoñíbel "
+"O seu servidor Vulcan Office precisa de ser actualizado. Está dispoñíbel "
 "a versión {0}."
 
 #: src/map/handler/Map.WOPI.js:194
@@ -6970,7 +6970,7 @@ msgstr "Idea amarela"
 
 #: welcome/welcome.html%2Bhtml.head.title:9-3
 msgid "Collabora Online Welcome"
-msgstr "Dámoslle a benvida a Collabora Online"
+msgstr "Dámoslle a benvida a Vulcan Office"
 
 #: welcome/welcome.html%2Bhtml.body.div.div.div.div.h1:26-7
 msgid "Explore The New {coolversion}"
@@ -6979,7 +6979,7 @@ msgstr "Bótelle un ollo á nova {coolversion}"
 #: welcome/welcome.html%2Bhtml.body.div.div.div.div.h2:27-7
 #: welcome/welcome.html%2Bhtml.body.div.div.div.div.h2:38-7
 msgid "Collabora Online Development Edition"
-msgstr "Collabora Online, edición de desenvolvemento"
+msgstr "Vulcan Office, edición de desenvolvemento"
 
 #: welcome/welcome.html%2Bhtml.body.div.div.div.div.p:28-7
 msgid ""
@@ -7008,7 +7008,7 @@ msgid ""
 msgstr ""
 "Consulte as <a target=\"_blank\" rel=\"noopener\" href=\"https://www."
 "collaboraonline.com/code-26-04-release-notes/\">notas de publicación</a> e "
-"saiba todo sobre a última edición de desenvolvemento de Collabora Online, "
+"saiba todo sobre a última edición de desenvolvemento de Vulcan Office, "
 "dirixida a usuarios domésticos e equipos pequenos."
 
 #: welcome/welcome.html%2Bhtml.body.div.div.div.div.h1:48-7
@@ -7424,7 +7424,7 @@ msgstr ""
 #~ msgstr "O servidor estase reciclando e estará dispoñíbel en breve"
 
 #~ msgid "Oops, there is a problem connecting to Collabora Online : "
-#~ msgstr "Vaites! Produciuse un problema ao conectar co Collabora Online: "
+#~ msgstr "Vaites! Produciuse un problema ao conectar co Vulcan Office: "
 
 #~ msgid "Number of views"
 #~ msgstr "Número de vistas"

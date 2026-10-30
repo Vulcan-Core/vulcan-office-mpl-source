@@ -1328,6 +1328,9 @@ namespace //local functions originally from docfmt.cxx
             aSet.ClearItem( RES_TXTATR_INETFMT );
             aSet.ClearItem( RES_TXTATR_META );
             aSet.ClearItem( RES_TXTATR_METAFIELD );
+            // Rejecting the change applies this set again: with the item, it would wrap the
+            // range in a second content control sharing the first one's SwContentControl.
+            aSet.ClearItem( RES_TXTATR_CONTENTCONTROL );
             aSet.ClearItem(RES_CHRATR_RSID);
 
             // After GetParaAttr aSet can contain invalid/dontcare items (true == IsInvalidItem,
@@ -2842,7 +2845,8 @@ bool DocumentContentOperationsManager::Overwrite( const SwPaM &rRg, const OUStri
             bool bMerged(false);
             if (m_rDoc.GetIDocumentUndoRedo().DoesGroupUndo())
             {
-                SwUndo *const pUndo = m_rDoc.GetUndoManager().GetLastUndo();
+                // Vulcan fork: never merge into another view's action (per-view undo).
+                SwUndo *const pUndo = m_rDoc.GetUndoManager().GetLastUndoToGroupWith();
                 SwUndoOverwrite *const pUndoOW(
                     dynamic_cast<SwUndoOverwrite *>(pUndo) );
                 if (pUndoOW)
@@ -2950,7 +2954,8 @@ bool DocumentContentOperationsManager::InsertString( const SwPaM &rRg, const OUS
         // don't group the start if hints at the start should be expanded
         if (!(nInsertMode & SwInsertFlags::FORCEHINTEXPAND))
         {
-            SwUndo *const pLastUndo = m_rDoc.GetUndoManager().GetLastUndo();
+            // Vulcan fork: never merge into another view's typing (per-view undo).
+            SwUndo *const pLastUndo = m_rDoc.GetUndoManager().GetLastUndoToGroupWith();
             SwUndoInsert *const pUndoInsert(
                 dynamic_cast<SwUndoInsert *>(pLastUndo) );
             if (pUndoInsert && pUndoInsert->CanGrouping(rPos))
@@ -4447,7 +4452,8 @@ bool DocumentContentOperationsManager::DeleteAndJoinWithRedlineImpl(SwPaM & rPam
         if (MarkUndos.empty() && undos.size() == 1
             && m_rDoc.GetIDocumentUndoRedo().DoesGroupUndo())
         {
-            SwUndo * const pLastUndo( m_rDoc.GetUndoManager().GetLastUndo() );
+            // Vulcan fork: never merge into another view's deletion (per-view undo).
+            SwUndo * const pLastUndo( m_rDoc.GetUndoManager().GetLastUndoToGroupWith() );
             SwUndoRedlineDelete *const pUndoRedlineDel(dynamic_cast<SwUndoRedlineDelete*>(pLastUndo));
             bool const bMerged = pUndoRedlineDel
                 && pUndoRedlineDel->CanGrouping(*undos.front());
@@ -4598,7 +4604,8 @@ bool DocumentContentOperationsManager::DeleteRangeImplImpl(SwPaM & rPam, SwDelet
         bool bMerged(false);
         if (m_rDoc.GetIDocumentUndoRedo().DoesGroupUndo())
         {
-            SwUndo *const pLastUndo( m_rDoc.GetUndoManager().GetLastUndo() );
+            // Vulcan fork: never merge into another view's deletion (per-view undo).
+            SwUndo *const pLastUndo( m_rDoc.GetUndoManager().GetLastUndoToGroupWith() );
             SwUndoDelete *const pUndoDelete(
                     dynamic_cast<SwUndoDelete *>(pLastUndo) );
             if (pUndoDelete)
@@ -4814,6 +4821,11 @@ bool DocumentContentOperationsManager::ReplaceRangeImpl( SwPaM& rPam, const OUSt
                 aSet.ClearItem( RES_TXTATR_INETFMT );
                 aSet.ClearItem( RES_TXTATR_META );
                 aSet.ClearItem( RES_TXTATR_METAFIELD );
+                // The replacement is inserted inside the content control that holds the replaced
+                // text, and RstTextAttrs() below keeps that control. Applying the control's item
+                // again would wrap the replacement in a second control sharing the same
+                // SwContentControl.
+                aSet.ClearItem( RES_TXTATR_CONTENTCONTROL );
 
                 if( aDelPam.GetPoint() != aDelPam.End() )
                     aDelPam.Exchange();

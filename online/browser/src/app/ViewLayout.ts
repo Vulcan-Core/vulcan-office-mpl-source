@@ -43,9 +43,55 @@ class ScrollProperties {
 	usableThickness: number = 20 * app.roundedDpiScale;
 	horizontalScrollRightOffset: number = 20 /*usableThickness*/; // To prevent overlapping of the scroll bars.
 	scrollBarThickness: number = 6 * app.roundedDpiScale;
-	edgeOffset: number = 0;
+	edgeOffset: number = ScrollProperties.vulcanIndicatorEdgeOffset();
 
 	moveBy: number[] | null = null; // Pending move event (pX, pY).
+
+	/*
+	 * VO-P-0007 / M-0015 §B — the phone scroll indicator's inset from the edge
+	 * of its viewport, in canvas (core) px. Zero everywhere else, which is what
+	 * this field has silently been since it was declared: the four draw sites
+	 * in ScrollSection (drawVerticalScrollBar / drawHorizontalScrollBar, thumb
+	 * and railway) are its only readers, and nothing ever assigned it, so both
+	 * phone indicators sat flush against the glass.
+	 *
+	 * THE NUMBER IS MEASURED, NOT CHOSEN. On the reference at 1179x2556 the
+	 * vertical bar's right edge is at x = 1154 in a 1179-wide viewport and the
+	 * horizontal bar's bottom edge is at y = 2147 with the viewport ending at
+	 * 2172: 24 device px on both axes, i.e. 8 dp. The bar's own 6 dp thickness
+	 * (scrollBarThickness above) was already right and is untouched.
+	 *
+	 * DP, NOT DEVICE PX. app.dpiScale is clamped to VulcanTilePerf.TILE_DPI_CAP
+	 * on phone chrome, so a dpr-3 phone renders this canvas at 2x and the
+	 * browser upscales; 8 * roundedDpiScale is 16 backing px there, which is
+	 * the 24 screen px measured. CSS px is the invariant, exactly as it is for
+	 * the thickness one line up.
+	 *
+	 * WHY EVERY PHONE DOCTYPE AND NOT JUST CALC. The measurement is Sheets', but
+	 * this is one painted indicator shared by Writer, Calc and Impress, and the
+	 * inset is what keeps the HORIZONTAL bar off the display's corner arc --
+	 * RU-04 is universal law, and a Calc-only inset would leave the other two
+	 * doctypes with the geometry the law exists to forbid.
+	 *
+	 * 🔴 The gate is both halves. `?vulcanChrome=desktop` on a real phone leaves
+	 * isSmallScreenDevice() true and the class absent, and there the bar is a
+	 * grabbable control laid out against desktop CSS -- inset it and the grab
+	 * strip and the paint stop agreeing.
+	 */
+	private static vulcanIndicatorEdgeOffset(): number {
+		// The `!!…mode` guard is not defensive noise, and it is the fork's own
+		// idiom (Control.Menubar.ts spells the same one). This is a class FIELD
+		// initializer, so unlike every other gate in the tree it runs at layout
+		// construction rather than inside a method after boot -- earlier than
+		// window.mode exists in the mocha rig, where ViewLayouts are built
+		// against a bare window. No chrome machinery means no phone chrome,
+		// which is the desktop default and upstream's behaviour exactly.
+		const phoneChrome =
+			!!(<any>window).mode &&
+			(<any>window).mode.isSmallScreenDevice() &&
+			document.documentElement.classList.contains('vulcan-mobile-chrome');
+		return phoneChrome ? 8 * app.roundedDpiScale : 0;
+	}
 }
 
 // FIXME: should be abstract to split Writer and other layouts
@@ -54,6 +100,28 @@ class ViewLayoutBase {
 	public readonly type: string = 'ViewLayoutBase';
 
 	protected lastViewedRectangle: cool.SimpleRectangle; // Previously viewed rectangle.
+
+	// How fast the view is panning, in canvas (core) pixels per millisecond,
+	// per axis, unsigned. The companion to lastViewedRectangle: that pair
+	// answers "which way", through getLastPanDirection, which reduces the delta
+	// to Math.sign and throws the magnitude away. That is why the tile prefetch
+	// margin has always been a fixed number of tiles no matter how fast the
+	// view was moving. This keeps the magnitude so a consumer can ask.
+	//
+	// Recorded only by layouts that opt in (ViewLayoutCalc today) and read only
+	// through getPanSpeed, so a layout that never calls trackPanSpeed reports a
+	// standing 0 and every consumer of it falls back to its constant.
+	protected panSpeed: number[] = [0, 0];
+	protected panSpeedStamp: number = 0;
+
+	// Smoothing time constant: a single frame's delta is noisy (touchmove
+	// coalescing, a stray 2ms frame), so weight each sample by how much of this
+	// window it covers.
+	protected static readonly panSpeedSmoothingMs: number = 50;
+
+	// A gap longer than this means the previous gesture is over and the next
+	// delta is the start of a new one, not a continuation of the old speed.
+	protected static readonly panSpeedIdleMs: number = 250;
 
 	protected clientVisibleAreaCommand: string = ''; // Last visible area command. Checked to avoid sending the same command multiple times.
 	protected _viewedRectangle: cool.SimpleRectangle; // Currently viewed rectangle.
@@ -167,6 +235,35 @@ class ViewLayoutBase {
 		return [Math.sign(dx), Math.sign(dy)];
 	}
 
+	// Fold one viewedRectangle delta into the smoothed pan speed. Bookkeeping
+	// only -- it changes no behaviour by itself; a consumer has to read
+	// getPanSpeed and act on it.
+	protected trackPanSpeed(dX: number, dY: number): void {
+		const now = performance.now();
+		const dt = now - this.panSpeedStamp;
+		this.panSpeedStamp = now;
+
+		// Two updates inside the same clock tick carry no usable rate, and a
+		// long gap means this delta opens a new gesture rather than continuing
+		// the last one at its old speed.
+		if (!(dt > 0) || dt > ViewLayoutBase.panSpeedIdleMs) {
+			this.panSpeed = [0, 0];
+			return;
+		}
+
+		const weight = Math.min(1, dt / ViewLayoutBase.panSpeedSmoothingMs);
+		this.panSpeed = [
+			this.panSpeed[0] + (Math.abs(dX) / dt - this.panSpeed[0]) * weight,
+			this.panSpeed[1] + (Math.abs(dY) / dt - this.panSpeed[1]) * weight,
+		];
+	}
+
+	// Unsigned pan speed per axis, canvas (core) pixels per millisecond. Pairs
+	// with getLastPanDirection, which supplies the sign this drops.
+	public getPanSpeed(): Array<number> {
+		return this.panSpeed.slice();
+	}
+
 	public get viewedRectangle() {
 		return this._viewedRectangle;
 	}
@@ -225,7 +322,7 @@ class ViewLayoutBase {
 	private calculateHorizontalScrollLength(
 		documentAnchor: CanvasSectionObject,
 	): void {
-		const canvasWidth: number = documentAnchor.size[0];
+		const canvasWidth: number = this.getHorizontalViewportWidth(documentAnchor);
 		this.scrollProperties.xOffset = documentAnchor.myTopLeft[0];
 
 		this.scrollProperties.horizontalScrollRailwayOffset =
@@ -277,15 +374,44 @@ class ViewLayoutBase {
 		}
 	}
 
+	// VULCAN: vector canvas editing (decks and pages) pans up to a
+	// HALF-INCH APRON past the page edge (720 twips of slide space), symmetric per axis —
+	// the same apron _updateMaxBounds gives the zoom-target clamp.
+	// Everything else pans exactly to the document edge.
+	protected vulcanScrollPadCore(): number {
+		const w = window as any;
+		const layer: any = app?.map?._docLayer;
+		if (!w.RenderManager?.isVectorRendering?.()) return 0;
+		if (!VulcanLiveCanvas.isCanvasDocType(layer?._docType) || app.file.fileBasedView)
+			return 0;
+		return Math.round(720 * app.twipsToPixels);
+	}
+
+	// VULCAN: extra vertical travel BELOW the document's end, in
+	// canvas (core) px. Bottom only, unlike the symmetric pad above: it is
+	// room for the end to clear something covering the bottom of this frame,
+	// not context around the page. 0 here, so every layout keeps its extent;
+	// ViewLayoutWriter answers it for the phone READ posture.
+	public vulcanBottomApronCore(): number {
+		return 0;
+	}
+
 	protected calculateTheScrollSizes() {
 		// Sizes of the scroll bars.
 		this.scrollProperties.verticalScrollSize = Math.round(
 			Math.pow(this.scrollProperties.verticalScrollLength, 2) /
-				this.viewSize.pY,
+				(this.viewSize.pY +
+					2 * this.vulcanScrollPadCore() +
+					this.vulcanBottomApronCore()),
 		);
+		// VULCAN: the horizontal thumb is sized against the SCROLLABLE BAND, not
+		// the sheet. Sizing it against the sheet makes the travel include the
+		// right margin, so the far-right stop lands in blank paper -- the
+		// "can still scroll too far right, too much empty space" report. Stock
+		// everywhere the band is the sheet (see getVulcanScrollableWidthPx).
 		this.scrollProperties.horizontalScrollSize = Math.round(
 			Math.pow(this.scrollProperties.horizontalScrollLength, 2) /
-				this.viewSize.pX,
+				(this.getVulcanScrollableWidthPx() + 2 * this.vulcanScrollPadCore()),
 		);
 
 		// Store unclamped values for scroll calculations.
@@ -321,22 +447,34 @@ class ViewLayoutBase {
 		this.calculateTheScrollSizes();
 
 		// 1px scrolling = xpx document height / width.
+		// Same extent as the thumb above: the document distance the bar maps
+		// onto is the band, so bar and document stay in step and the last
+		// position shows the text's right edge rather than the page's.
 		this.scrollProperties.horizontalScrollRatio =
-			(this.viewSize.pX - documentAnchor.size[0]) /
+			(this.getVulcanScrollableWidthPx() + 2 * this.vulcanScrollPadCore() -
+				this.getHorizontalViewportWidth(documentAnchor)) /
 			(this.scrollProperties.horizontalScrollLength -
 				this.scrollProperties.horizontalScrollSize);
+		// The bottom apron joins the travel here and nowhere at the top:
+		// startY below is unchanged, so the first position is still the
+		// document's top and the last one is the apron past its end.
 		this.scrollProperties.verticalScrollRatio =
-			(this.viewSize.pY - documentAnchor.size[1]) /
+			(this.viewSize.pY +
+				2 * this.vulcanScrollPadCore() +
+				this.vulcanBottomApronCore() -
+				documentAnchor.size[1]) /
 			(this.scrollProperties.verticalScrollLength -
 				this.scrollProperties.verticalScrollSize);
 
 		// The start position of scroll bars on canvas.
 		this.scrollProperties.startX =
-			this.viewedRectangle.pX1 / this.scrollProperties.horizontalScrollRatio +
+			(this.viewedRectangle.pX1 + this.vulcanScrollPadCore()) /
+				this.scrollProperties.horizontalScrollRatio +
 			this.scrollProperties.xOffset;
 
 		this.scrollProperties.startY =
-			this.viewedRectangle.pY1 / this.scrollProperties.verticalScrollRatio +
+			(this.viewedRectangle.pY1 + this.vulcanScrollPadCore()) /
+				this.scrollProperties.verticalScrollRatio +
 			this.scrollProperties.yOffset;
 
 		// Properties for quick scrolling.
@@ -507,11 +645,87 @@ class ViewLayoutBase {
 	}
 
 	public canScrollHorizontal(documentAnchor: CanvasSectionObject): boolean {
-		return this.viewSize.pX > documentAnchor.size[0];
+		// VULCAN, desktop Writer: OFFER the scrollbar only when the TEXT does
+		// not fit. Empty margin is not content, so a page overhanging only by
+		// its margins must not scroll -- the opening fit overhangs on purpose.
+		//
+		// This is a DIFFERENT quantity from the travel band below, and using
+		// the band here was a defect: at the opening fit the text was 1078px in
+		// a 1216px viewport (fits, no scrollbar wanted) while the band was
+		// 1245px, so a 29px sliver of LEFT MARGIN justified a scrollbar and the
+		// wheel moved the page 29px. Measured on build 3fc2b744.
+		return this.getVulcanTextWidthPx() > this.getHorizontalViewportWidth(documentAnchor);
+	}
+
+	protected getHorizontalViewportWidth(documentAnchor: CanvasSectionObject): number {
+		const layer: any = app.map && app.map._docLayer;
+		if (!this.isVulcanDesktopWriter(layer) || !layer._getDocumentContainerSize)
+			return documentAnchor.size[0];
+		// The canvas/map may still have its previous inline width on a split
+		// transition. Use the same visible-container bound as Writer's fit.
+		const width = layer._getDocumentContainerSize()[0] * app.dpiScale;
+		return Math.min(documentAnchor.size[0], Math.max(0, width));
+	}
+
+	/*
+	 * The text column's width in document pixels — the test for whether
+	 * scrolling is worth offering at all. Stock everywhere the geometry is
+	 * unknown.
+	 */
+	protected getVulcanTextWidthPx(): number {
+		const docLayer: any = app.map && app.map._docLayer;
+		if (!this.isVulcanDesktopWriter(docLayer)) return this.viewSize.pX;
+		const activeDocument = app.activeDocument;
+		if (!activeDocument) return this.viewSize.pX;
+		if (!(docLayer._vulcanTextWidthMm100 > 0)) return this.viewSize.pX;
+
+		return VulcanWriterFit.scrollableWidthPx(
+			activeDocument.fileSize.pX,
+			activeDocument.fileSize.x,
+			docLayer._vulcanTextWidthMm100,
+			0,
+		);
+	}
+
+	/*
+	 * How far scrolling may travel, once it is offered: to the PAPER'S EDGE.
+	 *
+	 * Bounding the travel to the text's right edge stopped at an invisible
+	 * line — you could not tell you had reached the end. The paper's edge is a
+	 * landmark: at the far-right stop it sits at the viewport's edge, mirroring
+	 * the way the paper's left edge shows just inside the toolbar at rest, so
+	 * reaching the boundary is legible.
+	 *
+	 * Measured in DOCUMENT pixels: `viewSize.pX` carries a 260px comment-rail
+	 * allowance whether or not the document has comments, and mixing that with
+	 * a `fileSize.x` twips ratio inflated the band by ~219px of blank paper.
+	 */
+	protected getVulcanScrollableWidthPx(): number {
+		const docLayer: any = app.map && app.map._docLayer;
+		if (!this.isVulcanDesktopWriter(docLayer)) return this.viewSize.pX;
+		const activeDocument = app.activeDocument;
+		if (!activeDocument) return this.viewSize.pX;
+		if (!(docLayer._vulcanTextWidthMm100 > 0)) return this.viewSize.pX;
+		if (!(activeDocument.fileSize.pX > 0)) return this.viewSize.pX;
+
+		return activeDocument.fileSize.pX;
+	}
+
+	private isVulcanDesktopWriter(docLayer: any): boolean {
+		return Boolean(
+			docLayer &&
+				typeof docLayer.isWriter === 'function' &&
+				docLayer.isWriter() &&
+				document.documentElement.classList.contains('vulcan-desktop-chrome'),
+		);
 	}
 
 	public canScrollVertical(documentAnchor: CanvasSectionObject): boolean {
-		return this.viewSize.pY > documentAnchor.size[1];
+		// With the apron, a document a little SHORTER than the canvas can still
+		// have its end under whatever covers the frame's bottom, so it scrolls.
+		return (
+			this.viewSize.pY + this.vulcanBottomApronCore() > documentAnchor.size[1]
+		);
 	}
 
 	public scroll(
@@ -539,6 +753,20 @@ class ViewLayoutBase {
 
 		this.refreshCurrentCoordList();
 		app.sectionContainer.requestReDraw();
+	}
+
+	/*
+		The origin scrollTo()'s arguments are absolute against.
+
+		Which offset that is, is per-layout, and a pan cannot pick for itself:
+		here scrollTo subtracts the viewed rectangle's top-left before
+		delegating to scroll(), so the viewed rectangle IS the origin. A layout
+		whose scrollTo writes some other offset must override this, or a caller
+		panning by a screen delta adds that delta to a number the layout does
+		not scroll by.
+	*/
+	public getScrollOrigin(): number[] {
+		return [this._viewedRectangle.pX1, this._viewedRectangle.pY1];
 	}
 
 	public scrollTo(

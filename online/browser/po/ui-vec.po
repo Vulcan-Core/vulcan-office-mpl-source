@@ -6941,7 +6941,7 @@ msgstr ""
 
 #, fuzzy
 #~ msgid "Oops, there is a problem connecting the document"
-#~ msgstr "A ghe ze un problema inte ła conesion a Collabora Online:"
+#~ msgstr "A ghe ze un problema inte ła conesion a Vulcan Office:"
 
 #~ msgid "Cancel the search"
 #~ msgstr "Canseła el serca"

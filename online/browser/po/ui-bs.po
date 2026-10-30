@@ -6919,7 +6919,7 @@ msgstr ""
 
 #, fuzzy
 #~ msgid "Oops, there is a problem connecting the document"
-#~ msgstr "Uh, nastao je problem prilikom spajanja sa LibreOffice na mreži : "
+#~ msgstr "Uh, nastao je problem prilikom spajanja sa Vulcan Office na mreži : "
 
 #~ msgid "Cancel the search"
 #~ msgstr "Otkaži pretragu"

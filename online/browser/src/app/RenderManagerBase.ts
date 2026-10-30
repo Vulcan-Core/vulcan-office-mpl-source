@@ -102,6 +102,9 @@ class RenderManagerBase {
 	// -- update / fetch --
 	// eslint-disable-next-line @typescript-eslint/no-empty-function
 	update(_center: any = null, _zoom: number = null): void {}
+	// R6-7 lever L3: speculative settle prefetch (see BitmapTileManager).
+	// eslint-disable-next-line @typescript-eslint/no-empty-function
+	prefetchZoomStop(_targetZoom: number, _centerCorePx: any): void {}
 	// eslint-disable-next-line @typescript-eslint/no-empty-function
 	updateOnChangePart(): void {}
 	updateFileBasedView(
@@ -140,16 +143,111 @@ class RenderManagerBase {
 		_maxHeight: number,
 		// eslint-disable-next-line @typescript-eslint/no-empty-function
 	): void {}
+	/// The most recent tree for a part, cached or last seen (see
+	/// VectorManager.peekPart). The base has no memory: the cache is it.
+	peekPart(part: number): cool.VectorPrimitivesData | undefined {
+		return this.requestPart(part);
+	}
+
 	requestPart(_part: number): cool.VectorPrimitivesData | undefined {
 		return undefined;
 	}
+	hitTestPoint(
+		_part: number,
+		_xTwips: number,
+		_yTwips: number,
+		_toleranceTwips: number,
+	): { ordNum: number; bounds: number[]; isGroup: boolean } | null {
+		return null;
+	}
+	hitTestChildren(
+		_part: number,
+		_groupOrdNum: number,
+		_xTwips: number,
+		_yTwips: number,
+		_toleranceTwips: number,
+	): { ordNum: number; bounds: number[]; isGroup: boolean } | null {
+		return null;
+	}
+	hitTestInk(
+		_part: number,
+		_ordNum: number,
+		_xTwips: number,
+		_yTwips: number,
+		_toleranceTwips: number,
+		_childOrdNum?: number,
+	): boolean {
+		return false;
+	}
+	isTextBearing(
+		_part: number,
+		_ordNum: number,
+		_childOrdNum?: number,
+	): boolean {
+		return false;
+	}
+	isEmptyPlaceholder(
+		_part: number,
+		_ordNum: number,
+		_childOrdNum?: number,
+	): boolean {
+		return false;
+	}
+	isMoveProtected(_part: number, _ordNum: number): boolean {
+		return false;
+	}
+	hitTestRect(
+		_part: number,
+		_xTwips: number,
+		_yTwips: number,
+		_widthTwips: number,
+		_heightTwips: number,
+	): { ordNum: number; bounds: number[] }[] {
+		return [];
+	}
+	hitTestPointFast(
+		_part: number,
+		_xTwips: number,
+		_yTwips: number,
+		_toleranceTwips: number,
+	): { ordNum: number; bounds: number[] } | null {
+		return null;
+	}
+	findTopLevelObject(
+		_part: number,
+		_ordNum: number,
+	): cool.SlideObject | null {
+		return null;
+	}
+	classifySelection(
+		_part: number,
+		_rect: number[],
+		_selectionOrdNum: number | null,
+	): { kind: 'top' } | { kind: 'child'; groupOrdNum: number } | null {
+		return null;
+	}
+	// eslint-disable-next-line @typescript-eslint/no-empty-function
+	beginEditorFrame(_liveZoom: boolean): void {}
 	renderInto(
 		_context: CanvasRenderingContext2D,
 		_data: cool.VectorPrimitivesData,
+		_override?: cool.VectorRenderOverride,
+		_editView?: boolean,
 		// eslint-disable-next-line @typescript-eslint/no-empty-function
 	): void {}
 	// eslint-disable-next-line @typescript-eslint/no-empty-function
-	onVectorChanged(_callback: () => void): void {}
+	onVectorChanged(_callback: (update?: VectorPartUpdate) => void): void {}
+	// eslint-disable-next-line @typescript-eslint/no-empty-function
+	noteWebFontsChanged(): void {}
+	// eslint-disable-next-line @typescript-eslint/no-empty-function
+	noteMutatingInputSent(): void {}
+	getLastInputSeq(): number {
+		return 0;
+	}
+	// eslint-disable-next-line @typescript-eslint/no-empty-function
+	requestFetchCoalesce(_owner: string, _ms: number): void {}
+	// eslint-disable-next-line @typescript-eslint/no-empty-function
+	releaseFetchCoalesce(_owner: string): void {}
 	handleVectorPrimitivesResponse(
 		_values: cool.VectorPrimitivesResponse,
 		// eslint-disable-next-line @typescript-eslint/no-empty-function
@@ -162,6 +260,13 @@ class RenderManagerBase {
 	clearCachedPart(_part: number): void {}
 	// eslint-disable-next-line @typescript-eslint/no-empty-function
 	clearAllParts(): void {}
+
+	/// An undo or redo was just sent. A vector view gets no tile
+	/// invalidation for it, so it re-requests its parts (the request
+	/// queues behind the command on the same socket and answers with the
+	/// post-undo page). Tile views need nothing: their tiles invalidate.
+	// eslint-disable-next-line @typescript-eslint/no-empty-function
+	noteHistoryCommandSent(): void {}
 
 	// -- redraw --
 	redraw(): RenderManagerBase {

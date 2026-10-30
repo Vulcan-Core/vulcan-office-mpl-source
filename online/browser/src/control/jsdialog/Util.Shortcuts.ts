@@ -42,6 +42,29 @@ const EXPLICIT_ALIASES: Record<string, string> = {
 	find: 'Ctrl+F',
 };
 
+// Impress arrangement hotkeys are BROWSER bindings
+// (Map.Keyboard._impressCtrlCommand), not Accelerators.xcu entries — and
+// they exist ONLY for presentations, so they are resolved per lookup by
+// doc type. Registered doc-type-blind they overwrote real XCU labels in
+// Writer and Calc menus (adversarial review P2).
+const IMPRESS_EXPLICIT_ALIASES: Record<string, string> = {
+	'.uno:ObjectAlignLeft': 'Ctrl+Shift+←',
+	'.uno:ObjectAlignRight': 'Ctrl+Shift+→',
+	'.uno:AlignUp': 'Ctrl+Shift+↑',
+	'.uno:AlignDown': 'Ctrl+Shift+↓',
+	'.uno:AlignCenter': 'Ctrl+Shift+H',
+	'.uno:AlignMiddle': 'Ctrl+Shift+M',
+	'.uno:DistributeHorzDistance': 'Ctrl+Alt+Shift+H',
+	'.uno:DistributeVertDistance': 'Ctrl+Alt+Shift+M',
+	'.uno:FitFrameToText': 'Ctrl+Shift+F',
+	'.uno:FormatGroup': 'Ctrl+G',
+	'.uno:FormatUngroup': 'Ctrl+Shift+G',
+	'.uno:ObjectForwardOne': 'Ctrl+]',
+	'.uno:ObjectBackOne': 'Ctrl+[',
+	'.uno:BringToFront': 'Ctrl+Shift+]',
+	'.uno:SendToBack': 'Ctrl+Shift+[',
+};
+
 class ShortcutsUtil {
 	private shortcutMap: Map<string, string> = new Map();
 
@@ -81,7 +104,10 @@ class ShortcutsUtil {
 	}
 
 	public hasShortcut(command: string): boolean {
-		return this.shortcutMap.has(command);
+		return (
+			this.shortcutMap.has(command) ||
+			command in IMPRESS_EXPLICIT_ALIASES
+		);
 	}
 
 	/**
@@ -131,7 +157,19 @@ class ShortcutsUtil {
 	 * with the corresponding Mac symbols.
 	 */
 	public getShortcutText(command: string): string | undefined {
-		const shortcut = this.shortcutMap.get(command);
+		// Impress-only bindings resolve only in presentations; other doc
+		// types keep their stock (XCU) shortcut or none.
+		const impress = IMPRESS_EXPLICIT_ALIASES[command];
+		const isPresentation =
+			typeof app !== 'undefined' &&
+			app.map &&
+			app.map.getDocType &&
+			app.map.getDocType() === 'presentation';
+		const shortcut = impress
+			? isPresentation
+				? impress
+				: this.shortcutMap.get(command)
+			: this.shortcutMap.get(command);
 		if (!shortcut) return undefined;
 		return app.util.replaceCtrlAltInMac(this.localizeModifiers(shortcut));
 	}

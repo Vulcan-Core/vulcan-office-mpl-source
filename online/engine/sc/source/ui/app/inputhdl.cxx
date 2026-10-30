@@ -866,6 +866,10 @@ ScInputHandler::ScInputHandler()
     pDelayTimer.reset( new Timer( "ScInputHandlerDelay timer" ) );
     pDelayTimer->SetTimeout( 500 ); // 500 ms delay
     pDelayTimer->SetInvokeHandler( LINK( this, ScInputHandler, DelayTimer ) );
+
+    mpColDataTimer.reset( new Timer( "ScInputHandler AutoInput column data" ) );
+    mpColDataTimer->SetTimeout( 30 );
+    mpColDataTimer->SetInvokeHandler( LINK( this, ScInputHandler, ColDataTimer ) );
 }
 
 ScInputHandler::~ScInputHandler()
@@ -2122,6 +2126,8 @@ void ScInputHandler::GetColData()
 
 void ScInputHandler::UseColData() // When typing
 {
+    if (mbColDataPending)
+        return;     // Vulcan fork: ColDataTimer completes the typed text once the column's list is built
     EditView* pActiveView = pTopView ? pTopView : pTableView;
     if ( !(pActiveView && pColumnData) )
         return;
@@ -2199,6 +2205,8 @@ void ScInputHandler::UseColData() // When typing
 
 void ScInputHandler::NextAutoEntry( bool bBack )
 {
+    if (mbColDataPending)
+        return;     // Vulcan fork: nothing was completed yet, so there is nothing to cycle through
     EditView* pActiveView = pTopView ? pTopView : pTableView;
     if ( pActiveView && pColumnData )
     {
@@ -2689,7 +2697,20 @@ bool ScInputHandler::StartTable(sal_Unicode cTyped, bool bFromCommand, bool bInp
             UpdateAdjust( cTyped );
 
             if (ScModule::get()->GetAppOptions().GetAutoComplete())
-                GetColData();
+            {
+                // Vulcan fork: build the column's AutoInput list just AFTER this first key, not before it. On a
+                // 10,000-row text column GetDataEntries' case-insensitive sort held the first typed character of
+                // every cell for 25-28 ms on an iPhone 17 (about 80% of that key's engine time); the completion now
+                // follows the character by the timer's 30 ms instead.
+                mbColDataPending = true;
+                if (pColumnData)
+                {
+                    pColumnData->clear();
+                    miAutoPosColumn = pColumnData->end();
+                }
+                aAutoSearch.clear();
+                mpColDataTimer->Start();
+            }
 
             if (!cTyped && !bCreatingFuncView && StartsLikeFormula(aStr))
                 InitRangeFinder(aStr); // Formula is being edited -> RangeFinder
@@ -3418,6 +3439,13 @@ void ScInputHandler::EnterHandler2(ScEnterMode nBlockMode, bool bForget, OUStrin
         }
         else if (ScModule::get()->GetAppOptions().GetAutoComplete()) // Adjust Upper/Lower case
         {
+            if (mbColDataPending)
+            {
+                // Vulcan fork: committed before the deferred list was built; case-matching needs it now.
+                mpColDataTimer->Stop();
+                mbColDataPending = false;
+                GetColData();
+            }
             // Perform case-matching only when the typed text is partial.
             if (pColumnData && aAutoSearch.getLength() < aString.getLength())
                 aString = getExactMatch(*pColumnData, aString);
@@ -4546,6 +4574,26 @@ void ScInputHandler::UpdateCellAdjust( SvxCellHorJustify eJust )
 {
     eAttrAdjust = eJust;
     UpdateAdjust( 0 );
+}
+
+IMPL_LINK_NOARG( ScInputHandler, ColDataTimer, Timer*, void )
+{
+    if (!mbColDataPending)
+        return;
+    mbColDataPending = false;
+    if (eMode == SC_INPUT_NONE || !mpEditEngine)
+        return;                     // the edit ended first: nothing to complete
+    GetColData();
+    if (bFormulaMode)
+        return;                     // a formula completes function names, not column entries
+    const OUString aBefore = GetEditText(mpEditEngine.get());
+    UseColData();
+    if (GetEditText(mpEditEngine.get()) == aBefore)
+        return;
+    DataChanged();                  // as after the completion a key applies (KeyInput / InputCommand)
+    InvalidateAttribs();
+    if (pTopView)
+        SyncViews();
 }
 
 void ScInputHandler::ResetDelayTimer()

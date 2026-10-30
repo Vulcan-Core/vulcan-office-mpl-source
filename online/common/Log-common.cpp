@@ -16,9 +16,11 @@
 #include <common/ProcUtil.hpp>
 #include <common/StaticLogHelper.hpp>
 #include <common/Util.hpp>
+#include <common/VulcanLogScrub.hpp>
 
 #include <cstring>
 #include <ctime>
+#include <iostream>
 
 namespace Log
 {
@@ -268,6 +270,13 @@ namespace Log
     }
 
     void reset() { Prefix::Instance.reset(); }
+
+    // Vulcan: defined here rather than beside doLog in Log-poco.cpp because this file is
+    // built on every platform, including those that swap Log-poco.cpp for Log-windows.cpp.
+    void fatalToStderr(const std::string& text)
+    {
+        std::cerr << Vulcan::scrubLogSecrets(text) << std::endl;
+    }
 
 #ifdef BUILDING_TESTS
     char* prefixReference(const std::chrono::time_point<std::chrono::system_clock>& tp,

@@ -1552,6 +1552,13 @@ window.L.Control.NotebookbarCalc = window.L.Control.NotebookbarWriter.extend({
 				'command': 'columnrowhighlight',
 				'accessibility': { focusBack: true,	combination: 'HL', de: null }
 			},
+			{
+				'id': 'view-toggle-formula',
+				'type': 'bigtoolitem',
+				'text': _('Show Formulas'),
+				'command': '.uno:ToggleFormula',
+				'accessibility': { focusBack: true,	combination: 'TF', de: null }
+			},
 			{ type: 'separator', id: 'layout-colrowhighlight-break', orientation: 'vertical' },
 			{
 				'type': 'overflowgroup',
@@ -2356,6 +2363,70 @@ window.L.Control.NotebookbarCalc = window.L.Control.NotebookbarWriter.extend({
 				],
 				'vertical': 'true'
 			},
+			{ type: 'separator', id: 'formula-calculate-break', orientation: 'vertical' },
+			{
+				'type': 'overflowgroup',
+				'id': 'formula-auditing',
+				'name':_('Formula Auditing'),
+				'accessibility': { focusBack: true,	combination: 'MP', de: null },
+				'children' : [
+					{
+						'id': 'formula-show-precedents',
+						'type': 'bigtoolitem',
+						'text': _UNO('.uno:ShowPrecedents', 'spreadsheet'),
+						'command': '.uno:ShowPrecedents',
+						'accessibility': { focusBack: true,	combination: 'MP', de: null }
+					},
+					{
+						'type': 'container',
+						'children': [
+							{
+								'type': 'toolbox',
+								'children': [
+									{
+										'id': 'formula-show-dependents',
+										'type': 'toolitem',
+										'text': _UNO('.uno:ShowDependents', 'spreadsheet'),
+										'command': '.uno:ShowDependents',
+										'accessibility': { focusBack: true,	combination: 'MD', de: null }
+									}
+								]
+							},
+							{
+								'type': 'toolbox',
+								'children': [
+									{
+										'id': 'formula-clear-arrows',
+										'type': 'toolitem',
+										'text': _UNO('.uno:ClearArrows', 'spreadsheet'),
+										'command': '.uno:ClearArrows',
+										'accessibility': { focusBack: true,	combination: 'CL', de: null }
+									}
+								]
+							}
+						],
+						'vertical': 'true'
+					},
+					{
+						'type': 'container',
+						'children': [
+							{
+								'type': 'toolbox',
+								'children': [
+									{
+										id: 'Formula-FormulaAuditingMenu:FormulaAuditingMenu',
+										type: 'menubutton',
+										noLabel: true,
+										text: _('More Auditing'),
+										'accessibility': { focusBack: true,	combination: 'FT', de: null }
+									},
+								]
+							},
+						],
+						'vertical': 'true'
+					},
+				]
+			},
 		];
 
 		return this.getTabPage('Formula', content);
@@ -2491,6 +2562,37 @@ window.L.Control.NotebookbarCalc = window.L.Control.NotebookbarWriter.extend({
 			},
 			{ type: 'separator', id: 'data-datafilterremovefilter-break', orientation: 'vertical' },
 			{
+				'type': 'container',
+				'children': [
+					{
+						'type': 'toolbox',
+						'children': [
+							{
+								'id': 'data-text-to-columns',
+								'type': 'toolitem',
+								'text': _UNO('.uno:TextToColumns', 'spreadsheet'),
+								'command': '.uno:TextToColumns',
+								'accessibility': { focusBack: true,	combination: 'TT', de: null }
+							}
+						]
+					},
+					{
+						'type': 'toolbox',
+						'children': [
+							{
+								'id': 'data-handle-duplicate-records',
+								'type': 'toolitem',
+								'text': _UNO('.uno:HandleDuplicateRecords', 'spreadsheet'),
+								'command': '.uno:HandleDuplicateRecords',
+								'accessibility': { focusBack: true,	combination: 'DD', de: null }
+							}
+						]
+					}
+				],
+				'vertical': 'true'
+			},
+			{ type: 'separator', id: 'data-texttocolumns-break', orientation: 'vertical' },
+			{
 				'type': 'overflowgroup',
 				'id': 'data-group',
 				'name':_('Group'),
@@ -2619,7 +2721,8 @@ window.L.Control.NotebookbarCalc = window.L.Control.NotebookbarWriter.extend({
 	},
 
 	getReviewTab: function() {
-		// Note: when adding track changes elements, consider this._map['wopi'].HideChangeTrackingControls
+		var hideChangeTrackingControls = this._map['wopi'].HideChangeTrackingControls;
+
 		var content = [
 			{
 				'type': 'overflowgroup',
@@ -2731,6 +2834,75 @@ window.L.Control.NotebookbarCalc = window.L.Control.NotebookbarWriter.extend({
 				]
 			},
 			{ type: 'separator', id: 'review-deletenote-break', orientation: 'vertical' },
+			hideChangeTrackingControls ? {} : {
+				'type': 'overflowgroup',
+				'id': 'review-changes',
+				'name': _('Changes'),
+				'accessibility': { focusBack: true,	combination: 'TM', de: null },
+				'children' : [
+					{
+						'id': 'review-track-changes',
+						'type': 'bigtoolitem',
+						'text': _UNO('.uno:TraceChangeMode', 'spreadsheet'),
+						'command': '.uno:TraceChangeMode',
+						'accessibility': { focusBack: true,	combination: 'TM', de: null }
+					},
+					{
+						'id': 'Review-Section-Changes1',
+						'type': 'container',
+						'children': [
+							{
+								'id': 'LineA21',
+								'type': 'toolbox',
+								'children': [
+									{
+										'id': 'review-show-changes',
+										'type': 'toolitem',
+										'text': _UNO('.uno:ShowChanges', 'spreadsheet'),
+										'command': '.uno:ShowChanges',
+										'accessibility': { focusBack: true,	combination: 'SW', de: null }
+									}
+								]
+							},
+							{
+								'id': 'LineB22',
+								'type': 'toolbox',
+								'children': [
+									{
+										'id': 'review-accept-changes',
+										'type': 'toolitem',
+										'text': _UNO('.uno:AcceptChanges', 'spreadsheet'),
+										'command': '.uno:AcceptChanges',
+										'accessibility': { focusBack: true,	combination: 'MG', de: null }
+									}
+								]
+							}
+						],
+						'vertical': 'true'
+					},
+					{
+						'id': 'Review-Section-Changes2',
+						'type': 'container',
+						'children': [
+							{
+								'id': 'LineA23',
+								'type': 'toolbox',
+								'children': [
+									{
+										'id': 'review-comment-change',
+										'type': 'toolitem',
+										'text': _UNO('.uno:CommentChange', 'spreadsheet'),
+										'command': '.uno:CommentChange',
+										'accessibility': { focusBack: true,	combination: 'CM', de: null }
+									}
+								]
+							}
+						],
+						'vertical': 'true'
+					},
+				]
+			},
+			hideChangeTrackingControls ? {} : { type: 'separator', id: 'review-changes-break', orientation: 'vertical' },
 			{
 				'type': 'overflowgroup',
 				'id': 'review-protect',

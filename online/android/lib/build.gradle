@@ -5,6 +5,41 @@ apply from: 'libSettings.gradle'
 
 layout.buildDirectory.set(rootProject.layout.buildDirectory.dir("lib"))
 
+// -PvulcanAssetsOut=<dir> moves every generated asset OUT of the AAR.
+//
+// Upstream writes the engine payload (program/, share/, unpack/, templates/,
+// etc/, and the COOL browser dist/) into this module's own asset source dirs,
+// so `assembleRelease` produces a ~209 MB AAR: ~130 MB of that is data the
+// Android app must ship in an install-time asset pack instead, because
+// LibreOffice resolves /assets/... through the AAssetManager of ONE apk (the
+// apkFile handed to cokit_initialize) and native libs cannot live in a pack.
+// Splitting the two is therefore a packaging requirement, not an optimisation.
+//
+// When the property is set, the same tasks write the same tree into that one
+// directory (main/ and release/ asset roots both redirect there, matching how
+// AGP merges them into the AAR's assets/), and the AAR carries classes plus
+// jni/<abi>/*.so only. When it is absent every path below is byte-for-byte
+// upstream's.
+def vulcanAssetsOut = project.findProperty('vulcanAssetsOut')
+// `-PvulcanAssetsOut` with no value, or `=`, or whitespace, is a MISTAKE and not
+// a request for upstream behaviour. Groovy truthiness makes '' falsy, so the
+// property used to fall back silently to the in-tree asset roots: the build
+// succeeded, the AAR came out with 137 MB of assets/ in it, and the caller's
+// --out/assets directory stayed empty. build-online-android.sh's own guard would
+// catch that one case, but every other caller (a developer, another script)
+// would just get the wrong AAR. Fail where the mistake was made.
+if (vulcanAssetsOut != null && vulcanAssetsOut.toString().trim().isEmpty()) {
+	throw new GradleException("vulcanAssetsOut must be a path")
+}
+// Resolved against the project dir when relative, like every other path here.
+def vulcanAssetsDir = vulcanAssetsOut ? file(vulcanAssetsOut.toString().trim()) : null
+def assetsMain    = vulcanAssetsDir ?: file('src/main/assets')
+def assetsDebug   = vulcanAssetsDir ?: file('src/debug/assets')
+def assetsRelease = vulcanAssetsDir ?: file('src/release/assets')
+if (vulcanAssetsDir != null) {
+    logger.lifecycle("vulcanAssetsOut: engine assets -> ${vulcanAssetsDir} (AAR gets classes + jni/ only)")
+}
+
 android {
     namespace 'org.libreoffice.androidlib'
     compileSdk 36
@@ -91,7 +126,7 @@ dependencies {
 
 tasks.register('copyUnpackAssets', Copy) {
     description "copies assets that need to be extracted on the device"
-    into 'src/main/assets/unpack'
+    into new File(assetsMain, 'unpack')
     into('program') {
         from("${liboInstdir}/program/types") {
             includes = [
@@ -164,7 +199,7 @@ tasks.register('copyUnpackAssets', Copy) {
 
 tasks.register('copyAssets', Copy) {
     description "copies assets that can be accessed within the installed apk"
-    into 'src/main/assets'
+    into assetsMain
     from("${liboSrcRoot}/instdir/") {
         includes = ["LICENSE.html", "NOTICE"]
         rename "LICENSE.html", "license.html"
@@ -186,7 +221,7 @@ tasks.register('copyAssets', Copy) {
 
 tasks.register('createFullConfig', Copy) {
     description "copies various configuration bits into the apk"
-    into('src/main/assets/share/config')
+    into(new File(assetsMain, 'share/config'))
     from("${liboInstdir}/share/config") {
         includes = ['soffice.cfg/**', 'images_colibre.zip']
     }
@@ -194,30 +229,32 @@ tasks.register('createFullConfig', Copy) {
 
 tasks.register('copyBrandTheme', Copy) {
     from "${liboBrandingDir}/online-theme"
-    into "src/main/assets/share/theme_definitions/online"
+    into new File(assetsMain, 'share/theme_definitions/online')
 }
 
 tasks.register('copyDocTemplates', Copy) {
     from "${rootProject.getRootDir()}/templates/untitled.odp",
             "${rootProject.getRootDir()}/templates/untitled.ods",
             "${rootProject.getRootDir()}/templates/untitled.odt"
-    into "src/main/assets/templates"
+    into new File(assetsMain, 'templates')
 }
 
 tasks.register('copyKitConfig', Copy) {
     from "${file(rootProject.getRootDir()).getParent()}/coolkitconfig-mobile.xcu"
-    into "src/main/assets/etc/coolwsd"
+    into new File(assetsMain, 'etc/coolwsd')
     rename { "coolkitconfig.xcu" }
 }
 
 tasks.register('createStrippedConfig') {
-    def preserveDir = file("src/main/assets/share/config/soffice.cfg/empty")
-    outputs.dir "src/main/assets/share/registry/res"
+    def registryRes = new File(assetsMain, 'share/registry/res')
+    def sofficeCfg = new File(assetsMain, 'share/config/soffice.cfg')
+    def preserveDir = new File(sofficeCfg, 'empty')
+    outputs.dir registryRes
     outputs.file preserveDir
 
     doLast {
-        file('src/main/assets/share/registry/res').mkdirs()
-        file("src/main/assets/share/config/soffice.cfg").mkdirs()
+        registryRes.mkdirs()
+        sofficeCfg.mkdirs()
         // just empty file
         preserveDir.text = ""
     }
@@ -226,12 +263,12 @@ tasks.register('createStrippedConfig') {
 tasks.register('createRCfiles') {
     inputs.file "libSettings.gradle"
     dependsOn copyUnpackAssets, copyAssets
-    def sofficerc = file('src/main/assets/unpack/program/sofficerc')
-    def fundamentalrc = file('src/main/assets/program/fundamentalrc')
-    def bootstraprc = file('src/main/assets/program/bootstraprc')
-    def unorc = file('src/main/assets/program/unorc')
-    def lounorc = file('src/main/assets/program/lounorc')
-    def versionrc = file('src/main/assets/program/versionrc')
+    def sofficerc = new File(assetsMain, 'unpack/program/sofficerc')
+    def fundamentalrc = new File(assetsMain, 'program/fundamentalrc')
+    def bootstraprc = new File(assetsMain, 'program/bootstraprc')
+    def unorc = new File(assetsMain, 'program/unorc')
+    def lounorc = new File(assetsMain, 'program/lounorc')
+    def versionrc = new File(assetsMain, 'program/versionrc')
 
     outputs.files sofficerc, fundamentalrc, unorc, bootstraprc, versionrc
 
@@ -301,6 +338,19 @@ ReferenceOOoMajorMinor=4.1
 }
 
 clean.doFirst {
+	// The three in-tree roots are deleted unconditionally, even under
+	// -PvulcanAssetsOut: a tree left behind by an earlier property-less build
+	// is still an AGP asset source dir and would be packed into the AAR we
+	// just promised carries no assets.
+	//
+	// A -PvulcanAssetsOut directory is deliberately NOT deleted here. It is a
+	// path the CALLER owns and named on the command line, `clean` is a task
+	// anyone may run for any reason, and `delete <that path>` on
+	// `clean :lib:assembleRelease` is Gradle deciding to recursively remove a
+	// directory outside the project on the strength of a property value. One
+	// typo (`-PvulcanAssetsOut=$HOME`) and it is not a build failure. Whoever
+	// owns the directory empties it; build-online-android.sh does exactly that
+	// (`rm -rf "$assets_out"`) before it invokes Gradle at all.
 	delete "src/main/assets"
 	delete "src/debug/assets"
 	delete "src/release/assets"
@@ -317,7 +367,7 @@ tasks.register('generateCoolDebugAssets') {
             commandLine 'make', '-C', "${rootProject.layout.buildDirectory.get()}/../../browser", 'clean'
         }.result.get()
         providers.exec {
-            commandLine 'make', '-C', "${rootProject.layout.buildDirectory.get()}/../../browser", "DIST_FOLDER=${project.layout.projectDirectory}/src/debug/assets/dist", 'BUNDLE=DEBUG'
+            commandLine 'make', '-C', "${rootProject.layout.buildDirectory.get()}/../../browser", "DIST_FOLDER=${new File(assetsDebug, 'dist')}", 'BUNDLE=DEBUG'
         }.result.get()
     }
 }
@@ -328,7 +378,7 @@ tasks.register('generateCoolReleaseAssets') {
             commandLine 'make', '-C', "${rootProject.layout.buildDirectory.get()}/../../browser", 'clean'
         }.result.get()
         providers.exec {
-            commandLine 'make', '-C', "${rootProject.layout.buildDirectory.get()}/../../browser", "DIST_FOLDER=${project.layout.projectDirectory}/src/release/assets/dist", 'BUNDLE=RELEASE'
+            commandLine 'make', '-C', "${rootProject.layout.buildDirectory.get()}/../../browser", "DIST_FOLDER=${new File(assetsRelease, 'dist')}", 'BUNDLE=RELEASE'
         }.result.get()
     }
 }
@@ -339,6 +389,12 @@ afterEvaluate {
 	}
 	generateDebugAssets.dependsOn copyDocTemplates, copyKitConfig, generateCoolDebugAssets
 	generateReleaseAssets.dependsOn copyDocTemplates, copyKitConfig, generateCoolReleaseAssets
+
+	// AGP's own asset tasks, same ordering rule as the block at the end of this
+	// file: these are what actually merge the asset roots, so `clean` running
+	// alongside them is the same hazard.
+	generateDebugAssets.mustRunAfter clean
+	generateReleaseAssets.mustRunAfter clean
 
     // These tasks only exist under some cases (not in Android Studio)...
     // ...so use tasks.named so they don't fail if they are never registered...
@@ -354,4 +410,31 @@ afterEvaluate {
     ] }.configureEach {
         dependsOn copyDocTemplates, copyKitConfig
     }
+}
+
+// `clean :lib:assembleRelease` in one invocation is what this pipeline runs, and
+// Gradle gives the two no relative order by itself: the asset tasks are not
+// `clean`'s dependencies, so it is free to run `clean` after they have populated
+// the asset roots — deleting src/{main,debug,release}/assets out from under the
+// build that just filled them. That is also why `clean` no longer deletes a
+// -PvulcanAssetsOut directory: with no ordering, "clean removes the output" and
+// "the build writes the output" were racing for the caller's directory.
+//
+// mustRunAfter and not dependsOn: the constraint applies only when both tasks are
+// already in the same graph, so `assembleRelease` on its own does not start
+// dragging `clean` in. At the END of the file because tasks.named() needs the
+// tasks to be registered — generateCool{Debug,Release}Assets are declared above.
+[
+	'copyUnpackAssets',
+	'copyAssets',
+	'createFullConfig',
+	'copyBrandTheme',
+	'copyDocTemplates',
+	'copyKitConfig',
+	'createStrippedConfig',
+	'createRCfiles',
+	'generateCoolDebugAssets',
+	'generateCoolReleaseAssets',
+].each { name ->
+	tasks.named(name).configure { mustRunAfter clean }
 }

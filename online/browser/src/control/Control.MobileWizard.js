@@ -75,6 +75,11 @@ window.L.Control.MobileWizard = window.L.Control.extend({
 			window.mobileDialogId = undefined;
 		}
 
+		// A nested picker restores its parent before removing the child. Keep the
+		// still-visible wizard active; only the final window owns global teardown.
+		if (this.contents.length)
+			return;
+
 		if (window.commentWizard === true && app.sectionContainer) {
 			app.sectionContainer.getSectionWithName(app.CSections.CommentList.name).removeHighlighters();
 		}
@@ -84,11 +89,13 @@ window.L.Control.MobileWizard = window.L.Control.extend({
 
 		document.getElementById('mobile-wizard').classList.remove('menuwizard');
 		document.getElementById('mobile-wizard').classList.remove('shapeswizard');
-		if (!document.getElementById('document-container').classList.contains('landscape')) {
-			var pcw = document.getElementById('presentation-controls-wrapper');
-			if (pcw)
-				pcw.style.display = 'block';
-		}
+		// The filmstrip restore (portrait; MobileWizardWindow hid it on open)
+		// lives with the posture machinery: under the Vulcan phone Impress
+		// chrome an inline 'block' written here would outrank the posture
+		// stylesheet and resurrect the strip in the browse posture (R6-6),
+		// so UIManager clears the inline property there and keeps the stock
+		// inline 'block' everywhere else.
+		this.map.uiManager.restorePresentationControlsAfterWizard();
 
 		if (this.map.isEditMode()) {
 			$('#toolbar-down').show();
@@ -101,21 +108,38 @@ window.L.Control.MobileWizard = window.L.Control.extend({
 		this._dialogid = '';
 		this._currentPath = [];
 
-		window.pageMobileWizard = false;
+		// CS-8. These globals say "a wizard of kind X is on screen", and the
+		// toolbar toggles branch on them: the `A` handler
+		// (docdispatcher.ts:1190) closes the sheet iff window.mobileWizard is
+		// true and opens it otherwise.
+		//
+		// removeWindow() calls _hideWizard() unconditionally, including when
+		// it has just popped a CHILD window (a drill-in picker opens a second
+		// window because it carries a new id). Clearing the flags there left
+		// window.mobileWizard === false while the parent A-sheet was still on
+		// screen, so the next tap on `A` took the OPEN branch and rebuilt the
+		// sheet in place instead of dismissing it -- the only visible escape
+		// from the sheet root, consumed by using the sheet once.
+		//
+		// The dialog teardown above stays unconditional: that one is correct,
+		// it is what stops a server-side dialog being orphaned.
+		if (!this.contents.length) {
+			window.pageMobileWizard = false;
 
-		if (window.mobileWizard === true)
-			window.mobileWizard = false;
+			if (window.mobileWizard === true)
+				window.mobileWizard = false;
 
-		if (window.insertionMobileWizard === true)
-			window.insertionMobileWizard = false;
+			if (window.insertionMobileWizard === true)
+				window.insertionMobileWizard = false;
 
-		if (window.pageMobileWizard === true)
-			window.pageMobilewizard = false;
+			if (window.pageMobileWizard === true)
+				window.pageMobilewizard = false;
 
-		if (window.commentWizard === true)
-			window.commentWizard = false;
+			if (window.commentWizard === true)
+				window.commentWizard = false;
 
-		this._updateToolbarItemStateByClose();
+			this._updateToolbarItemStateByClose();
+		}
 
 		if (!this.map.hasFocus()) {
 			this.map.focus();
@@ -155,6 +179,11 @@ window.L.Control.MobileWizard = window.L.Control.extend({
 
 	_onResize: function() {
 		window.L.DomUtil.updateElementsOrientation(['mobile-wizard', 'mobile-wizard-content']);
+		var topWindow = this.contents.length
+			? this.contents[this.contents.length - 1]
+			: null;
+		if (topWindow && topWindow._resizeVulcanBottomSheetGesture)
+			topWindow._resizeVulcanBottomSheetGesture();
 	},
 
 	selectedTab: function(tabText) {
@@ -201,6 +230,21 @@ window.L.Control.MobileWizard = window.L.Control.extend({
 
 			this.map.removeControl(window);
 			this.contents.splice(pos, 1);
+			// VULCAN (VO-P-0016): the one notification that a window has LEFT
+			// the ladder, by its content id. Every route a docked sheet closes
+			// by -- the titlebar control's history.back(), hardware/browser
+			// back, the host's chevron (all through goLevelUp), the grid tap
+			// and the permission drop (through 'closemobilewizard'), a core
+			// `action: 'close'`, and the snackbar timer -- converges on THIS
+			// method, and none of them fires 'closemobilewizard' on the way
+			// out (goLevelUp fires it only behind window.contextMenuWizard).
+			// The phone Calc style rail yields its slot to the sheets it
+			// launches (VulcanCalcFormatRow.yieldTo) and takes it back on this
+			// event, the way `#toolbar-down` above is hidden by _showWizard and
+			// shown again by _hideWizard. `id` is the window's OWN id --
+			// 'mobile-wizard-content-<data.id>' -- exactly as
+			// _getContentForWindowId keys it.
+			this.map.fire('vulcanwizardwindowremoved', { id: window.id });
 			if (this.contents.length) {
 				var parentWindow = this.contents[this.contents.length - 1];
 				parentWindow.showWindow();

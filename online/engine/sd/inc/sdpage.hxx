@@ -47,6 +47,7 @@ class SfxStyleSheet;
 class SdDrawDocument;
 class SdrOutliner;
 class SdrTextObj;
+class SdrGrafObj;
 class SdPageLink;
 class SfxItemSet;
 class Paragraph;
@@ -208,6 +209,11 @@ public:
 
     void        SetPageKind(PageKind ePgType)        { mePageKind = ePgType; }
     PageKind    GetPageKind() const                  { return mePageKind; }
+
+    /** The move- and resize-protected graphic SdPdfFilter inserts for a PDF
+        page - the page's whole content until it is decomposed into editable
+        objects (SdrEditView::ImportPdfGraphic) - or nullptr. */
+    SD_DLLPUBLIC SdrGrafObj* GetPdfPageGraphic() const;
 
     void        SetSelected(bool bSel)               { mbSelected = bSel; }
     bool        IsSelected() const                   { return mbSelected; }

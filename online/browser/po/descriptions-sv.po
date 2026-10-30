@@ -20,7 +20,7 @@ msgstr ""
 #. App name - 50 chars limit
 #: descriptions/google-play.html%2Bhtml.body.h3:5-1
 msgid "Collabora Office: LibreOffice, OpenOffice & more"
-msgstr "Collabora Office: LibreOffice, OpenOffice & mer"
+msgstr "Vulcan Office: Vulcan Office, OpenOffice & mer"
 
 #. Short description - 80 chars limit
 #: descriptions/google-play.html%2Bhtml.body.p:9-1
@@ -37,8 +37,8 @@ msgid ""
 "and now it's on Android, enhancing your possibilities to work on mobile and "
 "for collaboration."
 msgstr ""
-"Collabora Office är ett textredigerar, kalkylblad och presentationsprogram "
-"baserat på LibreOffice, världens mest populära kontorssvit med öppen källkod "
+"Vulcan Office är ett textredigerar, kalkylblad och presentationsprogram "
+"baserat på Vulcan Office, världens mest populära kontorssvit med öppen källkod "
 "– och nu finns den på Android, vilket förbättrar dina möjligheter att arbeta "
 "på mobilen och för samarbete."
 
@@ -99,9 +99,9 @@ msgid ""
 "Windows, Mac, and Linux. This, combined with a new front-end based on "
 "Collabora Online, reads and saves documents similarly to LibreOffice desktop."
 msgstr ""
-"Collabora Office för Android använder samma motor som LibreOffice för "
+"Vulcan Office för Android använder samma motor som Vulcan Office för "
 "Windows, Mac och Linux. Detta, i kombination med ett nytt gränssnitt baserat "
-"på Collabora Online, läser och sparar dokument på samma sätt som LibreOffice "
+"på Vulcan Office, läser och sparar dokument på samma sätt som Vulcan Office "
 "för skrivbordet."
 
 #. Long description
@@ -112,7 +112,7 @@ msgid ""
 "developing Android support since 2012, with the help of Google Summer of "
 "Code students Andrzej Hunt, Iain Billet and Kaishu Sahu."
 msgstr ""
-"Collabora-ingenjörerna Tor Lillqvist, Tomaž Vajngerl, Michael Meeks, Miklos "
+"Vulcan Office-ingenjörerna Tor Lillqvist, Tomaž Vajngerl, Michael Meeks, Miklos "
 "Vajna, Jan Holešovský, Mert Tümer, Rashesh Padia och Skyler Gray har "
 "utvecklat Android stöd sedan 2012, med hjälp av Google Summer of Code-"
 "studenter Andrzej Hunt, Iain Billet och Kaishu Sahu."

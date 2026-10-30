@@ -141,6 +141,8 @@
 #define STR_MSSG_DELETECELLS_0                  NC_("STR_MSSG_DELETECELLS_0", "Deleting in merged ranges not possible")
 #define STR_MSSG_MERGECELLS_0                   NC_("STR_MSSG_MERGECELLS_0", "Cell merge not possible if cells already merged")
 #define STR_SORT_ERR_MERGED                     NC_("STR_SORT_ERR_MERGED", "Ranges containing merged cells can only be sorted without formats.")
+// Vulcan Sort Ascending/Descending refused on a table whose title sits on its header row
+#define STR_VULCAN_SORT_TITLE                   NC_("STR_VULCAN_SORT_TITLE", "Can't tell this table's header from the title above it. Put a blank row under the title, or select the rows to sort.")
 #define STR_TABLE_ERR_ADD                       NC_("STR_TABLE_ERR_ADD", "Cannot add a new table to the sheet.")
 #define STR_TABLE_ERR_DEL                       NC_("STR_TABLE_ERR_DEL", "Cannot delete table from the sheet.")
 #define STR_MSSG_SOLVE_0                        NC_("STR_MSSG_SOLVE_0", "Goal Seek succeeded. Result: ")

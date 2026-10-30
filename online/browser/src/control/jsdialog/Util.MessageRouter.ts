@@ -106,6 +106,36 @@ class JSDialogMessageRouter {
 				app.socket._map.fire('formulabar', { data: msgData });
 				return;
 			}
+			// Same early-out as formulabar above, for the same reason: this
+			// payload has a component of its own and must not be posted into
+			// the wizard as a generic dialog. On a phone the navigator is a
+			// whole panel -- search field, three tabs, two toolbars, fifteen
+			// content categories -- so falling through would drop a desktop
+			// dialog into a 390px bottom sheet. The phone consumer is
+			// VulcanDocumentOutline, which reads the headings out of this and
+			// renders its own sheet (writer-no-document-outline).
+			//
+			// This is also a live defect fix independent of that sheet: F5 is
+			// bound to .uno:Navigator for text documents
+			// (Map.KeyboardShortcuts.ts:411), so a phone with a hardware
+			// keyboard could already reach the fall-through today.
+			if (msgData.jsontype === 'navigator') {
+				app.socket._map.fire('navigator', { data: msgData });
+				return;
+			}
+			// Map.hideBusy fades the busy popup out on every socket close,
+			// open or not. The wizard builds a window for an id it does not hold,
+			// only to remove it again: that hid the member's open sheet and,
+			// with none open, focused the map, once per close of an outage.
+			if (
+				msgData.id === 'busypopup' &&
+				(msgData.action === 'fadeout' || msgData.action === 'close')
+			) {
+				const wizard = app.socket._map.uiManager
+					? app.socket._map.uiManager.mobileWizard
+					: null;
+				if (wizard && !wizard._getContentForWindowId(msgData.id)) return;
+			}
 			if (
 				msgData.enabled ||
 				msgData.jsontype === 'dialog' ||

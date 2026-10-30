@@ -66,6 +66,18 @@ public:
     std::vector< SlidePersistPtr >&                         getMasterPages(){ return maMasterPages; };
     std::vector< SlidePersistPtr >&                         getNotesPages(){ return maNotesPages; };
 
+    /** 1-based position, among the slides this import creates, of the slide stored at
+        rFragmentPath (e.g. "ppt/slides/slide40.xml"); 0 when that part is not one of them.
+        Part names need not follow p:sldIdLst order (slides inserted or reordered keep
+        theirs), so this, not the number in the name, is where a slide relationship lands.
+        Filled before the first slide is imported. */
+    sal_Int32 getSlidePosition(const OUString& rFragmentPath) const
+    {
+        auto it = maSlidePositions.find(rFragmentPath);
+        return it == maSlidePositions.end() ? 0 : it->second;
+    }
+    void setSlidePositions(std::map< OUString, sal_Int32 >&& rSlidePositions) { maSlidePositions = std::move(rSlidePositions); }
+
     virtual bool SAL_CALL filter( const cpo::uno::Sequence<   css::beans::PropertyValue >& rDescriptor ) override;
 
     void getSchemeColorToken(sal_Int32& nToken) const;
@@ -91,6 +103,7 @@ private:
     std::vector< SlidePersistPtr > maDrawPages;
     std::vector< SlidePersistPtr > maMasterPages;
     std::vector< SlidePersistPtr > maNotesPages;
+    std::map< OUString, sal_Int32 > maSlidePositions;
 
     std::shared_ptr< ::oox::drawingml::chart::ChartConverter > mxChartConv;
 };

@@ -207,6 +207,13 @@ private:
     // Chart insert wizard's mark to make sure it undoes the correct thing in COKit case
     UndoStackMark m_InsertWizardUndoMark = MARK_INVALID;
 
+    // Vulcan fork: true while a Vulcan_BeginUndoBatch list action is open on
+    // the DOCUMENT undo manager. The bracket spans multiple incoming uno
+    // commands, so it cannot be scope-guarded the way the Impress batch is
+    // (one request, one ScopeGuard); this flag is what keeps Begin/End honest:
+    // never nest, End without Begin is a no-op, the destructor closes a leak.
+    bool mbVulcanUndoBatchOpen = false;
+
     /// Cell for the desktop "Go to First Error" button. Unused in COOL.
     ScAddress m_aRefErrorCell;
 
@@ -334,6 +341,12 @@ public:
 
     void            ExecuteUndo(SfxRequest& rReq);
     void            GetUndoState(SfxItemSet &rSet);
+    /// Vulcan fork: Ctrl+Z still reaches ExecuteUndo when Undo is disabled for this view, so
+    /// a refusal is answered (see SfxShell::IsKitPerViewUndoRedo).
+    virtual bool    IsConditionalFastCall(const SfxRequest& rReq) override;
+    // Vulcan fork: close the list action a Vulcan_BeginUndoBatch opened, if
+    // one is open (no-op otherwise). See ExecuteUndo for the batch contract.
+    void            VulcanCloseUndoBatch();
 
     void            ExecuteObject(const SfxRequest& rReq);
     void            GetObjectState(SfxItemSet &rSet);

@@ -677,8 +677,36 @@ class SlideShowNavigator {
 		}
 	}
 
+	// The Vulcan phone chrome. isTablet() is defined as !isSmallScreenDevice(),
+	// so tablets are excluded by construction and desktop never matches.
+	private isVulcanPhone(): boolean {
+		return (
+			window.mode.isSmallScreenDevice() &&
+			document.documentElement.classList.contains('vulcan-mobile-chrome')
+		);
+	}
+
 	onSwipe(event: HammerInput) {
 		event.preventDefault();
+
+		if (this.isVulcanPhone()) {
+			// Slides changes slides with a HORIZONTAL swipe while presenting and
+			// keeps the vertical axis for scrolling the deck in read mode; the
+			// opposite axes are deliberate. Mapping vertical to quit made the
+			// commonest accidental gesture — a thumb sliding on a held phone —
+			// end the show. Leaving is the exit control and the Back gesture,
+			// both of which work whether or not the navigator is enabled.
+			if (
+				event.direction !== Hammer.DIRECTION_LEFT &&
+				event.direction !== Hammer.DIRECTION_RIGHT
+			)
+				return;
+			if (!this.isEnabled) return;
+			const phoneHandler = this.swipeHandlerMap[event.direction];
+			if (phoneHandler) phoneHandler();
+			return;
+		}
+
 		if (
 			!this.isEnabled &&
 			event.direction !== Hammer.DIRECTION_DOWN &&

@@ -29,6 +29,7 @@
 #include <common/Unit.hpp>
 #include <common/Uri.hpp>
 #include <common/Util.hpp>
+#include <common/VulcanLogScrub.hpp>
 #include <common/Watchdog.hpp>
 #include <common/security.h>
 #include <kit/DeltaSimd.h>
@@ -120,7 +121,8 @@ void dump_forkit_state()
     oss << "\nEnd ForKit " << getpid() << " Dump State.\n";
 
     const std::string msg = oss.str();
-    fprintf(stderr, "%s", msg.c_str());
+    // Vulcan: raw stderr bypasses the logger's scrub, so it gets the same one.
+    fprintf(stderr, "%s", Vulcan::scrubLogSecrets(msg).c_str());
     LOG_WRN(msg);
 }
 

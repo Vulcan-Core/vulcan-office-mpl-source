@@ -374,6 +374,14 @@ public:
     bool isModified() const { return _isModified; }
     void setModified(bool value);
 
+    /// Records that the session of @wopiUserId was editing, so that the next
+    /// upload can tell the WOPI host who was editing during the interval it
+    /// covers (X-Vulcan-Editors). Not a claim about who authored the bytes: the
+    /// caller's predicate is over-inclusive, see ClientSession::_handleInput.
+    /// Ignores empty ids (non-WOPI storage, or a host that sends no UserId).
+    /// Vulcan addition; see wsd/wopi/WopiStorage.cpp.
+    void recordModifyingSession(const std::string& wopiUserId);
+
     /// Save the document if the document is modified.
     /// @param force when true, will force saving if there
     /// has been any recent activity after the last save.
@@ -538,10 +546,40 @@ public:
     }
 
     /// Sets the last activity timestamp that is most likely to modify the document.
+    ///
+    /// Vulcan: this is also the one place the fork knows a
+    /// HUMAN touched the document — every caller is an editable session that
+    /// delivered a document-modifying client message
+    /// (COOLProtocol::tokenIndicatesDocumentModification). Core's own modified
+    /// flag cannot answer that question: laying out a document refreshes
+    /// SwFieldIds::DocStat (NUMPAGES) and trips DocumentStateManager::SetModified
+    /// with no user involved, which is why a viewer that never typed anything
+    /// used to report X-COOL-WOPI-IsModifiedByUser: true. So record the fact
+    /// here, where it is true by construction — this bit is now what sources
+    /// that header, replacing the engine flag.
     void updateLastModifyingActivityTime()
     {
         _lastModifyActivityTime = std::chrono::steady_clock::now();
+        _userEditedSinceUpload = true;
     }
+
+    /// Vulcan: has a human edited this document since the last successful upload?
+    ///
+    /// Time-relative activity (`_lastModifyActivityTime`) is the wrong shape for
+    /// the question the WOPI host has to answer — it decays, and an idle save
+    /// fires precisely because it decayed. This is a sticky fact instead: false
+    /// means "there is no user work here that storage does not already have".
+    bool userEditedSinceUpload() const { return _userEditedSinceUpload; }
+
+    /// Vulcan: a person sent input that can delete text
+    /// (COOLProtocol::tokenIndicatesDeletingInput), reported as
+    /// X-Vulcan-Deleting-Input so the host can tell a person's own clear of a
+    /// table from the text the engine lost as it loaded the document, which
+    /// comes with no such input. It is modifying input too, so it is kept and
+    /// cleared with the sticky user-edit bit.
+    void recordDeletingInput() { _deletingInputSinceUpload = true; }
+
+    bool deletingInputSinceUpload() const { return _deletingInputSinceUpload; }
 
     /// This updates the editing sessionId which is used for auto-saving.
     void updateEditingSessionId(const std::string& viewId)
@@ -550,9 +588,12 @@ public:
             _lastEditingSessionId = viewId;
     }
 
-    /// User wants to issue a save on the document.
+    /// User wants to issue a save on the document. Vulcan:
+    /// beforeClose, the host closes this view once the save lands, so the save
+    /// is the view's final write (sendUnoSave's finalWrite).
     bool manualSave(const std::shared_ptr<ClientSession>& session, bool dontTerminateEdit,
-                    bool dontSaveIfUnmodified, const std::string& extendedData);
+                    bool dontSaveIfUnmodified, const std::string& extendedData,
+                    bool beforeClose = false);
 
     /// Sends a message to all sessions.
     /// Returns the number of sessions sent the message to.
@@ -696,7 +737,8 @@ private:
                                      std::vector<TileDesc>& tilesNeedsRendering,
                                      const std::shared_ptr<ClientSession>& session);
 
-    /// Get the session that can write the document for save / locking / uploading.
+    /// Get the session that can write the document for save / locking / uploading:
+    /// loaded, editable and with a valid token, preferring the document owner.
     /// Note that if there is no loaded and writable session, the first will be returned.
     std::shared_ptr<ClientSession> getWriteableSession() const;
 
@@ -857,6 +899,16 @@ private:
                                  const std::string& saveAsPath, const std::string& saveAsFilename,
                                  bool isRename, bool isExport, bool force);
 
+    /// Vulcan: true while an upload has been sent and its answer has not landed.
+    /// WopiStorage takes one upload at a time.
+    bool isUploadInFlight() const;
+
+    /// Vulcan: start the upload that uploadToStorageInternal deferred while an
+    /// earlier one was in flight. Called when an upload lands successfully.
+    /// Returns true when an upload is in flight again. With no editable
+    /// session to upload with, the upload stays deferred.
+    bool startDeferredUpload();
+
     /// Handles the completion of uploading to storage, both success and failure cases.
     void handleUploadToStorageResponse(const StorageBase::UploadResult& uploadResult);
 
@@ -868,6 +920,41 @@ private:
 
     /// Send the error message about failed upload
     void reportUploadToStorageFailed(std::string_view reason = {});
+
+    /// Vulcan: as reportUploadToStorageFailed, for a save the host
+    /// never answered that will be sent again.
+    void reportUploadUnanswered(std::string_view reason);
+
+    /// Vulcan: the upload in flight is a plain save on a host with the
+    /// save handshake, so a failed one is sent again for the host to judge.
+    bool isVulcanRetriedSave() const;
+
+    /// Vulcan: asks every editable, loaded spreadsheet view to commit the cell
+    /// it is typing into, as Enter would. Returns how many views were asked.
+    std::size_t vulcanCommitInProgressInput(std::string_view reason);
+
+    /// Vulcan: the view autoSave sends its save through. As upstream
+    /// (the last editor, else getWriteableSession), but first a view that can
+    /// save: one with no modeless dialog open in a spreadsheet (core refuses a
+    /// save through a view a Calc reference dialog locks) and not the view
+    /// core refused the last save in.
+    std::shared_ptr<ClientSession> vulcanSavingSession() const;
+
+    /// Vulcan: the poll loop's give-up after
+    /// per_document.limit_store_failures waits while core's last refusal came
+    /// through a view that still has a dialog open: only a final write (the
+    /// going-away save, or a host's save before it closes the view) closes it
+    /// first (sendUnoSave), and the other manual saves and the first
+    /// periodic save through that view count, so a lone editor could reach
+    /// the limit before that save was tried. The wait lasts until a save sent
+    /// after it began fails too, and never covers the host's failures.
+    bool vulcanGiveUpWaitsForDialogClose(std::size_t limStoreFailures);
+
+    /// Vulcan: closes the modeless dialogs open in this spreadsheet
+    /// view, as the dialog's own X would (Cancel), right before a final save
+    /// through it. Closing a Calc reference dialog unlocks the view before the
+    /// kit reads the save queued behind the close.
+    void vulcanCloseBlockingDialogs(const std::shared_ptr<ClientSession>& session);
 
     /// Sends the .uno:Save command to LoKit.
     bool sendUnoSave(const std::shared_ptr<ClientSession>& session, bool dontTerminateEdit = true,
@@ -1370,11 +1457,13 @@ private:
     public:
         UploadRequest(std::string uriAnonym,
                       std::chrono::system_clock::time_point newFileModifiedLocalTime,
+                      std::chrono::steady_clock::time_point saveRequestTime,
                       const std::shared_ptr<class ClientSession>& session, bool isSaveAs,
                       bool isExport, bool isRename)
             : _startTime(std::chrono::steady_clock::now())
             , _uriAnonym(std::move(uriAnonym))
             , _newFileModifiedLocalTime(newFileModifiedLocalTime)
+            , _saveRequestTime(saveRequestTime)
             , _session(session)
             , _isSaveAs(isSaveAs)
             , _isExport(isExport)
@@ -1391,6 +1480,10 @@ private:
             return _newFileModifiedLocalTime;
         }
 
+        /// Vulcan: the request time of the save that wrote the file this upload
+        /// carries. Modifying activity after it is not in this upload.
+        std::chrono::steady_clock::time_point saveRequestTime() const { return _saveRequestTime; }
+
         std::shared_ptr<class ClientSession> session() const { return _session.lock(); }
         bool isSaveAs() const { return _isSaveAs; }
         bool isExport() const { return _isExport; }
@@ -1404,6 +1497,7 @@ private:
         const std::chrono::steady_clock::time_point _startTime; ///< The time we made the request.
         const std::string _uriAnonym;
         const std::chrono::system_clock::time_point _newFileModifiedLocalTime;
+        const std::chrono::steady_clock::time_point _saveRequestTime;
         const std::weak_ptr<class ClientSession> _session;
         const bool _isSaveAs;
         const bool _isExport;
@@ -1802,10 +1896,30 @@ private:
     /// Performs aggregated work after servicing all client sessions
     void processBatchUpdates();
 
+    /// Vulcan: true when any session is holding back a coalesced roster/cursor
+    /// update, so the poll loop knows not to sleep past its deadline. Always
+    /// false unless per_document.view_update_coalesce_ms is set.
+    bool hasPendingViewUpdates() const;
+
+    /// Number of views the tile cache has to budget for. Vulcan agent views
+    /// (CheckFileInfo's UserExtraInfo.vulcan_agent) never render tiles, so they
+    /// are excluded; with no agent views this is simply the session count, as
+    /// upstream. Never returns 0 while there are sessions.
+    std::size_t tileCacheViewCount() const;
+
     /// Called when document conflict is detected (i.e. it changed in storage).
     /// @param details optional un-translated technical fault analysis (differing
     /// timestamps and the storage response) shown in the conflict dialog.
-    void handleDocumentConflict(std::string details = std::string());
+    /// Storage changed underneath the loaded document. reloadResolved means
+    /// the WOPI host confirmed any rejected bytes are safe (parked as a
+    /// conflicted copy / duplicates of existing history) — resolve by
+    /// reloading every client; otherwise fall back to the upstream conflict
+    /// dialog (Vulcan handshake).
+    void handleDocumentConflict(std::string details, bool reloadResolved);
+
+    /// Vulcan: the conflict dialog's frame, marked vulcankeepssave=1
+    /// when a save sent from the dialog would be kept as a version if refused.
+    std::string vulcanConflictDialogFrame(const std::string& details) const;
 
     std::string applyBrowserAccessibility(const std::string& message,
                                        const std::string& viewId);
@@ -1893,6 +2007,18 @@ private:
     /// For now we can only have one at a time.
     std::unique_ptr<UploadRequest> _uploadRequest;
 
+    /// Vulcan: a plain upload was asked for while another was in flight. It
+    /// starts when that one lands (startDeferredUpload), or with the retry
+    /// after a failure; any plain upload that starts clears it. While it is
+    /// set, removeSession keeps the last editable session to upload it with.
+    bool _uploadDeferred = false;
+    /// Vulcan: the session that asked for the deferred upload.
+    std::weak_ptr<ClientSession> _deferredUploadSession;
+    /// Vulcan: the request time of the save that wrote the file waiting to be
+    /// uploaded (getRootFilePathUploading). Each upload records it when it
+    /// starts (UploadRequest::saveRequestTime).
+    std::chrono::steady_clock::time_point _uploadingFileSaveRequestTime;
+
     /// The current lock-state update request, if any.
     std::unique_ptr<LockStateUpdateRequest> _lockStateUpdateRequest;
 
@@ -1919,6 +2045,16 @@ private:
 
     /// Time of the last interactive event that very likely modified the document.
     std::chrono::steady_clock::time_point _lastModifyActivityTime;
+
+    /// Vulcan: sticky "a human edited this document" bit, cleared only by a
+    /// successful upload to storage. Deliberately NOT cleared on reload: a
+    /// reload that discards unsaved work leaves this true, which fails OPEN
+    /// (the save still happens and the host still judges it) rather than
+    /// silently dropping an edit.
+    bool _userEditedSinceUpload = false;
+
+    /// Vulcan: see recordDeletingInput().
+    bool _deletingInputSinceUpload = false;
 
     std::chrono::steady_clock::time_point _createTime;
     std::chrono::milliseconds _loadDuration;
@@ -1956,6 +2092,47 @@ private:
     /// Set to true when document changed in storage and we are waiting
     /// for user's command to act.
     bool _documentChangedInStorage;
+
+    /// Vulcan: the WOPI host refused a save without keeping it (a 409
+    /// whose resolution is `failed` or absent), and no save has landed since.
+    bool _vulcanRefusedSaveUnkept = false;
+
+    /// Vulcan: the session core refused the last save in while it
+    /// had a modeless dialog open in a spreadsheet (the kit's answer, not the
+    /// host's: see _vulcanRefusedSaveUnkept for that); empty after a save that
+    /// succeeded or was unmodified, and after a refusal with no such dialog
+    /// open. vulcanSavingSession prefers another view, and a periodic save
+    /// through this view waits while it has a modeless dialog open.
+    std::string _vulcanKitRefusedSaveSessionId;
+
+    /// Vulcan: the save failure count when the give-up first waited
+    /// for the save that closes a dialog (vulcanGiveUpWaitsForDialogClose) in
+    /// this going-away episode; 0 before, and again once a client's join
+    /// cancels the unload (createNewClientSession).
+    std::size_t _vulcanGiveUpHeldAtFailures = 0;
+
+    /// Vulcan: this going-away episode already asked the spreadsheet views to
+    /// commit their in-progress cell (autoSaveAndStop). It asks again once a
+    /// person sends modifying input after that commit (an idle episode the
+    /// broker lived on through), and when a session joins an unloading
+    /// broker, which then lives on.
+    bool _vulcanInputCommitSent = false;
+
+    /// Vulcan: when the last commit was sent. Modifying input after it means
+    /// a person may be typing into a cell again (autoSaveAndStop).
+    std::chrono::steady_clock::time_point _vulcanInputCommitTime;
+
+    /// Vulcan: the broker owes the save that follows that commit, even when
+    /// it sees nothing to save (the last periodic save cleared the modified
+    /// flag before the commit dirtied the document again).
+    bool _vulcanFinalSaveOwed = false;
+
+    /// Vulcan: the first save answered after the commit that writes
+    /// something claims a person's edit (handleSaveResponse). Set only when
+    /// the document was clean at the commit and a person sent modifying input
+    /// in this broker's life; cleared by that save, or by an "unmodified"
+    /// answer, which means the commit changed nothing.
+    bool _vulcanCommitClaimPending = false;
 
     /// True for file that COOLWSD::IsViewFileExtension return true.
     /// These files, such as PDF, don't have a reliable ModifiedStatus.

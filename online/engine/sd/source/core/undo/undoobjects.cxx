@@ -26,8 +26,40 @@
 #include <ViewShell.hxx>
 #include <ViewShellBase.hxx>
 #include <DrawDocShell.hxx>
+#include <sfx2/kit/helper.hxx>
+#include <tools/json_writer.hxx>
+#include <COKit/COKitEnums.h>
 
 using namespace sd;
+
+namespace
+{
+void lcl_NotifySpeakerNotesChanged(SdrObject& rObject)
+{
+    SdPage* pNotesPage = dynamic_cast<SdPage*>(rObject.getSdrPageFromSdrObject());
+    if (!pNotesPage || pNotesPage->GetPageKind() != PageKind::Notes
+        || pNotesPage->GetPageNum() == 0)
+    {
+        return;
+    }
+
+    auto& rDocument
+        = static_cast<SdDrawDocument&>(pNotesPage->getSdrModelFromSdrPage());
+    const sal_uInt16 nSlideIndex = (pNotesPage->GetPageNum() - 1) >> 1;
+    SdPage* pStandardPage = rDocument.GetSdPage(nSlideIndex, PageKind::Standard);
+    if (!pStandardPage)
+        return;
+
+    tools::JsonWriter aState;
+    aState.put("slideId", pStandardPage->GetUniqueID());
+    aState.put("requestId", "");
+
+    tools::JsonWriter aPayload;
+    aPayload.put("commandName", ".uno:KitSpeakerNotesChanged");
+    aPayload.put("state", aState.finishAndGetAsOString());
+    KitHelper::notifyAllViews(KIT_CALLBACK_STATE_CHANGED, aPayload.finishAndGetAsOString());
+}
+}
 
 SdUndoAction::SdUndoAction(SdDrawDocument& rSdDrawDocument)
     : mrDoc(rSdDrawDocument),
@@ -204,6 +236,7 @@ void UndoObjectSetText::Undo()
         SdrUndoObjSetText::Undo();
         if( mpUndoAnimation )
             mpUndoAnimation->Undo();
+        lcl_NotifySpeakerNotesChanged(*pSdrObject);
     }
 }
 
@@ -216,6 +249,7 @@ void UndoObjectSetText::Redo()
             mpUndoAnimation->Redo();
         SdrUndoObjSetText::Redo();
         pSdrObject->SetEmptyPresObj(mbNewEmptyPresObj);
+        lcl_NotifySpeakerNotesChanged(*pSdrObject);
     }
 }
 

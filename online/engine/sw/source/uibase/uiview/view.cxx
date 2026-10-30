@@ -213,8 +213,17 @@ void SwView::GotFocus() const
     {
         SwWrtShell& rWrtShell = GetWrtShell();
         rWrtShell.GetDoc()->getIDocumentLayoutAccess().SetCurrentViewShell( pWrtShell );
-        rWrtShell.GetDoc()->getIDocumentSettingAccess().set( DocumentSettingId::BROWSE_MODE,
-                                 rWrtShell.GetViewOptions()->getBrowseMode() );
+        // VULCAN (Lane W, W5): not under COKit. This focus-time mirror is the
+        // second writer of the persisted BROWSE_MODE document setting; with a
+        // reflow-armed shell ring it would push the phone's presentation
+        // state at the model on every view switch -- exactly the write
+        // SwDocShell::ToggleLayoutMode now declines to make (and that
+        // DocumentSettingManager::set currently pins false under COKit; see
+        // the contract note there). The CurrentViewShell update above must
+        // stay: layout reads it.
+        if (!comphelper::COKit::isActive())
+            rWrtShell.GetDoc()->getIDocumentSettingAccess().set( DocumentSettingId::BROWSE_MODE,
+                                     rWrtShell.GetViewOptions()->getBrowseMode() );
     }
 }
 
@@ -1126,8 +1135,13 @@ SwView::SwView(SfxViewFrame& _rFrame, SfxViewShell* pOldSh)
     }
 
     const bool bBrowse = m_pWrtShell->GetViewOptions()->getBrowseMode();
-    // Disable "multiple window"
-    SetNewWindowAllowed(!bBrowse);
+    // Disable "multiple window".
+    // VULCAN (Lane W, W5): never under COKit -- SID_NEWWINDOW is how every
+    // collaborator's view is created (KitHelper::createView), and a view
+    // copy-constructed from a reflow-armed shell inherits browse mode here,
+    // which would make IT refuse the NEXT joiner. See the matching guard in
+    // SwDocShell::ToggleLayoutMode.
+    SetNewWindowAllowed(comphelper::COKit::isActive() || !bBrowse);
     // End of disabled multiple window
 
     UpdateXformsViewOption(GetDrawView()->IsDesignMode());
@@ -1163,6 +1177,9 @@ SwView::SwView(SfxViewFrame& _rFrame, SfxViewShell* pOldSh)
     // Update all tables if necessary:
     if( m_pWrtShell->GetDoc()->IsUpdateTOX() )
     {
+        // Part of loading the file (DOCX w:updateFields), not an edit: keep it off the undo
+        // stack, so the first undo cannot empty the index again.
+        ::sw::UndoGuard const aUndoGuard(m_pWrtShell->GetDoc()->GetIDocumentUndoRedo());
         SfxRequest aSfxRequest( FN_UPDATE_TOX, SfxCallMode::SLOT, GetPool() );
         Execute( aSfxRequest );
         m_pWrtShell->GetDoc()->SetUpdateTOX( false );     // reset again

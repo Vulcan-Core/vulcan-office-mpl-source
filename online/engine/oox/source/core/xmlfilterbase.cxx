@@ -195,6 +195,8 @@ struct XmlFilterBaseImpl
     RelationsMap                   maRelationsMap;
     const NamespaceMap&            mrNamespaceMap;
     NamedShapePairs* mpDiagramFontHeights = nullptr;
+    /// embedded parts a chart of this export links (linkChartEmbeddingOnce)
+    std::unordered_set<OUString> maLinkedChartEmbeddings;
 
     /// @throws RuntimeException
     explicit            XmlFilterBaseImpl();
@@ -1127,6 +1129,11 @@ void XmlFilterBase::setDiagramFontHeights(NamedShapePairs* pDiagramFontHeights)
 }
 
 NamedShapePairs* XmlFilterBase::getDiagramFontHeights() { return mxImpl->mpDiagramFontHeights; }
+
+bool XmlFilterBase::linkChartEmbeddingOnce(const OUString& rPath)
+{
+    return mxImpl->maLinkedChartEmbeddings.insert(rPath).second;
+}
 
 OUString XmlFilterBase::getNamespaceURL(sal_Int32 nNSID) const
 {

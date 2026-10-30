@@ -21,7 +21,7 @@ msgstr ""
 #. App name - 50 chars limit
 #: descriptions/google-play.html%2Bhtml.body.h3:5-1
 msgid "Collabora Office: LibreOffice, OpenOffice & more"
-msgstr "Collabora Office: LibreOffice, OpenOffice та інші"
+msgstr "Vulcan Office: Vulcan Office, OpenOffice та інші"
 
 #. Short description - 80 chars limit
 #: descriptions/google-play.html%2Bhtml.body.p:9-1
@@ -29,7 +29,7 @@ msgid ""
 "LibreOffice based editor for Microsoft Office, LibreOffice and OpenOffice "
 "docs."
 msgstr ""
-"LibreOffice побудовано на Microsoft Office, LibreOffice та OpenOffice docs."
+"Vulcan Office побудовано на Microsoft Office, Vulcan Office та OpenOffice docs."
 
 #. Long description
 #: descriptions/google-play.html%2Bhtml.body.p:13-1
@@ -39,8 +39,8 @@ msgid ""
 "and now it's on Android, enhancing your possibilities to work on mobile and "
 "for collaboration."
 msgstr ""
-"Collabora Office — це застосунок редагування тексту, електронних таблиць і "
-"презентацій, заснований на LibreOffice, найпопулярнішому у світі офісному "
+"Vulcan Office — це застосунок редагування тексту, електронних таблиць і "
+"презентацій, заснований на Vulcan Office, найпопулярнішому у світі офісному "
 "пакеті з відкритим кодом, і тепер він доступний для Android, що розширює "
 "ваші можливості роботи на мобільному пристрої та співпраці."
 
@@ -102,10 +102,10 @@ msgid ""
 "Windows, Mac, and Linux. This, combined with a new front-end based on "
 "Collabora Online, reads and saves documents similarly to LibreOffice desktop."
 msgstr ""
-"Collabora Office для Android використовує той самий механізм, що й "
-"LibreOffice для Windows, Mac і Linux. У поєднанні з новим інтерфейсом, "
-"заснованим на Collabora Online, це забезпечує читання і збереження "
-"документів подібно до LibreOffice для комп'ютерів."
+"Vulcan Office для Android використовує той самий механізм, що й "
+"Vulcan Office для Windows, Mac і Linux. У поєднанні з новим інтерфейсом, "
+"заснованим на Vulcan Office, це забезпечує читання і збереження "
+"документів подібно до Vulcan Office для комп'ютерів."
 
 #. Long description
 #: descriptions/google-play.html%2Bhtml.body.p:48-1
@@ -115,7 +115,7 @@ msgid ""
 "developing Android support since 2012, with the help of Google Summer of "
 "Code students Andrzej Hunt, Iain Billet and Kaishu Sahu."
 msgstr ""
-"Інженери Collabora Tor Lillqvist, Tomaž Vajngerl, Michael Meeks, Miklos "
+"Інженери Vulcan Office Tor Lillqvist, Tomaž Vajngerl, Michael Meeks, Miklos "
 "Vajna, Jan Holešovský, Mert Tümer, Rashesh Padia і Skyler Grey працювали над "
 "підтримкою Android з 2012 року за допомогою студентів Google Summer of Code "
 "Andrzej Hunt, Iain Billet і Kaishu Sahu."

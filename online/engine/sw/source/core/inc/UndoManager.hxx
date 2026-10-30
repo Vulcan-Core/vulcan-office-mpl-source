@@ -96,6 +96,11 @@ public:
 
     SwUndo * RemoveLastUndo();
     SwUndo * GetLastUndo();
+    /** Vulcan fork: GetLastUndo(), for merging the next typing or deleting step into it
+        (CanGrouping). Under COKit only when the current view made it: another view's
+        action must never absorb this view's text, or one person's Undo would take back
+        another person's typing. nullptr otherwise, so the caller appends a new action. */
+    SwUndo * GetLastUndoToGroupWith();
 
     SwNodes const& GetUndoNodes() const;
     SwNodes      & GetUndoNodes();
@@ -106,6 +111,22 @@ public:
      * action. Sets rOffset to the offset of that independent undo action on success.
      */
     bool IsViewUndoActionIndependent(const SwView* pView, sal_uInt16& rOffset) const;
+
+    /**
+     * Vulcan fork: per-view undo. Where pView's own most recent undo action is, and whether
+     * it can be undone now, out of order if other views edited since (SfxViewUndoLookup).
+     *
+     * Out of order is allowed only when the action is node-neutral and every later action
+     * of another view (and everything on the redo stack) touches other nodes; a later action
+     * that adds or removes nodes must lie entirely after it. Anything whose footprint is
+     * unknown (tables, fields, frames, sections, redline accept/reject, ...) blocks.
+     */
+    SfxViewUndoLookup LookupViewUndo(const SwView* pView) const;
+    /// Vulcan fork: per-view redo, in order only (SfxUndoManager::LookupViewRedo).
+    SfxViewUndoLookup LookupViewRedo(const SwView* pView) const;
+    /// Vulcan fork: what every view of this document can undo or redo depends on every
+    /// view's actions: invalidate SID_UNDO/SID_REDO in all of them (on add, undo and redo).
+    void InvalidateUndoStateInAllViews();
 
 private:
     virtual void EmptyActionsChanged() override;

@@ -1540,10 +1540,26 @@ void SwFlyFrame::Format( vcl::RenderContext* /*pRenderContext*/, const SwBorderA
         const SwTwips nUL = pAttrs->CalcTopLine()  + pAttrs->CalcBottomLine();
         const SwTwips nLR = pAttrs->CalcLeftLine() + pAttrs->CalcRightLine();
         const SwFormatFrameSize &rFrameSz = GetFormat()->GetFrameSize();
-        Size aRelSize( CalcRel( rFrameSz ) );
+        bool bFitTextToKitBrowseWidth = false;
+        Size aRelSize( CalcRel( rFrameSz, bFitTextToKitBrowseWidth ) );
 
         OSL_ENSURE( pAttrs->GetSize().Height() != 0 || rFrameSz.GetHeightPercent(), "FrameAttr height is 0." );
         OSL_ENSURE( pAttrs->GetSize().Width()  != 0 || rFrameSz.GetWidthPercent(), "FrameAttr width is 0." );
+
+        // VULCAN: while the kit-browse-width fit narrows a text fly, its Fixed
+        // attribute height is only a MINIMUM -- the rewrapped text needs more
+        // of it, and keeping it Fixed would clip the tail (see the block in
+        // CalcRel). Deriving the frame flags here routes the fly through the
+        // complete SwFrameSize::Minimum machinery -- the branch below,
+        // SwContentFrame::GrowFrame's upper-HasFixSize pre-check (wsfrm.cxx)
+        // and Grow_/Shrink_ -- and restores them as soon as the fit no longer
+        // binds. Same derived-flags pattern as the NoText override in
+        // InsertCnt().
+        if ( rFrameSz.GetHeightSizeType() == SwFrameSize::Fixed )
+        {
+            mbFixSize = !bFitTextToKitBrowseWidth;
+            m_bMinHeight = bFitTextToKitBrowseWidth;
+        }
 
         SwRectFnSet aRectFnSet(*this);
         if( !HasFixSize() )
@@ -3108,7 +3124,16 @@ void SwFlyFrame::NotifyDrawObj()
 
 Size SwFlyFrame::CalcRel( const SwFormatFrameSize &rSz ) const
 {
+    bool bFitTextToKitBrowseWidth;
+    return CalcRel( rSz, bFitTextToKitBrowseWidth );
+}
+
+Size SwFlyFrame::CalcRel( const SwFormatFrameSize &rSz,
+                          bool& rbFitTextToKitBrowseWidth ) const
+{
     Size aRet( rSz.GetSize() );
+
+    rbFitTextToKitBrowseWidth = false;
 
     const SwFrame *pRel = IsFlyLayFrame() ? GetAnchorFrame() : GetAnchorFrame()->GetUpper();
     if( pRel ) // LAYER_IMPL
@@ -3121,7 +3146,9 @@ Size SwFlyFrame::CalcRel( const SwFormatFrameSize &rSz ) const
         {
             nRelWidth  = pSh->GetBrowseWidth();
             nRelHeight = pSh->VisArea().Height();
-            Size aBorder = pSh->GetOut()->PixelToLogic( pSh->GetBrowseBorder() );
+            // VULCAN (R6-15): formatting reference, not the current device
+            // (GetBrowseBorderTwips).
+            Size aBorder = pSh->GetBrowseBorderTwips();
             nRelWidth  = std::min( nRelWidth,  pRel->getFramePrintArea().Width() );
             nRelHeight -= 2*aBorder.Height();
             nRelHeight = std::min( nRelHeight, pRel->getFramePrintArea().Height() );
@@ -3171,6 +3198,201 @@ Size SwFlyFrame::CalcRel( const SwFormatFrameSize &rSz ) const
         {
             aRet.setHeight( aRet.Height() * ( aRet.Width()) );
             aRet.setHeight( aRet.Height() / ( rSz.GetWidth()) );
+        }
+
+        /*
+         * VULCAN: A FIXED-SIZE FLY IS FITTED TO THE WIDTH IT IS RELATIVE TO,
+         * WHEN -- AND ONLY WHEN -- A COKit CLIENT HAS STATED A REFLOW WIDTH.
+         *
+         * Same posture, and the same reason, as the fixed-width table clamp in
+         * SwTabFrame::Format: since SwRootFrame::ImplCalcBrowseWidth started
+         * taking the client's vote VERBATIM, nothing raises the page to cover
+         * an over-wide object, and the document rectangle the client tiles is
+         * derived from PAGE WIDTHS ALONE (SwRootFrame::CheckViewLayout ->
+         * `nMaxPageRight - nBorder`, pagechg.cxx; SwXTextDocument::
+         * getDocumentSize adds only 2*DOCUMENTBORDER, unotxdoc.cxx). An object
+         * hanging off the right edge of a page is therefore NOT PANNABLE, IT
+         * IS UNREACHABLE.
+         *
+         * MEASURED on the live build (c50ec030c7), sweeping the vote and
+         * reading app.activeDocument.fileSize.x back: doc = vote + 634 at
+         * every rung from 3200 to 8000, spread 0. So the vote is honoured
+         * exactly and the document rectangle is exactly the page; anything
+         * wider than the vote is off the canvas.
+         *
+         * WHY HERE AND NOT IN SwFlyFrame::Format. CalcRel is the ONLY resolver
+         * of a fly's size: Format reads `aRelSize` from it for BOTH dimensions
+         * (this file, the !HasFixSize and HasFixSize branches), MakeContentPos
+         * re-derives the min height from it, and IsResizeValid validates an
+         * interactive resize against it. Clamping in Format would leave the
+         * other three disagreeing with it.
+         *
+         * WHY nRelWidth AND NOT pSh->GetBrowseWidth(). nRelWidth is already
+         * "100% of what this fly is relative to", resolved a few lines up for
+         * every anchor kind and every percent-relation: for AS_CHAR / AT_PARA /
+         * AT_CHAR pRel is the anchor's upper (the body frame, whose print width
+         * IS the browse width in reflow), for AT_PAGE pRel is the page, for
+         * AT_FLY the parent fly, and a fly in a table cell gets the cell. So
+         * one expression is correct for all five anchor ids, and a fly in a
+         * cell inherits the squeeze the table clamp already applied instead of
+         * being clamped to a body width it does not live in. It is also not
+         * circular: it is the CONTAINER's already-computed geometry, never this
+         * fly's own output -- unlike pSh->VisArea(), which under COKit is the
+         * root frame's own area (see the block in SwTabFrame::Format).
+         *
+         * ONLY NARROWER. The test is `aRet.Width() > nRelWidth`, so anything
+         * that already fits comes out byte-identical -- including every
+         * ordinary percent fly, because a percent width was resolved above as
+         * that same percent OF nRelWidth and so cannot exceed it. Two
+         * resolved widths CAN still exceed it and are deliberately clamped
+         * too, because both land off the canvas otherwise: a percent above
+         * 100 (SwFormatFrameSize keeps the percent in a sal_uInt8, so up to
+         * 254), and a SYNCED width derived from a large height. For SYNCED
+         * the proportional-height branch below is what preserves the thing
+         * SYNCED actually encodes -- the RATIO -- even though the absolute
+         * height it was derived from moves.
+         *
+         * *** THE HEIGHT HAS TO MOVE FOR A GRAPHIC, AND MUST NOT FOR TEXT. ***
+         * These are two different objects and a single rule distorts one of
+         * them:
+         *
+         *   GRAPHIC / OLE (Lower() is a SwNoTextFrame). The picture is scaled
+         *   to fill the fly's print area INDEPENDENTLY IN X AND Y --
+         *   SwNoTextFrame::GetGrfArea computes the X scale as
+         *   `framePrintArea.Width() / croppedWidth` and the Y scale as
+         *   `framePrintArea.Height() / croppedHeight` from separate
+         *   expressions (sw/source/core/doc/notxtfrm.cxx), and
+         *   SwNoTextFrame::GetSize returns the FLY's print area, which
+         *   SwNoTextFrame::MakeAll then takes for width and ::Format for
+         *   height (same file). SO A WIDTH-ONLY CLAMP SQUASHES THE PICTURE.
+         *   It is scaled here instead: the height is multiplied by the same
+         *   ratio, so the aspect survives. Note SwFlyFrame::InsertCnt forces
+         *   mbFixSize on a no-text lower ("NoText always have a fixed height",
+         *   this file), so the scaled height is read straight out of aRelSize
+         *   by Format's HasFixSize branch -- nothing else
+         *   competes for it.
+         *
+         *   TEXT (anything else, including a columned fly whose Lower() is a
+         *   column frame). The text must REWRAP, which needs MORE height, not
+         *   less. Scaling the height down would hide text -- the same
+         *   unreachable-content defect this block exists to remove, moved from
+         *   the right edge to the bottom edge. So the height is left exactly
+         *   as the attribute and the SYNCED/percent arithmetic above set it --
+         *   but as a MINIMUM, not as a ceiling; see the next paragraph.
+         *
+         *   AND A FIXED HEIGHT IS DEGRADED TO A MINIMUM, via the
+         *   <rbFitTextToKitBrowseWidth> out-parameter. Left Fixed, the fitted
+         *   width clips the rewrapped text: SwFlyFrame::Format takes a Fixed
+         *   height from the attribute and never grows it,
+         *   SwFlyFrame::PaintSwFrame intersects the paint rect with
+         *   getFrameArea() before handing it to SwLayoutFrame::PaintSwFrame
+         *   (paintfrm.cxx), so text past the fixed bottom IS NOT PAINTED, and
+         *   there is no repair path -- m_bHeightClipped is about not fitting
+         *   the PAGE (flylay.cxx), not about content overflowing a fixed
+         *   frame. On the fixture box (432pt x 96pt, ~245 characters of 11pt)
+         *   the rewrap at a 4700 vote needs all ~7 lines the box has, so any
+         *   narrower vote clips -- the defect the fit was written to remove,
+         *   moved to the bottom edge. So Format() derives
+         *   mbFixSize/m_bMinHeight from the flag reported here, and the fly
+         *   runs the COMPLETE SwFrameSize::Minimum machinery: Format() grows
+         *   it to its rewrapped content with the attribute height as the
+         *   floor, SwContentFrame::GrowFrame's upper-HasFixSize pre-check
+         *   (wsfrm.cxx) lets the content's request through, and
+         *   Grow_/Shrink_ negotiate as for any minimum-height fly. No
+         *   reorder of Format() is needed for the stale first pass: the
+         *   reflowed lower's Grow request re-formats the fly, and the second
+         *   pass measures the rewrapped content. The flag stays false for
+         *   three shapes that must keep today's behaviour:
+         *     - a CHAINED fly (GetPrevLink/GetNextLink): its overflow is not
+         *       clipped, it flows to the next link, and growing the master
+         *       would re-route that flow;
+         *     - a VERTICAL fly: its logical height IS the physical width
+         *       this block just fitted, so growing it would undo the fit;
+         *     - an AUTOWIDTH fly: the clamp does not bind on it (below).
+         *
+         * The clamp runs AFTER the SYNCED block on purpose: SYNCED ("keep
+         * ratio", SwFormatFrameSize::PercentFlags) derives one dimension from
+         * the other, so clamping before it would be undone by it. After it,
+         * the proportional-height branch above is what SYNCED would have asked
+         * for anyway.
+         *
+         * NOT COVERED, deliberately:
+         *   - a fly whose width size type is not Fixed (autowidth). Format
+         *     overwrites the width with lcl_CalcAutoWidth() after CalcRel
+         *     returns (this file), so a clamp here does not bind. Autowidth
+         *     is content-driven and has never been the measured case.
+         *   - the text half of a shape+textbox pair (SwTextBoxHelper). Its
+         *     visible rectangle is an SdrObject whose size lives in the draw
+         *     model and is NOT laid out by Writer, so narrowing only the fly
+         *     would leave the drawn box at its old width with reflowed text
+         *     inside it. Skipped explicitly below rather than left to chance;
+         *     fixing that case means resizing the shape too and is a separate
+         *     change.
+         *
+         *     ⚠ THE COST OF THAT SKIP, SPELLED OUT (2026-08-24): with reflow
+         *     the phone DEFAULT and the vote honoured verbatim, a pair wider
+         *     than the vote -- the standard Word 2007+ text box import:
+         *     letterheads, signature blocks, callouts -- keeps its full
+         *     width, and everything past the page edge is off the canvas the
+         *     client tiles: hidden, unreachable, and UNDETECTABLE from the
+         *     client, whose only width signal (getDocumentSize) is derived
+         *     from page widths alone and reads vote + chrome regardless.
+         *     Bare SdrObject shapes never pass through CalcRel at all and
+         *     are off-canvas the same way. The repair cannot live in this
+         *     function: the pair's visible rectangle is PERSISTED draw-model
+         *     geometry, and resizing it from layout is a document
+         *     modification (undo, modified flag, saved output) that a
+         *     read-only phone view must never make. It needs either a
+         *     render-scoped transform for the pair, or the published
+         *     document rectangle widened to cover anchored objects so the
+         *     overflow is at least PANNABLE -- both engine changes outside
+         *     this clamp.
+         *
+         * VERIFICATION STATUS, corrected 2026-08-24. An earlier revision of
+         * this comment said "not compiled, not run"; that is now stale in one
+         * direction and still true in the one that matters:
+         *
+         *   COMPILED AND SHIPPED. This block is in the built image
+         *   (bd6e4f32, the phone-parity merge), and its sibling -- the
+         *   fixed-width table clamp in SwTabFrame::Format -- has been
+         *   wet-verified on that lane (a 9360-twip table inside a 4700-twip
+         *   page, all four columns on screen; commit dfa745e5a0), which is
+         *   what put the phone reflow default back ON over this code.
+         *
+         *   STILL NEVER WET-VERIFIED, either branch below: nothing has read
+         *   back whether a clamped FIXED-HEIGHT TEXT fly still paints its
+         *   LAST line at the narrowest vote (the wet test specified above),
+         *   and the graphics aspect branch has never been observed to render
+         *   at all. Until that read-back exists, the "loses at worst the
+         *   last line or two" judgement is arithmetic, not a measurement --
+         *   and the arithmetic itself says the fixture box is at ~7 of ~7
+         *   lines at a 4700 vote, i.e. the clip is live at any narrower one.
+         *
+         * Everything above is static reading of the functions cited, except
+         * the vote/fileSize sweep, which was measured.
+         */
+        const bool bFitFixedSizeToKitBrowseWidth =
+            pSh && pSh->hasKitBrowseWidth() && pSh->GetViewOptions()->getBrowseMode();
+        if ( bFitFixedSizeToKitBrowseWidth &&
+             nRelWidth < LONG_MAX && aRet.Width() > nRelWidth && aRet.Width() > 0 &&
+             !SwTextBoxHelper::getOtherTextBoxFormat( GetFormat(), RES_FLYFRMFMT ) )
+        {
+            const SwFrame *pFlyLower = Lower();
+            if ( pFlyLower && pFlyLower->IsNoTextFrame() )
+            {
+                // Keep the aspect ratio -- see the GetGrfArea reading above.
+                aRet.setHeight( static_cast<tools::Long>( rtl::math::round(
+                    double(aRet.Height()) * double(nRelWidth) / double(aRet.Width()) ) ) );
+            }
+            else if ( pFlyLower && !IsVertical() &&
+                      rSz.GetWidthSizeType() == SwFrameSize::Fixed &&
+                      !GetPrevLink() && !GetNextLink() )
+            {
+                // The attribute height was authored for the attribute width;
+                // at the fitted width it is only a minimum -- see above.
+                rbFitTextToKitBrowseWidth = true;
+            }
+            aRet.setWidth( nRelWidth );
         }
     }
     return aRet;

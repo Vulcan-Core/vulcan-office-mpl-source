@@ -32,3 +32,194 @@
 	z-index: 11;
 	user-select: none;
 }
+
+/* ---------------------------------------------------------------------------
+ * PHONE (html.vulcan-mobile-chrome, stamped by js/global.js L471-472 for
+ * small-screen devices only — tablets and desktop never carry it, so every
+ * rule below is inert there).
+ *
+ * 1. GRAB BOX vs DRAWN ART. The stock box above is exactly the art: 30 px wide
+ *    with the teardrop filling it edge to edge, and the box top IS the art
+ *    top. No slop beside it, none above it. Same split the shipped Calc handle
+ *    fixes with hitRadius vs circleRadius (CellSelectionHandleSection), but
+ *    that section paints itself and can centre a small arc in a big box; this
+ *    one is a div with a background-image, so the phone version is a bigger
+ *    section plus a compensating background-position — the art does not move,
+ *    only the invisible hit region grows.
+ *
+ *    The BOX is not sized here. HTMLObjectSection writes the div's width and
+ *    height INLINE from the section's constructor arguments, so those inline
+ *    values win over the 30px/44px above and TextSelectionHandleSection is the
+ *    single source for both the hit box and the painted box. The 30px/44px
+ *    above are left alone on purpose: .formulabar-selection-handle-* shares
+ *    that rule and IS sized by it (Util.FormulaBarSelectionHandle.ts builds a
+ *    plain div with no inline size), so editing it would resize the formula
+ *    bar's handles on every form factor.
+ *
+ *    background-position must equal phoneSlopX / phoneSlopTop in
+ *    src/canvas/sections/TextSelectionHandleSection.ts — the side slop is
+ *    whatever takes the box to 44 px (the floor vulcan-theme.css §13
+ *    advertises; 11 px each side of the 22 px art), 12 px above is the Calc
+ *    handle's number. background-size must equal that file's artWidth() —
+ *    round-8 D1 draws the teardrop at 22 px (Material v1's 22 dp handle;
+ *    JUDGMENT pending the designer's Docs screenshot), uniformly scaled, on both
+ *    the mask path and this no-mask fallback. no-repeat is load-bearing: the
+ *    box is larger than the image, so the default `repeat` would tile the
+ *    teardrop.
+ *
+ * 2. COLOUR. The art is hard-coded #0b6fe1 in both SVGs and #3d3846 in the
+ *    caret handle's, with no dark variant — a second blue that belongs to no
+ *    token, cannot follow Host_ThemeChanged.cssVars, and in the caret's case
+ *    is near-black ink on a near-black page (1.65:1 over
+ *    --color-background-document #121212). The SVG files are NOT edited: they
+ *    are shared with the formulabar handles, which are desktop/tablet chrome
+ *    too. Instead the phone re-paints them through a mask, so the fill comes
+ *    from the live token and both themes fall out of one declaration.
+ * ------------------------------------------------------------------------- */
+
+html.vulcan-mobile-chrome .text-selection-handle-start,
+html.vulcan-mobile-chrome .text-selection-handle-end {
+	background-position: 11px 12px;
+	background-size: 22px auto;
+	background-repeat: no-repeat;
+}
+
+/* The caret handle has the same disease in a nastier form. `margin-left: -14px`
+ * in the stock rule above paints its art 14 px LEFT of the section, and a
+ * margin moves the DIV only — the container hit-tests the SECTION's bounds
+ * (HTMLObjectSection L49 pointer-events:none), which never saw it. So the grab
+ * box does not merely miss by a few px: much of the teardrop is outside the
+ * grabbable section, and the other side of the box is empty air.
+ *
+ * On a phone the section is instead widened to 44 px and placed 21 px left of
+ * the caret (CursorHandler.boxWidth / anchorInsetX — that file owns the split
+ * and the arithmetic). The margin has to go with it, or the div would be
+ * shifted twice.
+ *
+ * The art's SIZE and POSITION are not here: CursorHandler.applyArtGeometry
+ * writes them inline on the div, for both the mask and the no-mask fallback,
+ * so there is one number instead of three that have to be kept equal by hand.
+ *
+ * no-repeat is load-bearing: the box is 44 px and the art is 10 px, so the
+ * default `repeat` would tile a second teardrop into the slop. */
+html.vulcan-mobile-chrome .cursor-handler {
+	margin-left: 0;
+	background-repeat: no-repeat;
+	/* The knob is tap-summoned and leaves on a timer, so its exit is a fade
+	 * rather than a disappearance. Keep equal to CursorHandler.fadeOutMs, which
+	 * is how long the section stays hit-testable after opacity starts falling. */
+	transition: opacity 200ms linear;
+}
+
+/* Masks are the whole colour story, and a browser that cannot parse them must
+ * not be left with a 44x56 accent RECTANGLE where a teardrop should be. Inside
+ * @supports the art is re-painted from tokens; outside it the block is skipped
+ * entirely and the phone keeps the stock blue SVG at the corrected position —
+ * i.e. the geometry fix above lands either way.
+ *
+ * Keep the condition SINGLE-clause: autoprefixer re-expands it to
+ * `(-webkit-mask-image: ...) or (mask-image: ...)` at build time, and
+ * uglifycss then used to print `or(` with no space — an invalid condition, so
+ * this whole block silently never applied on deployed bundles (found live).
+ * The bundler now repairs the space (Makefile.am bundle_css sed guard); the
+ * single-clause source keeps the surface minimal either way. */
+@supports (mask-image: url('images/handle_start.svg')) {
+	/* The ELEMENT paints the rim and the ::after paints the fill, in that
+	 * order, because a mask on the element also clips its own ::after — which
+	 * is safe only while the element's mask strictly CONTAINS the child's.
+	 *
+	 * The rim is the same SVG scaled to 24.2px (a 1.1x scale of the 22px
+	 * round-8 art) and shifted back by half the growth, 1.1px up-left of the
+	 * fill's 11px/12px: concentric with the r=11 teardrop at r=12.1, i.e. a
+	 * ~1.1 CSS px ring that keeps the ring:art ratio of the pre-shrink
+	 * treatment, with no second asset to keep in registration.
+	 *
+	 * Why a rim at all, and why this token: the Calc handle's answer to "a
+	 * hollow ring is hard to find" is a filled accent dot with a contrasting
+	 * halo, and this is that transposed from grid data to paper. The halo
+	 * there is --vulcan-surface, which works because the background is dense
+	 * text; here the background IS --vulcan-surface (white paper), so the
+	 * contrasting colour has to be the ink one. --vulcan-accent alone is
+	 * 2.33:1 over white paper — under the 3:1 floor SC 1.4.11 sets for a
+	 * non-text control — and 10.36:1 over the dark page; --vulcan-text carries
+	 * the shape at 20.0:1 light / 17.9:1 dark, so the fill is free to carry
+	 * identity instead of contrast. */
+	html.vulcan-mobile-chrome .text-selection-handle-start,
+	html.vulcan-mobile-chrome .text-selection-handle-end,
+	html.vulcan-mobile-chrome .cursor-handler {
+		background-image: none;
+		background-color: var(--vulcan-text);
+		-webkit-mask-repeat: no-repeat;
+		mask-repeat: no-repeat;
+	}
+
+	/* The caret knob's accent carve-out lives in the .cursor-handler rule
+	 * below (one rule — the bundler's stylelint forbids duplicate selectors). */
+
+	html.vulcan-mobile-chrome .text-selection-handle-start,
+	html.vulcan-mobile-chrome .text-selection-handle-end {
+		-webkit-mask-size: 24.2px auto;
+		mask-size: 24.2px auto;
+		-webkit-mask-position: 9.9px 10.9px;
+		mask-position: 9.9px 10.9px;
+	}
+
+	html.vulcan-mobile-chrome .text-selection-handle-start {
+		-webkit-mask-image: url('images/handle_start.svg');
+		mask-image: url('images/handle_start.svg');
+	}
+
+	html.vulcan-mobile-chrome .text-selection-handle-end {
+		-webkit-mask-image: url('images/handle_end.svg');
+		mask-image: url('images/handle_end.svg');
+	}
+
+	html.vulcan-mobile-chrome .text-selection-handle-start::after,
+	html.vulcan-mobile-chrome .text-selection-handle-end::after {
+		content: '';
+		position: absolute;
+		inset: 0;
+		background-color: var(--vulcan-accent);
+		-webkit-mask-repeat: no-repeat;
+		mask-repeat: no-repeat;
+		-webkit-mask-size: 22px auto;
+		mask-size: 22px auto;
+		-webkit-mask-position: 11px 12px;
+		mask-position: 11px 12px;
+	}
+
+	html.vulcan-mobile-chrome .text-selection-handle-start::after {
+		-webkit-mask-image: url('images/handle_start.svg');
+		mask-image: url('images/handle_start.svg');
+	}
+
+	html.vulcan-mobile-chrome .text-selection-handle-end::after {
+		-webkit-mask-image: url('images/handle_end.svg');
+		mask-image: url('images/handle_end.svg');
+	}
+
+	/* The caret handle gets the fill but NOT the rim. A rim is a dilated copy
+	 * of the mask, and the slop this box now carries is the finger's,
+	 * not the art's — a 1.1x teardrop would eat 1.5 px of it on each side and
+	 * still be clipped at the top, where the box top is the art top. So the
+	 * ring would come out broken for a target that does not need one: the
+	 * accent-ink fill above already clears the 3:1 non-text floor in both
+	 * themes (4.9:1 light / 10.4:1 dark), and its drop-shadow does the
+	 * lifting-off-the-page a rim would.
+	 *
+	 * mask-size and mask-position are written inline by
+	 * CursorHandler.applyArtGeometry, alongside the matching background-* for
+	 * the no-mask fallback, so the two paths cannot disagree. mask-repeat:
+	 * no-repeat is inherited from the shared declaration above and is
+	 * load-bearing for the same reason it is there. */
+	html.vulcan-mobile-chrome .cursor-handler {
+		-webkit-mask-image: url('images/cursor-handler.svg');
+		mask-image: url('images/cursor-handler.svg');
+		/* Carved out of the shared ink fill: an accent droplet, not selection
+		 * chrome. Bare --vulcan-accent is under the 3:1 floor on white paper;
+		 * the -ink variant holds both themes. The drop-shadow follows the
+		 * masked alpha, so it hugs the droplet, not the 44 px box. */
+		background-color: var(--vulcan-accent-ink);
+		filter: drop-shadow(0 1px 2px rgb(0 0 0 / 0.35));
+	}
+}

@@ -6894,7 +6894,7 @@ msgstr ""
 
 #: welcome/welcome.html%2Bhtml.head.title:9-3
 msgid "Collabora Online Welcome"
-msgstr "ようこそCollabora Onlineへ"
+msgstr "ようこそVulcan Officeへ"
 
 #: welcome/welcome.html%2Bhtml.body.div.div.div.div.h1:26-7
 msgid "Explore The New {coolversion}"
@@ -6903,7 +6903,7 @@ msgstr "新ヴァージョン{coolversion}"
 #: welcome/welcome.html%2Bhtml.body.div.div.div.div.h2:27-7
 #: welcome/welcome.html%2Bhtml.body.div.div.div.div.h2:38-7
 msgid "Collabora Online Development Edition"
-msgstr "Collabora Online 開発版"
+msgstr "Vulcan Office 開発版"
 
 #: welcome/welcome.html%2Bhtml.body.div.div.div.div.p:28-7
 #, fuzzy
@@ -7229,7 +7229,7 @@ msgstr ""
 #~ msgstr "サーバーは再利用中でもうじき利用可能になります"
 
 #~ msgid "Oops, there is a problem connecting to Collabora Online : "
-#~ msgstr "おっと、Collabora Onlineへの接続で問題が発生しました : "
+#~ msgstr "おっと、Vulcan Officeへの接続で問題が発生しました : "
 
 #~ msgid "Number of views"
 #~ msgstr "ビューの数"

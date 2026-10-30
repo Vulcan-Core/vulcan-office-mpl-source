@@ -22,6 +22,8 @@
 #include <basegfx/matrix/b2dhommatrix.hxx>
 #include <comphelper/propertyvalue.hxx>
 
+#include <com/sun/star/awt/Size.hpp>
+#include <com/sun/star/beans/PropertyValue.hpp>
 #include <com/sun/star/beans/XPropertySet.hpp>
 #include <com/sun/star/container/XIndexAccess.hpp>
 #include <com/sun/star/container/XIndexContainer.hpp>
@@ -40,6 +42,8 @@
 #include <document.hxx>
 #include <externalrefmgr.hxx>
 #include <oox/core/filterbase.hxx>
+#include <oox/core/relations.hxx>
+#include <oox/core/xmlfilterbase.hxx>
 #include <oox/drawingml/connectorshapecontext.hxx>
 #include <oox/drawingml/graphicshapecontext.hxx>
 #include <oox/helper/attributelist.hxx>
@@ -47,6 +51,7 @@
 #include <oox/shape/ShapeDrawingFragmentHandler.hxx>
 #include <oox/token/namespaces.hxx>
 #include <oox/token/properties.hxx>
+#include <oox/token/relationship.hxx>
 #include <oox/token/tokens.hxx>
 #include <oox/vml/vmlshape.hxx>
 #include <oox/vml/vmlshapecontainer.hxx>
@@ -56,6 +61,7 @@
 #include <stylesbuffer.hxx>
 #include <themebuffer.hxx>
 #include <worksheetbuffer.hxx>
+#include <xlactivex.hxx>
 
 namespace oox::xls {
 
@@ -454,6 +460,69 @@ bool VmlFindNoteFunc::operator()( const ::oox::vml::ShapeBase& rShape ) const
     return pClientData && (pClientData->mnCol == mnCol) && (pClientData->mnRow == mnRow);
 }
 
+/** Keeps an ActiveX control's own parts on its shape (XclActiveX::STASH), so the xlsx export can
+    write it back as ActiveX (XclExpOcxXmlControlObj) instead of a form control. The shape is a
+    control shape only when oox made one from rInfo's ax:ocx part (vmlshape.cxx,
+    ComplexShape::implConvertAndInsert); an ActiveX that became a picture is left alone. */
+void lclKeepActiveXParts( ::oox::core::XmlFilterBase& rFilter, const ::oox::vml::ControlInfo& rInfo,
+        const ::oox::vml::ShapeBase& rShape, const Reference< XShape >& rxShape )
+{
+    try
+    {
+        Reference< XControlShape > xCtrlShape( rxShape, UNO_QUERY );
+        if( !xCtrlShape.is() || rInfo.maFragmentPath.isEmpty() )
+            return;
+        Reference< XControlModel > xCtrlModel( xCtrlShape->getControl(), UNO_SET_THROW );
+
+        // persistStreamInit, what Excel writes: CLSID + MS Forms 2.0 stream, kept byte for byte.
+        // persistStorage (a compound file) and persistPropertyBag (no binary) are not kept: the
+        // export writes those from the model.
+        ::oox::StreamDataSequence aBin;
+        ::oox::core::RelationsRef xRels = rFilter.importRelations( rInfo.maFragmentPath );
+        const OUString aBinPath = xRels ? xRels->getFragmentPathFromFirstType(
+            ::oox::getRelationship( ::oox::Relationship::ACTIVEXCONTROLBINARY ) ) : OUString();
+        bool bKeepBin = !aBinPath.isEmpty() && rFilter.importBinaryData( aBin, aBinPath ) && (aBin.getLength() > 16);
+        if( bKeepBin )
+        {
+            const sal_Int8* pBin = aBin.getConstArray();
+            bKeepBin = !( (sal_uInt8( pBin[ 0 ] ) == 0xD0) && (sal_uInt8( pBin[ 1 ] ) == 0xCF)
+                          && (sal_uInt8( pBin[ 2 ] ) == 0x11) && (sal_uInt8( pBin[ 3 ] ) == 0xE0) );
+        }
+        if( !bKeepBin )
+            aBin = ::oox::StreamDataSequence();
+
+        // the picture Excel shows until the control runs (v:imagedata; the same part as the
+        // x14 controlPr r:id)
+        ::oox::StreamDataSequence aPreview;
+        OUString aPreviewExt;
+        const std::optional< OUString >& roPreview = rShape.getTypeModel().moGraphicPath;
+        const sal_Int32 nDot = roPreview ? roPreview->lastIndexOf( '.' ) : -1;
+        if( (nDot > 0) && rFilter.importBinaryData( aPreview, *roPreview ) )
+            aPreviewExt = roPreview->copy( nDot + 1 ).toAsciiLowerCase();
+        else
+            aPreview = ::oox::StreamDataSequence();
+
+        const Sequence< css::beans::PropertyValue > aKept{
+            comphelper::makePropertyValue( u"Bin"_ustr, aBin ),
+            comphelper::makePropertyValue( u"Fingerprint"_ustr,
+                ::XclActiveX::ExportStream( rFilter.getModel(), xCtrlModel, css::awt::Size( 0, 0 ) ) ),
+            comphelper::makePropertyValue( u"Preview"_ustr, aPreview ),
+            comphelper::makePropertyValue( u"PreviewExt"_ustr, aPreviewExt ) };
+
+        // appended as VMLStroked is (VmlDrawing::createAndInsertClientXShape)
+        Reference< css::beans::XPropertySet > xShapeProps( rxShape, UNO_QUERY_THROW );
+        Sequence< css::beans::PropertyValue > aGrabBag;
+        xShapeProps->getPropertyValue( u"InteropGrabBag"_ustr ) >>= aGrabBag;
+        const sal_Int32 nLength = aGrabBag.getLength();
+        aGrabBag.realloc( nLength + 1 );
+        aGrabBag.getArray()[ nLength ] = comphelper::makePropertyValue( ::XclActiveX::STASH, aKept );
+        xShapeProps->setPropertyValue( u"InteropGrabBag"_ustr, Any( aGrabBag ) );
+    }
+    catch( const Exception& )
+    {
+    }
+}
+
 } // namespace
 
 VmlControlMacroAttacher::VmlControlMacroAttacher( const OUString& rMacroName,
@@ -801,10 +870,21 @@ void VmlDrawing::notifyXShapeInserted( const Reference< XShape >& rxShape,
     if( !bGroupChild )
         extendShapeBoundingBox( rShapeRect );
 
+    // an ActiveX control (its <control> registered the shape) keeps its own parts for the xlsx
+    // export; kept after the cell links are bound below, so the fingerprint is the model as loaded.
+    // No ObjectType test is needed: a registered shape id never takes the form-control path
+    // (ComplexShape::implConvertAndInsert calls createAndInsertClientXShape only without a
+    // ControlInfo), so a control shape here was built from an ax:ocx part.
+    const ::oox::vml::ControlInfo* pAxInfo = getControlInfo( rShape.getShapeId() );
+
     // convert settings from VML client data
     const ::oox::vml::ClientData* pClientData = rShape.getClientData();
     if(!pClientData)
+    {
+        if( pAxInfo )
+            lclKeepActiveXParts( getOoxFilter(), *pAxInfo, rShape, rxShape );
         return;
+    }
 
     // specific settings for embedded form controls
     try
@@ -823,6 +903,9 @@ void VmlDrawing::notifyXShapeInserted( const Reference< XShape >& rxShape,
     catch( Exception& )
     {
     }
+
+    if( pAxInfo )
+        lclKeepActiveXParts( getOoxFilter(), *pAxInfo, rShape, rxShape );
 
     // Anchor to cell holding top left corner of the shape if true
     if (pClientData->mbMoveWithCells)

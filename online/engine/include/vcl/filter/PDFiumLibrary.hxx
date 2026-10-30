@@ -12,6 +12,8 @@
 
 #include <memory>
 #include <stdint.h>
+#include <utility>
+#include <vector>
 
 #include <com/sun/star/util/DateTime.hpp>
 
@@ -134,6 +136,12 @@ public:
     virtual void renderPageBitmap(PDFiumDocument* pDoc, PDFiumPage* pPage, int nStartX, int nStartY,
                                   int nSizeX, int nSizeY)
         = 0;
+    /// Only the page's AcroForm widgets (their appearance streams), drawn over
+    /// what the bitmap already holds; same placement as renderPageBitmap,
+    /// turned by nRotate quarter turns clockwise (FPDF_FFLDraw's rotate).
+    virtual void renderFormFields(PDFiumDocument* pDoc, PDFiumPage* pPage, int nStartX, int nStartY,
+                                  int nSizeX, int nSizeY, int nRotate)
+        = 0;
     virtual ConstScanline getBuffer() = 0;
     virtual int getStride() = 0;
     virtual int getWidth() = 0;
@@ -175,7 +183,38 @@ public:
                                                        PDFAnnotAActionType eEvent)
         = 0;
     virtual OUString getFormFieldValue(PDFiumDocument* pDoc) = 0;
+    /// The fully-qualified AcroForm field name (/T chain), e.g. "company_name".
+    virtual OUString getFormFieldName(PDFiumDocument* pDoc) = 0;
     virtual int getOptionCount(PDFiumDocument* pDoc) = 0;
+    /// The display label of a combo / list box option.
+    virtual OUString getOptionLabel(PDFiumDocument* pDoc, int nIndex) = 0;
+    /// Whether a combo / list box option is selected.
+    virtual bool isOptionSelected(PDFiumDocument* pDoc, int nIndex) = 0;
+    /// Whether a check box or radio button widget is on.
+    virtual bool isChecked(PDFiumDocument* pDoc) = 0;
+    /// The export value of a check box or radio button widget: the name of
+    /// its "on" appearance state (e.g. "Yes", or a radio option's value).
+    virtual OUString getFormFieldExportValue(PDFiumDocument* pDoc) = 0;
+    /// A number entry of the annotation's own dictionary (e.g. "MaxLen");
+    /// false when absent.
+    virtual bool getNumberValue(OString const& rKey, float& rValue) = 0;
+};
+
+/// An image's colour space family; the values are pdfium's FPDF_COLORSPACE_*.
+enum class PDFImageColorSpace
+{
+    Unknown = 0,
+    DeviceGray = 1,
+    DeviceRGB = 2,
+    DeviceCMYK = 3,
+    CalGray = 4,
+    CalRGB = 5,
+    Lab = 6,
+    ICCBased = 7,
+    Separation = 8,
+    DeviceN = 9,
+    Indexed = 10,
+    Pattern = 11,
 };
 
 class VCL_DLLPUBLIC PDFiumLink
@@ -214,6 +253,8 @@ public:
     virtual ~PDFiumPageObject() = default;
 
     virtual PDFPageObjectType getType() = 0;
+    /// The pdfium handle, for matching against PDFiumTextPage::getTextObjectPointer().
+    virtual void* getPointer() = 0;
     virtual OUString getText(std::unique_ptr<PDFiumTextPage> const& pTextPage) = 0;
 
     virtual int getFormObjectCount() = 0;
@@ -241,6 +282,31 @@ public:
     virtual std::unique_ptr<PDFiumPathSegment> getPathSegment(int index) = 0;
     virtual Size getImageSize(PDFiumPage& rPage) = 0;
     virtual std::unique_ptr<PDFiumBitmap> getImageBitmap() = 0;
+    /// The image as drawn: soft mask (transparency), colour key and decode
+    /// applied, BGRA. getImageBitmap() is the bare sample data, which for a
+    /// masked JPEG logo is the picture on a black field. Sized by the
+    /// object's matrix (page points), so scale the matrix up first for the
+    /// source's own resolution.
+    virtual std::unique_ptr<PDFiumBitmap> getRenderedImage(PDFiumDocument& rDoc, PDFiumPage& rPage)
+        = 0;
+    /// The image stream's /Filter chain in the order it is applied (e.g.
+    /// "DCTDecode"); empty when the stream is not filtered.
+    virtual std::vector<OString> getImageFilters() = 0;
+    /// The image stream as stored in the file, no filter applied: for a lone
+    /// DCTDecode filter, the JPEG file itself. Empty on failure.
+    virtual std::vector<sal_uInt8> getImageDataRaw() = 0;
+    /// The image's colour space family, as pdfium reads it on rPage.
+    virtual PDFImageColorSpace getImageColorSpace(PDFiumPage& rPage) = 0;
+    /// The image's bits per pixel as pdfium reads it on rPage: 1 for a
+    /// bilevel image (CCITT, JBIG2, a 1-bit Flate stream, a stencil mask);
+    /// 0 on failure.
+    virtual int getImageBitsPerPixel(PDFiumPage& rPage) = 0;
+    /// The content marks the object is drawn inside (BDC ... EMC), as
+    /// pdfium lists them, outermost first: each mark's name, and the string
+    /// value of rParamKey in the mark's property dictionary (empty when the
+    /// mark has none). The innermost mark is the last entry.
+    virtual std::vector<std::pair<OUString, OUString>> getMarks(const OString& rParamKey) = 0;
+    virtual void setMatrix(const basegfx::B2DHomMatrix& rMatrix) = 0;
     virtual bool getDrawMode(PDFFillMode& eFillMode, bool& bStroke) = 0;
 
     // ClipPath
@@ -270,6 +336,14 @@ public:
 
     /// Returned rect is no longer upside down and is in mm100.
     virtual basegfx::B2DRectangle getCharBox(int nIndex, double fPageHeight) = 0;
+    /// The page object that drew the char (compare with PDFiumPageObject::getPointer());
+    /// null for a char pdfium generated (a space from a gap).
+    virtual void* getTextObjectPointer(int nIndex) = 0;
+    /// The char's origin on its baseline, in PDF points (y up).
+    virtual bool getCharOrigin(int nIndex, double& rX, double& rY) = 0;
+    /// The char's advance box (bearings included), in PDF points (y up).
+    virtual bool getLooseCharBox(int nIndex, double& rLeft, double& rRight, double& rBottom,
+                                 double& rTop) = 0;
 };
 
 class VCL_DLLPUBLIC PDFiumStructureElement
@@ -321,6 +395,16 @@ public:
 
     virtual double getWidth() = 0;
     virtual double getHeight() = 0;
+
+    /// The page's /Rotate in quarter turns clockwise (0-3); -1 on error.
+    virtual int getRotation() = 0;
+    /// pdfium's page-to-device mapping for a render at nStartX/nStartY,
+    /// nSizeX x nSizeY, turned nRotate quarter turns: the mapping
+    /// renderPageBitmap and renderFormFields draw with (CropBox origin and
+    /// /Rotate applied). False when pdfium cannot map the point.
+    virtual bool pageToDevice(int nStartX, int nStartY, int nSizeX, int nSizeY, int nRotate,
+                              double fPageX, double fPageY, int& rDeviceX, int& rDeviceY)
+        = 0;
 
     virtual bool hasTransparency() = 0;
 

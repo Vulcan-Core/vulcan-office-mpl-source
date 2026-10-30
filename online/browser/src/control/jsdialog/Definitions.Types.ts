@@ -165,6 +165,16 @@ interface JSDialogJSON extends WidgetJSON {
 	control?: WidgetJSON;
 	data?: ActionData;
 	init_focus_id?: string; // id of initially focused widget
+	dropdownHeaderId?: string; // optional focusable sibling before a dropdown listbox
+}
+
+interface DropdownHeaderListOptions {
+	header: WidgetJSON & { id: string };
+	listboxLabel: string;
+}
+
+interface DropdownOpenOptions {
+	headerList?: DropdownHeaderListOptions;
 }
 
 // JSDialog message for popup
@@ -269,6 +279,7 @@ interface ContainerWidgetJSON extends WidgetJSON {
 interface OverflowGroupWidgetJSON extends ContainerWidgetJSON {
 	name: string; // visible name of a group
 	icon?: string; // Optional icon name. Otherwise it will be guessed.
+	text?: string; // Optional name for the fold button (its tooltip when unlabelled)
 	more?: MoreOptions;
 	nofold?: boolean; // for widgets which use overflowgroup just for the label
 }
@@ -276,9 +287,16 @@ interface MoreOptions {
 	command: string;
 }
 interface OverflowGroupContainer extends Element {
-	foldGroup?: () => void;
+	// `keepMenu` suppresses the open dropdown's teardown. The overflow
+	// manager's refresh unfolds every group to measure and then re-folds, so
+	// both legs run on a pass that changes nothing; without this the measure
+	// step alone destroys whatever menu the user has open.
+	foldGroup?: (keepMenu?: boolean) => void;
 	isCollapsed?: () => boolean;
-	unfoldGroup?: () => void;
+	unfoldGroup?: (keepMenu?: boolean) => void;
+	// Close this group's own overflow menu, for the manager to call once the
+	// pass has settled and it knows the fold state really changed.
+	closeMenu?: () => void;
 }
 
 interface GridWidgetJSON extends ContainerWidgetJSON {
@@ -502,17 +520,10 @@ interface EditWidgetJSON extends WidgetJSON {
 	widthInChars: number; // width hint in characters
 }
 
-// type: 'emojipicker'
-interface EmojiPickerWidgetJSON extends WidgetJSON {
-	recentsPrefsKey?: string; // window.prefs key for the "Recently used" row
-	maxRecents?: number; // cap on the recents row length (default 16)
-	searchPlaceholder?: string; // placeholder for the search input
-}
-
 // trailing action button rendered inside a chip's pill
 interface ChipAction {
 	id: string; // unique id; click is dispatched as a 'pushbutton' callback
-	text?: string; // glyph / short label (e.g. '✎')
+	text?: string; // short plain-text label; prefer `image`
 	image?: string; // lc_*.svg icon (uses LOUtil.setImage like pushbuttons)
 	enabled?: boolean;
 	aria?: AriaLabelAttributes;
@@ -521,7 +532,7 @@ interface ChipAction {
 // type: 'chip'
 interface ChipWidgetJSON extends WidgetJSON {
 	text: string; // chip label
-	icon?: string; // optional leading glyph / emoji (or lc_*.svg path)
+	icon?: string; // optional leading lc_*.svg sprite; anything else renders nothing
 	pressed?: boolean; // selected state, drives aria-pressed on the main button
 	actions?: ChipAction[]; // optional trailing action buttons inside the pill
 }

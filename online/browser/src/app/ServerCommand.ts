@@ -47,6 +47,14 @@ class ServerCommand {
 	public lastrow?: number;
 	public readonly?: number;
 	public externallinksdisabled?: boolean;
+	// Vulcan: `error: cmd=storage kind=savefailed ... vulcanunanswered=1`,
+	// a save the WOPI host never answered, which wsd sends again
+	// (DocumentBroker::reportUploadUnanswered).
+	public vulcanUnanswered?: boolean;
+	// Vulcan: `error: cmd=storage kind=documentconflict ...
+	// vulcankeepssave=1`, a save sent from the conflict dialog would be kept as
+	// a version if refused (DocumentBroker::vulcanConflictDialogFrame).
+	public vulcanKeepsSave?: boolean;
 
 	public x?: number;
 	public y?: number;
@@ -72,81 +80,81 @@ class ServerCommand {
 	private parse(msg: string, map: MapZoomInterface): void {
 		const tokens = msg.split(/[ \n]+/);
 		for (let i = 0; i < tokens.length; i++) {
-			if (tokens[i].substring(0, 9) === 'tileposx=') {
+			if (tokens[i].startsWith('tileposx=')) {
 				this.x = parseInt(tokens[i].substring(9));
-			} else if (tokens[i].substring(0, 9) === 'tileposy=') {
+			} else if (tokens[i].startsWith('tileposy=')) {
 				this.y = parseInt(tokens[i].substring(9));
-			} else if (tokens[i].substring(0, 2) === 'x=') {
+			} else if (tokens[i].startsWith('x=')) {
 				this.x = parseInt(tokens[i].substring(2));
-			} else if (tokens[i].substring(0, 2) === 'y=') {
+			} else if (tokens[i].startsWith('y=')) {
 				this.y = parseInt(tokens[i].substring(2));
-			} else if (tokens[i].substring(0, 10) === 'tilewidth=') {
+			} else if (tokens[i].startsWith('tilewidth=')) {
 				this.tileWidth = parseInt(tokens[i].substring(10));
-			} else if (tokens[i].substring(0, 11) === 'tileheight=') {
+			} else if (tokens[i].startsWith('tileheight=')) {
 				this.tileHeight = parseInt(tokens[i].substring(11));
-			} else if (tokens[i].substring(0, 6) === 'width=') {
+			} else if (tokens[i].startsWith('width=')) {
 				this.width = parseInt(tokens[i].substring(6));
-			} else if (tokens[i].substring(0, 7) === 'height=') {
+			} else if (tokens[i].startsWith('height=')) {
 				this.height = parseInt(tokens[i].substring(7));
-			} else if (tokens[i].substring(0, 5) === 'part=') {
+			} else if (tokens[i].startsWith('part=')) {
 				this.part = parseInt(tokens[i].substring(5));
-			} else if (tokens[i].substring(0, 6) === 'parts=') {
+			} else if (tokens[i].startsWith('parts=')) {
 				this.parts = parseInt(tokens[i].substring(6));
-			} else if (tokens[i].substring(0, 5) === 'mode=') {
+			} else if (tokens[i].startsWith('mode=')) {
 				this.mode = parseInt(tokens[i].substring(5));
-			} else if (tokens[i].substring(0, 8) === 'current=') {
+			} else if (tokens[i].startsWith('current=')) {
 				this.selectedPart = parseInt(tokens[i].substring(8));
-			} else if (tokens[i].substring(0, 3) === 'id=') {
+			} else if (tokens[i].startsWith('id=')) {
 				// remove newline characters
 				this.id = tokens[i].substring(3).replace(/(\r\n|\n|\r)/gm, '');
-			} else if (tokens[i].substring(0, 5) === 'type=') {
+			} else if (tokens[i].startsWith('type=')) {
 				// remove newline characters
 				this.type = tokens[i].substring(5).replace(/(\r\n|\n|\r)/gm, '');
-			} else if (tokens[i].substring(0, 4) === 'cmd=') {
+			} else if (tokens[i].startsWith('cmd=')) {
 				this.errorCmd = tokens[i].substring(4);
-			} else if (tokens[i].substring(0, 5) === 'code=') {
+			} else if (tokens[i].startsWith('code=')) {
 				this.errorCode = tokens[i].substring(5);
-			} else if (tokens[i].substring(0, 5) === 'kind=') {
+			} else if (tokens[i].startsWith('kind=')) {
 				this.errorKind = tokens[i].substring(5);
-			} else if (tokens[i].substring(0, 12) === 'errordetail=') {
+			} else if (tokens[i].startsWith('errordetail=')) {
 				this.errorDetail = decodeURIComponent(tokens[i].substring(12));
-			} else if (tokens[i].substring(0, 5) === 'jail=') {
+			} else if (tokens[i].startsWith('jail=')) {
 				this.jail = tokens[i].substring(5);
-			} else if (tokens[i].substring(0, 4) === 'dir=') {
+			} else if (tokens[i].startsWith('dir=')) {
 				this.dir = tokens[i].substring(4);
-			} else if (tokens[i].substring(0, 11) === 'downloadid=') {
+			} else if (tokens[i].startsWith('downloadid=')) {
 				this.downloadid = tokens[i].substring(11);
-			} else if (tokens[i].substring(0, 5) === 'name=') {
+			} else if (tokens[i].startsWith('name=')) {
 				this.name = tokens[i].substring(5);
-			} else if (tokens[i].substring(0, 9) === 'filename=') {
+			} else if (tokens[i].startsWith('filename=')) {
 				this.filename = tokens[i].substring(9);
-			} else if (tokens[i].substring(0, 5) === 'port=') {
+			} else if (tokens[i].startsWith('port=')) {
 				this.port = tokens[i].substring(5);
-			} else if (tokens[i].substring(0, 5) === 'font=') {
+			} else if (tokens[i].startsWith('font=')) {
 				this.font = tokens[i].substring(5);
-			} else if (tokens[i].substring(0, 5) === 'char=') {
+			} else if (tokens[i].startsWith('char=')) {
 				this.char = tokens[i].substring(5);
-			} else if (tokens[i].substring(0, 4) === 'url=') {
+			} else if (tokens[i].startsWith('url=')) {
 				this.url = tokens[i].substring(4);
-			} else if (tokens[i].substring(0, 7) === 'viewid=') {
+			} else if (tokens[i].startsWith('viewid=')) {
 				this.viewid = tokens[i].substring(7);
-			} else if (tokens[i].substring(0, 8) === 'nviewid=') {
+			} else if (tokens[i].startsWith('nviewid=')) {
 				this.nviewid = tokens[i].substring(8);
-			} else if (tokens[i].substring(0, 7) === 'params=') {
+			} else if (tokens[i].startsWith('params=')) {
 				this.params = tokens[i].substring(7).split(',');
-			} else if (tokens[i].substring(0, 12) === 'rendercount=') {
+			} else if (tokens[i].startsWith('rendercount=')) {
 				this.rendercount = parseInt(tokens[i].substring(12));
 			} else if (tokens[i].startsWith('wid=')) {
 				this.wireId = ServerCommand.getParameterValue(tokens[i]);
-			} else if (tokens[i].substring(0, 6) === 'title=') {
+			} else if (tokens[i].startsWith('title=')) {
 				this.title = tokens[i].substring(6);
-			} else if (tokens[i].substring(0, 12) === 'dialogwidth=') {
+			} else if (tokens[i].startsWith('dialogwidth=')) {
 				this.dialogwidth = tokens[i].substring(12);
-			} else if (tokens[i].substring(0, 13) === 'dialogheight=') {
+			} else if (tokens[i].startsWith('dialogheight=')) {
 				this.dialogheight = tokens[i].substring(13);
-			} else if (tokens[i].substring(0, 10) === 'rectangle=') {
+			} else if (tokens[i].startsWith('rectangle=')) {
 				this.rectangle = tokens[i].substring(10);
-			} else if (tokens[i].substring(0, 12) === 'hiddenparts=') {
+			} else if (tokens[i].startsWith('hiddenparts=')) {
 				const hiddenparts = tokens[i].substring(12).split(',');
 				this.hiddenparts = hiddenparts.map((item: string) => parseInt(item));
 			} else if (tokens[i].startsWith('rtlparts=')) {
@@ -161,7 +169,7 @@ class ServerCommand {
 				this.hash = tokens[i].substring('hash='.length);
 			} else if (tokens[i] === 'nopng') {
 				this.nopng = true;
-			} else if (tokens[i].substring(0, 9) === 'username=') {
+			} else if (tokens[i].startsWith('username=')) {
 				this.username = tokens[i].substring(9);
 			} else if (tokens[i].startsWith('pagerectangles=')) {
 				const pageRectangleList = tokens[i].substring(15).split(';');
@@ -182,6 +190,10 @@ class ServerCommand {
 				this.lastrow = parseInt(tokens[i].substring(8));
 			} else if (tokens[i].startsWith('readonly=')) {
 				this.readonly = parseInt(tokens[i].substring(9));
+			} else if (tokens[i] === 'vulcanunanswered=1') {
+				this.vulcanUnanswered = true;
+			} else if (tokens[i] === 'vulcankeepssave=1') {
+				this.vulcanKeepsSave = true;
 			}
 		}
 		if (this.tileWidth && this.tileHeight && map._docLayer) {

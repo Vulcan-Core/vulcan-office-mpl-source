@@ -1362,6 +1362,11 @@
 #define RID_SVXSTR_SEARCH_START_WRAPPED                     NC_("RID_SVXSTR_SEARCH_START_WRAPPED", "Reached the beginning of the document, continued from the end")
 #define RID_SVXSTR_SEARCH_REMINDER_START_WRAPPED            NC_("RID_SVXSTR_SEARCH_REMINDER_START_WRAPPED", "Reached the first reminder, continued from the last")
 #define RID_SVXSTR_SEARCH_REMINDER_END_WRAPPED              NC_("RID_SVXSTR_SEARCH_REMINDER_END_WRAPPED", "Reached the last reminder, continued from the first")
+// Vulcan: the ordinal form of the search status line -- "3 of 12". Every other
+// RID_SVXSTR_SEARCH_* above is a fixed phrase; this one is the only one that
+// carries numbers, which is why it exists at all (see SvxSearchDialogWrapper::
+// SetSearchLabel(sal_Int32, sal_Int32) in svx/source/dialog/srchdlg.cxx).
+#define RID_SVXSTR_SEARCH_MATCH_ORDINAL                     NC_("RID_SVXSTR_SEARCH_MATCH_ORDINAL", "%1 of %2")
 
 #define RID_SVXDLG_BMPMASK_STR_PALETTE                      NC_("RID_SVXDLG_BMPMASK_STR_PALETTE", "Color Palette")
 #define RID_SVXDLG_BMPMASK_STR_TITLE                        NC_("RID_SVXDLG_BMPMASK_STR_TITLE", "Color Replacer")

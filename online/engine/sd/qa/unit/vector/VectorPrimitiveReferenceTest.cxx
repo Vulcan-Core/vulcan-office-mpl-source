@@ -53,6 +53,18 @@
 #include <drawinglayer/primitive2d/objectinfoprimitive2d.hxx>
 #include <drawinglayer/primitive2d/unifiedtransparenceprimitive2d.hxx>
 #include <drawinglayer/primitive2d/modifiedcolorprimitive2d.hxx>
+#include <drawinglayer/primitive2d/PolyPolygonGraphicPrimitive2D.hxx>
+#include <drawinglayer/primitive2d/PolyPolygonGradientPrimitive2D.hxx>
+#include <drawinglayer/primitive2d/PolygonStrokeArrowPrimitive2D.hxx>
+#include <drawinglayer/primitive2d/PolyPolygonAlphaGradientPrimitive2D.hxx>
+#include <drawinglayer/primitive2d/fillgradientprimitive2d.hxx>
+#include <drawinglayer/primitive2d/transparenceprimitive2d.hxx>
+#include <drawinglayer/attribute/fillgraphicattribute.hxx>
+#include <drawinglayer/attribute/fillgradientattribute.hxx>
+#include <drawinglayer/attribute/linestartendattribute.hxx>
+#include <basegfx/polygon/b2dpolygontools.hxx>
+#include <basegfx/utils/bgradient.hxx>
+#include <com/sun/star/awt/GradientStyle.hpp>
 
 #include <basegfx/color/bcolormodifier.hxx>
 #include <drawinglayer/processor2d/Primitive2dJsonProcessor.hxx>
@@ -951,6 +963,198 @@ CPPUNIT_TEST_FIXTURE(VectorPrimitiveReferenceTest, testPolyPolygonStroke)
     assertJsonPath(aJson, "/primitives/0/line/linejoin", "miter");
     assertJsonPath(aJson, "/primitives/0/line/linecap", "butt");
     assertJsonPathExists(aJson, "/primitives/0/path");
+}
+
+CPPUNIT_TEST_FIXTURE(VectorPrimitiveReferenceTest, testPolyPolygonGraphic)
+{
+    // An image-filled shape: how a picture cropped in Google Slides, or a
+    // logo placed as a shape fill, imports. The client has no renderer for
+    // polyPolygonGraphic and paints only a node's children, so the node
+    // carries the engine's own decomposition: the outline as a mask around
+    // the fill, which places the image as a bitmap the client fetches by
+    // checksum. Without the children the shape painted nothing.
+    Bitmap aBitmap(Size(4, 4), vcl::PixelFormat::N24_BPP);
+    aBitmap.Erase(COL_GREEN);
+    const basegfx::B2DRange aRange(0.0, 0.0, 100.0, 50.0);
+    const basegfx::B2DPolyPolygon aOutline(basegfx::utils::createPolygonFromRect(aRange));
+    const drawinglayer::attribute::FillGraphicAttribute aFill(
+        Graphic(aBitmap), basegfx::B2DRange(0.0, 0.0, 1.0, 1.0), false);
+
+    Primitive2DContainer aPrimitives;
+    aPrimitives.append(new PolyPolygonGraphicPrimitive2D(aOutline, aRange, aFill));
+
+    auto aJson = writeReference(u"testPolyPolygonGraphic", aPrimitives);
+
+    assertJsonPath(aJson, "/primitives/0/type", "polyPolygonGraphic");
+    assertJsonPathExists(aJson, "/primitives/0/fillGraphic/checksum");
+    assertJsonPath(aJson, "/primitives/0/children/0/type", "mask");
+    assertJsonPathExists(aJson, "/primitives/0/children/0/clip");
+    assertJsonPath(aJson, "/primitives/0/children/0/children/0/type", "fillGraphic");
+    assertJsonPath(aJson, "/primitives/0/children/0/children/0/children/0/type", "group");
+    assertJsonPath(aJson, "/primitives/0/children/0/children/0/children/0/children/0/type",
+                   "bitmap");
+    assertJsonPathExists(aJson,
+                         "/primitives/0/children/0/children/0/children/0/children/0/checksum");
+}
+
+CPPUNIT_TEST_FIXTURE(VectorPrimitiveReferenceTest, testPolyPolygonGradient)
+{
+    // A gradient-filled shape. As with an image fill, the client paints the
+    // decomposition: the outline as a mask around the gradient's steps,
+    // each a solid polygon.
+    const basegfx::B2DRange aRange(0.0, 0.0, 100.0, 50.0);
+    const basegfx::B2DPolyPolygon aOutline(basegfx::utils::createPolygonFromRect(aRange));
+    const drawinglayer::attribute::FillGradientAttribute aGradient(
+        css::awt::GradientStyle_LINEAR, 0.0, 0.0, 0.0, 0.0,
+        basegfx::BColorStops(basegfx::BColor(1.0, 0.0, 0.0), basegfx::BColor(0.0, 0.0, 1.0)));
+
+    Primitive2DContainer aPrimitives;
+    aPrimitives.append(new PolyPolygonGradientPrimitive2D(aOutline, aRange, aGradient));
+
+    auto aJson = writeReference(u"testPolyPolygonGradient", aPrimitives);
+
+    assertJsonPath(aJson, "/primitives/0/type", "polyPolygonGradient");
+    assertJsonPath(aJson, "/primitives/0/children/0/type", "mask");
+    assertJsonPath(aJson, "/primitives/0/children/0/children/0/type", "fillGradient");
+    assertJsonPath(aJson, "/primitives/0/children/0/children/0/children/0/type", "group");
+    CPPUNIT_ASSERT_GREATER(
+        size_t(1),
+        aJson.getSize("/primitives/0/children/0/children/0/children/0/children").value_or(0));
+    assertJsonPath(aJson, "/primitives/0/children/0/children/0/children/0/children/0/type",
+                   "polyPolygonColor");
+}
+
+CPPUNIT_TEST_FIXTURE(VectorPrimitiveReferenceTest, testPolygonStrokeArrow)
+{
+    // A line with an arrow head at its end (a connector, say). The client
+    // paints the decomposition: the shortened shaft as a polygonStroke and
+    // the head as a solid polygon in the line colour.
+    basegfx::B2DPolygon aLine;
+    aLine.append(basegfx::B2DPoint(0.0, 0.0));
+    aLine.append(basegfx::B2DPoint(100.0, 0.0));
+
+    basegfx::B2DPolygon aHead;
+    aHead.append(basegfx::B2DPoint(0.0, 0.0));
+    aHead.append(basegfx::B2DPoint(10.0, 20.0));
+    aHead.append(basegfx::B2DPoint(-10.0, 20.0));
+    aHead.setClosed(true);
+
+    const drawinglayer::attribute::LineAttribute aLineAttribute(
+        basegfx::BColor(0.0, 0.0, 1.0), 2.0, basegfx::B2DLineJoin::Miter,
+        css::drawing::LineCap_BUTT);
+    const drawinglayer::attribute::LineStartEndAttribute aEnd(
+        10.0, basegfx::B2DPolyPolygon(aHead), false);
+
+    Primitive2DContainer aPrimitives;
+    aPrimitives.append(new PolygonStrokeArrowPrimitive2D(
+        aLine, aLineAttribute, drawinglayer::attribute::LineStartEndAttribute(), aEnd));
+
+    auto aJson = writeReference(u"testPolygonStrokeArrow", aPrimitives);
+
+    assertJsonPath(aJson, "/primitives/0/type", "polygonStrokeArrow");
+    assertJsonPath(aJson, "/primitives/0/children/0/type", "group");
+    assertJsonPath(aJson, "/primitives/0/children/0/children/0/type", "polygonStroke");
+    assertJsonPath(aJson, "/primitives/0/children/0/children/1/type", "polyPolygonColor");
+    assertJsonPath(aJson, "/primitives/0/children/0/children/1/color", "#0000ff");
+}
+
+CPPUNIT_TEST_FIXTURE(VectorPrimitiveReferenceTest, testPolyPolygonGradientAlphaScrim)
+{
+    // A scrim: a dark gradient fading in over a photo, the gradient carrying
+    // an alpha gradient (how a PPTX gradFill with alpha stops imports). The
+    // fill decomposes to a transparence, which the client paints: the
+    // gradient's steps masked by the alpha gradient's, over the range given.
+    const basegfx::B2DRange aRange(0.0, 0.0, 100.0, 50.0);
+    const basegfx::B2DPolyPolygon aOutline(basegfx::utils::createPolygonFromRect(aRange));
+    const drawinglayer::attribute::FillGradientAttribute aGradient(
+        css::awt::GradientStyle_LINEAR, 0.0, 0.0, 0.0, 0.0,
+        basegfx::BColorStops(basegfx::BColor(0.0, 0.0, 0.0), basegfx::BColor(0.0, 0.0, 0.0)));
+    const drawinglayer::attribute::FillGradientAttribute aAlpha(
+        css::awt::GradientStyle_LINEAR, 0.0, 0.0, 0.0, 0.0,
+        basegfx::BColorStops(basegfx::BColor(1.0, 1.0, 1.0), basegfx::BColor(0.4, 0.4, 0.4)));
+
+    Primitive2DContainer aPrimitives;
+    aPrimitives.append(new PolyPolygonGradientPrimitive2D(aOutline, aRange, aGradient, &aAlpha));
+
+    auto aJson = writeReference(u"testPolyPolygonGradientAlphaScrim", aPrimitives);
+
+    assertJsonPath(aJson, "/primitives/0/type", "polyPolygonGradient");
+    assertJsonPath(aJson, "/primitives/0/children/0/type", "mask");
+    assertJsonPath(aJson, "/primitives/0/children/0/children/0/type", "fillGradient");
+    assertJsonPathExists(aJson, "/primitives/0/children/0/children/0/alphaGradient");
+    const std::string aTransparence = "/primitives/0/children/0/children/0/children/0";
+    assertJsonPath(aJson, aTransparence + "/type", "transparence");
+    CPPUNIT_ASSERT_EQUAL(size_t(4), aJson.getSize(aTransparence + "/range").value_or(0));
+    assertJsonPath(aJson, aTransparence + "/children/0/type", "fillGradient");
+    assertJsonPathExists(aJson, aTransparence + "/children/0/children");
+    assertJsonPath(aJson, aTransparence + "/transparence/0/type", "fillGradient");
+    assertJsonPathExists(aJson, aTransparence + "/transparence/0/children");
+}
+
+CPPUNIT_TEST_FIXTURE(VectorPrimitiveReferenceTest, testPolyPolygonAlphaGradient)
+{
+    // A solid colour with a transparency gradient decomposes to a
+    // transparence: the colour masked by the gradient. With one transparency
+    // for the whole fill it decomposes to a polyPolygonRGBA, which the client
+    // paints with that transparency.
+    const basegfx::B2DRange aRange(0.0, 0.0, 100.0, 50.0);
+    const basegfx::B2DPolyPolygon aOutline(basegfx::utils::createPolygonFromRect(aRange));
+    const basegfx::BColor aBlack(0.0, 0.0, 0.0);
+    const drawinglayer::attribute::FillGradientAttribute aFading(
+        css::awt::GradientStyle_LINEAR, 0.0, 0.0, 0.0, 0.0,
+        basegfx::BColorStops(basegfx::BColor(1.0, 1.0, 1.0), basegfx::BColor(0.4, 0.4, 0.4)));
+    const drawinglayer::attribute::FillGradientAttribute aUniform(
+        css::awt::GradientStyle_LINEAR, 0.0, 0.0, 0.0, 0.0,
+        basegfx::BColorStops(basegfx::BColor(0.5, 0.5, 0.5), basegfx::BColor(0.5, 0.5, 0.5)));
+
+    Primitive2DContainer aPrimitives;
+    aPrimitives.append(new PolyPolygonAlphaGradientPrimitive2D(aOutline, aBlack, aFading));
+    aPrimitives.append(new PolyPolygonAlphaGradientPrimitive2D(aOutline, aBlack, aUniform));
+
+    auto aJson = writeReference(u"testPolyPolygonAlphaGradient", aPrimitives);
+
+    assertJsonPath(aJson, "/primitives/0/type", "polyPolygonAlphaGradient");
+    assertJsonPath(aJson, "/primitives/0/children/0/type", "transparence");
+    assertJsonPath(aJson, "/primitives/0/children/0/children/0/type", "polyPolygonColor");
+    assertJsonPath(aJson, "/primitives/0/children/0/transparence/0/type", "fillGradient");
+    assertJsonPathExists(aJson, "/primitives/0/children/0/transparence/0/children");
+    assertJsonPath(aJson, "/primitives/1/type", "polyPolygonAlphaGradient");
+    assertJsonPath(aJson, "/primitives/1/children/0/type", "polyPolygonRGBA");
+    assertJsonPathDouble(aJson, "/primitives/1/children/0/transparency", 0.5, 1e-6);
+}
+
+CPPUNIT_TEST_FIXTURE(VectorPrimitiveReferenceTest, testTransparenceContentDecomposes)
+{
+    // An image fill under a transparency gradient: a transparence holding a
+    // polyPolygonGraphic. The client masks the content by the transparence,
+    // so the fill inside it and the gradient that masks it both get the
+    // children the client paints, and the node says where the content lies.
+    Bitmap aBitmap(Size(4, 4), vcl::PixelFormat::N24_BPP);
+    aBitmap.Erase(COL_GREEN);
+    const basegfx::B2DRange aRange(0.0, 0.0, 100.0, 50.0);
+    const basegfx::B2DPolyPolygon aOutline(basegfx::utils::createPolygonFromRect(aRange));
+    const drawinglayer::attribute::FillGraphicAttribute aFill(
+        Graphic(aBitmap), basegfx::B2DRange(0.0, 0.0, 1.0, 1.0), false);
+    const drawinglayer::attribute::FillGradientAttribute aAlpha(
+        css::awt::GradientStyle_LINEAR, 0.0, 0.0, 0.0, 0.0,
+        basegfx::BColorStops(basegfx::BColor(0.0, 0.0, 0.0), basegfx::BColor(1.0, 1.0, 1.0)));
+
+    Primitive2DContainer aContent;
+    aContent.append(new PolyPolygonGraphicPrimitive2D(aOutline, aRange, aFill));
+    Primitive2DContainer aMask;
+    aMask.append(new FillGradientPrimitive2D(aRange, aAlpha));
+
+    Primitive2DContainer aPrimitives;
+    aPrimitives.append(new TransparencePrimitive2D(std::move(aContent), std::move(aMask)));
+
+    auto aJson = writeReference(u"testTransparenceContentDecomposes", aPrimitives);
+
+    assertJsonPath(aJson, "/primitives/0/type", "transparence");
+    CPPUNIT_ASSERT_EQUAL(size_t(4), aJson.getSize("/primitives/0/range").value_or(0));
+    assertJsonPath(aJson, "/primitives/0/children/0/type", "polyPolygonGraphic");
+    assertJsonPath(aJson, "/primitives/0/children/0/children/0/type", "mask");
+    assertJsonPath(aJson, "/primitives/0/transparence/0/type", "fillGradient");
+    assertJsonPathExists(aJson, "/primitives/0/transparence/0/children");
 }
 
 } // namespace

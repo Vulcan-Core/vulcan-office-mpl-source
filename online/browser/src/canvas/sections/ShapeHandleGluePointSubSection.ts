@@ -26,6 +26,10 @@ class ShapeHandleGluePointSubSection extends CanvasSectionObject {
 	}
 
     onDraw(frameCount?: number, elapsedTime?: number): void {
+        if (VulcanImpressSelectEcho.suppressesSelectionChrome()) return;
+        // A live move drag displaces frame and content; stationary
+        // grip dots would trail the old position, so they stand down.
+        if (this.sectionProperties.parentHandlerSection?.isMoveDragLive?.()) return;
         this.context.fillStyle = '#EE3E3E';
         this.context.beginPath();
         this.context.arc(0, 0, this.size[0] * 0.5, 0, Math.PI * 2);

@@ -20,7 +20,7 @@ msgstr ""
 #. App name - 50 chars limit
 #: descriptions/google-play.html%2Bhtml.body.h3:5-1
 msgid "Collabora Office: LibreOffice, OpenOffice & more"
-msgstr "Collabora Office: LibreOffice, OpenOffice & άλλες"
+msgstr "Vulcan Office: Vulcan Office, OpenOffice & άλλες"
 
 #. Short description - 80 chars limit
 #: descriptions/google-play.html%2Bhtml.body.p:9-1
@@ -28,7 +28,7 @@ msgid ""
 "LibreOffice based editor for Microsoft Office, LibreOffice and OpenOffice "
 "docs."
 msgstr ""
-"Επεξεργαστής με βάση LibreOffice για Microsoft Office, LibreOffice & "
+"Επεξεργαστής με βάση Vulcan Office για Microsoft Office, Vulcan Office & "
 "OpenOffice."
 
 #. Long description
@@ -39,8 +39,8 @@ msgid ""
 "and now it's on Android, enhancing your possibilities to work on mobile and "
 "for collaboration."
 msgstr ""
-"Το Collabora Office είναι ένα πρόγραμμα επεξεργασίας κειμένου, υπολογιστικών "
-"φύλλων και παρουσιάσεων που βασίζεται στο LibreOffice, την πιο δημοφιλή "
+"Το Vulcan Office είναι ένα πρόγραμμα επεξεργασίας κειμένου, υπολογιστικών "
+"φύλλων και παρουσιάσεων που βασίζεται στο Vulcan Office, την πιο δημοφιλή "
 "σουίτα γραφείου ανοιχτού κώδικα στον κόσμο - και τώρα είναι στο Android, "
 "ενισχύοντας τις δυνατότητές σας να εργάζεστε στο κινητό και για συνεργασία."
 
@@ -101,10 +101,10 @@ msgid ""
 "Windows, Mac, and Linux. This, combined with a new front-end based on "
 "Collabora Online, reads and saves documents similarly to LibreOffice desktop."
 msgstr ""
-"Το Collabora Office για Android χρησιμοποιεί την ίδια μηχανή με το "
-"LibreOffice για Windows, Mac και Linux. Αυτό, σε συνδυασμό με ένα νέο front-"
-"end που βασίζεται στο Collabora Online, διαβάζει και αποθηκεύει έγγραφα "
-"παρόμοια με το LibreOffice desktop."
+"Το Vulcan Office για Android χρησιμοποιεί την ίδια μηχανή με το "
+"Vulcan Office για Windows, Mac και Linux. Αυτό, σε συνδυασμό με ένα νέο front-"
+"end που βασίζεται στο Vulcan Office, διαβάζει και αποθηκεύει έγγραφα "
+"παρόμοια με το Vulcan Office desktop."
 
 #. Long description
 #: descriptions/google-play.html%2Bhtml.body.p:48-1
@@ -114,7 +114,7 @@ msgid ""
 "developing Android support since 2012, with the help of Google Summer of "
 "Code students Andrzej Hunt, Iain Billet and Kaishu Sahu."
 msgstr ""
-"Οι μηχανικοί της Collabora Tor Lillqvist, Tomaž Vajngerl, Michael Meeks, "
+"Οι μηχανικοί της Vulcan Office Tor Lillqvist, Tomaž Vajngerl, Michael Meeks, "
 "Miklos Vajna, Jan Holešovský, Mert Tümer, Rashesh Padia και Skyler Grey "
 "αναπτύσσουν την υποστήριξη του Android από το 2012, με τη βοήθεια των "
 "φοιτητών του Google Summer of Code Andrzej Hunt, Iain Billet και Kaishu Sahu."

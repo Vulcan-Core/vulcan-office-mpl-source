@@ -5163,7 +5163,7 @@ msgid ""
 "Unlinking citations will prevent Collabora Online from updating citations "
 "and bibliography in this document."
 msgstr ""
-"Cuirfidh luanna neamhnasctha cosc ar Collabora Online luanna agus "
+"Cuirfidh luanna neamhnasctha cosc ar Vulcan Office luanna agus "
 "leabharliosta a nuashonrú sa doiciméad seo."
 
 #: src/control/HRuler.ts:321
@@ -6753,7 +6753,7 @@ msgstr "Nuashonraigh Sleamhnáin"
 #: src/map/handler/Map.VersionBar.js:50
 msgid "Your Collabora Online server needs updating. Version {0} is available."
 msgstr ""
-"Ní mór do fhreastalaí Collabora Ar Líne a nuashonrú. Tá leagan {0} ar fáil."
+"Ní mór do fhreastalaí Vulcan Office Ar Líne a nuashonrú. Tá leagan {0} ar fáil."
 
 #: src/map/handler/Map.WOPI.js:194
 msgid "Creating new file from template..."
@@ -7038,7 +7038,7 @@ msgstr "Smaoineamh Buí"
 
 #: welcome/welcome.html%2Bhtml.head.title:9-3
 msgid "Collabora Online Welcome"
-msgstr "Fáilte ar Líne Collabora"
+msgstr "Fáilte ar Líne Vulcan Office"
 
 #: welcome/welcome.html%2Bhtml.body.div.div.div.div.h1:26-7
 msgid "Explore The New {coolversion}"
@@ -7047,7 +7047,7 @@ msgstr "Déan iniúchadh ar an {coolversion} Nua"
 #: welcome/welcome.html%2Bhtml.body.div.div.div.div.h2:27-7
 #: welcome/welcome.html%2Bhtml.body.div.div.div.div.h2:38-7
 msgid "Collabora Online Development Edition"
-msgstr "Eagrán Forbartha Ar Líne Collabora"
+msgstr "Eagrán Forbartha Ar Líne Vulcan Office"
 
 #: welcome/welcome.html%2Bhtml.body.div.div.div.div.p:28-7
 msgid ""
@@ -7076,7 +7076,7 @@ msgid ""
 msgstr ""
 "Seiceáil na <a target=\"_blank\" rel=\"noopener\" href=\"https://www."
 "collaboraonline.com/code-26-04-release-notes/\">nótaí scaoilte</a> agus "
-"faigh amach faoi: An Fhorbairt Ar Líne is déanaí ó Collabora Eagrán, dírithe "
+"faigh amach faoi: An Fhorbairt Ar Líne is déanaí ó Vulcan Office Eagrán, dírithe "
 "ar úsáideoirí baile agus foirne beaga."
 
 #: welcome/welcome.html%2Bhtml.body.div.div.div.div.h1:48-7

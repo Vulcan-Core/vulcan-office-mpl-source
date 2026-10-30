@@ -23,11 +23,17 @@
 #include <token.hxx>
 #include <tokenarray.hxx>
 #include <patattr.hxx>
+#include <scitems.hxx>
 
+#include <editeng/brushitem.hxx>
+#include <editeng/colritem.hxx>
+#include <svtools/colorcfg.hxx>
 #include <svtools/sfxecode.hxx>
 #include <svl/intitem.hxx>
 #include <sfx2/docfile.hxx>
+#include <comphelper/scopeguard.hxx>
 #include <comphelper/sequence.hxx>
+#include <vcl/settings.hxx>
 
 using namespace ::com::sun::star;
 
@@ -1122,6 +1128,51 @@ CPPUNIT_TEST_FIXTURE(ScExportTest6, testPivotTablesWriteRowColumnItems)
         </i>
      */
     assertXPath(pTable, "/x:pivotTableDefinition/x:colItems/x:i[3]", "r", u"2");
+}
+
+CPPUNIT_TEST_FIXTURE(ScExportTest6, testXlsxFontColorsInDarkMode)
+{
+    // with the engine in dark mode, the
+    // xlsx export wrote the light variant of every font colour on an unfilled or
+    // dark-filled cell into xl/styles.xml (black became white, navy C2D2FF, 404040
+    // FCFCFC, white on navy BCBCBC), so the saved file was blank or faint in Excel
+    // and print while the dark editor looked normal. The flip is for the screen
+    // only: the export must write the colours the author set.
+    const AppearanceMode eOldMode = MiscSettings::GetAppColorMode();
+    comphelper::ScopeGuard aRestoreMode([eOldMode] { MiscSettings::SetAppColorMode(eOldMode); });
+    MiscSettings::SetAppColorMode(AppearanceMode::DARK);
+    CPPUNIT_ASSERT(svtools::ColorConfig::IsDarkMode());
+
+    createScDoc();
+    ScDocument* pDoc = getScDoc();
+    CPPUNIT_ASSERT(pDoc);
+
+    const Color aNavy(0x1F3864);
+    const Color aDarkGrey(0x404040);
+    auto setCell = [pDoc](SCCOL nCol, SCROW nRow, const OUString& rText, const Color& rFont,
+                          const Color* pFill) {
+        pDoc->SetString(ScAddress(nCol, nRow, 0), rText);
+        ScPatternAttr aPattern(pDoc->getCellAttributeHelper());
+        aPattern.GetItemSetWritable().Put(SvxColorItem(rFont, ATTR_FONT_COLOR));
+        if (pFill)
+            aPattern.GetItemSetWritable().Put(SvxBrushItem(*pFill, ATTR_BACKGROUND));
+        pDoc->ApplyPattern(nCol, nRow, 0, aPattern);
+    };
+    setCell(0, 0, u"Title"_ustr, aNavy, nullptr);
+    setCell(0, 1, u"Body"_ustr, COL_BLACK, nullptr);
+    setCell(0, 2, u"Note"_ustr, aDarkGrey, nullptr);
+    setCell(1, 0, u"Header"_ustr, COL_WHITE, &aNavy);
+
+    saveAndReload(TestFilter::XLSX);
+    pDoc = getScDoc();
+    auto fontColor = [pDoc](SCCOL nCol, SCROW nRow) {
+        return pDoc->GetPattern(nCol, nRow, 0)->GetItem(ATTR_FONT_COLOR).GetValue();
+    };
+    // Without the fix: C2D2FF, FFFFFF, FCFCFC and BCBCBC.
+    CPPUNIT_ASSERT_EQUAL(aNavy, fontColor(0, 0));
+    CPPUNIT_ASSERT_EQUAL(COL_BLACK, fontColor(0, 1));
+    CPPUNIT_ASSERT_EQUAL(aDarkGrey, fontColor(0, 2));
+    CPPUNIT_ASSERT_EQUAL(COL_WHITE, fontColor(1, 0));
 }
 
 CPPUNIT_PLUGIN_IMPLEMENT();

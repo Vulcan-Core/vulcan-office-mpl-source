@@ -224,6 +224,23 @@ static void lcl_UnlockSoftFixed( const SwWrtShell &rSh )
     }
 }
 
+/// VULCAN: Backspace or Delete on a wholly selected table removes the table, as Cut
+/// already does for the same selection (SwTransferable::DeleteSelection). DelLeft and DelRight
+/// only emptied its cells (SwEditShell::DeleteSel), so an agent-built callout box, a one-cell
+/// shaded table, stayed on the page as an empty box. Word removes the table on Backspace and
+/// clears it on Delete; we remove it on both (the designer's call, 2026-10-14). A read-only selection
+/// takes the usual path and its message. Returns true when it deleted the table; the table
+/// shell, if that is the caller, may then already be destroyed (see FN_TABLE_DELETE_TABLE).
+static bool lcl_DeleteWhollySelectedTable(SwWrtShell& rSh)
+{
+    if (!rSh.HasWholeTabSelection() || rSh.HasReadonlySel())
+        return false;
+    rSh.StartUndo(SwUndoId::START);
+    rSh.DeleteTable();
+    rSh.EndUndo(SwUndoId::END);
+    return true;
+}
+
 void SwBaseShell::ExecDelete(SfxRequest &rReq)
 {
     SwWrtShell &rSh = GetShell();
@@ -231,6 +248,10 @@ void SwBaseShell::ExecDelete(SfxRequest &rReq)
     switch(rReq.GetSlot())
     {
         case SID_DELETE:
+            // VULCAN: the code after the switch uses only rSh, rTmpEditWin and rReq,
+            // so it is safe after the table (and this table shell) is gone.
+            if (lcl_DeleteWhollySelectedTable(rSh))
+                break;
             if (rSh.GetViewOptions()->IsShowOutlineContentVisibilityButton())
             {
                 // Disallow if the cursor is at the end of a paragraph and the document model
@@ -256,6 +277,9 @@ void SwBaseShell::ExecDelete(SfxRequest &rReq)
             break;
 
         case FN_BACKSPACE:
+            // VULCAN: as for SID_DELETE above.
+            if (lcl_DeleteWhollySelectedTable(rSh))
+                break;
             if (rSh.GetViewOptions()->IsShowOutlineContentVisibilityButton())
             {
                 // Disallow if the cursor is at the start of a paragraph and the document model
@@ -630,6 +654,11 @@ void SwBaseShell::StateClpbrd(SfxItemSet &rSet)
 
 // Perform undo
 
+bool SwBaseShell::IsConditionalFastCall(const SfxRequest& rReq)
+{
+    return IsKitPerViewUndoRedo(rReq) || SfxShell::IsConditionalFastCall(rReq);
+}
+
 void SwBaseShell::ExecUndo(SfxRequest &rReq)
 {
     MakeAllOutlineContentTemporarilyVisible a(GetShell().GetDoc(), true);
@@ -661,32 +690,48 @@ void SwBaseShell::ExecUndo(SfxRequest &rReq)
         rUndoRedo.DoRepair(bWasRepair);
     });
 
+    // Vulcan fork: per-view undo when several views co-edit. This view's Undo takes back
+    // this view's own most recent change, out of order when that is provably safe
+    // (sw::UndoManager::LookupViewUndo); otherwise it does nothing and answers why, as a
+    // JSON string (SfxViewUndoLookupToJson). It never answers the numeric SID_REPAIRPACKAGE
+    // value that made the browser show the stock "Conflict Undo/Redo with multiple users"
+    // dialog. Repair mode (the document repair dialog) keeps the upstream behaviour.
+    const bool bPerViewUndo = comphelper::COKit::isActive() && !bRepair;
+
     switch( nId )
     {
         case SID_UNDO:
+            if (bPerViewUndo)
+            {
+                sw::UndoManager& rManager = rWrtShell.GetDoc()->GetUndoManager();
+                // "Undo N" (nCnt > 1) is only ever an in-order undo of this view's own
+                // topmost actions, and never reaches another view's (ForCount).
+                const SfxViewUndoLookup aLookup
+                    = rManager.LookupViewUndo(&rWrtShell.GetView()).ForCount(nCnt);
+                if (!aLookup.CanDo())
+                {
+                    if (aLookup.eStatus != SfxViewUndoLookup::Status::Empty)
+                        rReq.SetReturnValue(SfxStringItem(nId, SfxViewUndoLookupToJson(aLookup, /*bRedo=*/false)));
+                    break;
+                }
+
+                for (SwViewShell& rShell : rWrtShell.GetRingContainer())
+                    rShell.LockPaint(LockPaintReason::Undo);
+
+                // Execute the undo with an offset when this view's action is not the top one:
+                // the actions above it belong to other views and are independent of it.
+                rWrtShell.Do(SwWrtShell::UNDO, nCnt, static_cast<sal_uInt16>(aLookup.nOffset));
+
+                for (SwViewShell& rShell : rWrtShell.GetRingContainer())
+                    rShell.UnlockPaint();
+                break;
+            }
             if (rUndoRedo.GetLastUndoInfo(nullptr, &nUndoId, &rWrtShell.GetView()))
             {
                 for (SwViewShell& rShell : rWrtShell.GetRingContainer())
                     rShell.LockPaint(LockPaintReason::Undo);
 
-                sal_uInt16 nUndoOffset = 0;
-                if (comphelper::COKit::isActive() && !bRepair && nCnt == 1)
-                {
-                    sw::UndoManager& rManager = rWrtShell.GetDoc()->GetUndoManager();
-                    const SfxUndoAction* pAction = rManager.GetUndoAction();
-                    SwView& rView = rWrtShell.GetView();
-                    ViewShellId nViewShellId = rView.GetViewShellId();
-                    sal_uInt16 nOffset = 0;
-                    if (pAction->GetViewShellId() != nViewShellId
-                        && rManager.IsViewUndoActionIndependent(&rView, nOffset))
-                    {
-                        // Execute the undo with an offset: don't undo the top action, but an
-                        // earlier one, since it's independent and that belongs to our view.
-                        nUndoOffset += nOffset;
-                    }
-                }
-
-                rWrtShell.Do(SwWrtShell::UNDO, nCnt, nUndoOffset);
+                rWrtShell.Do(SwWrtShell::UNDO, nCnt, 0);
 
                 for (SwViewShell& rShell : rWrtShell.GetRingContainer())
                     rShell.UnlockPaint();
@@ -694,6 +739,18 @@ void SwBaseShell::ExecUndo(SfxRequest &rReq)
             break;
 
         case SID_REDO:
+            if (bPerViewUndo)
+            {
+                sw::UndoManager& rManager = rWrtShell.GetDoc()->GetUndoManager();
+                const SfxViewUndoLookup aLookup
+                    = rManager.LookupViewRedo(&rWrtShell.GetView()).ForCount(nCnt);
+                if (!aLookup.CanDo())
+                {
+                    if (aLookup.eStatus != SfxViewUndoLookup::Status::Empty)
+                        rReq.SetReturnValue(SfxStringItem(nId, SfxViewUndoLookupToJson(aLookup, /*bRedo=*/true)));
+                    break;
+                }
+            }
             if (rUndoRedo.GetFirstRedoInfo(nullptr, &nUndoId, &rWrtShell.GetView()))
             {
                 for (SwViewShell& rShell : rWrtShell.GetRingContainer())
@@ -709,11 +766,6 @@ void SwBaseShell::ExecUndo(SfxRequest &rReq)
             break;
         default:
             OSL_FAIL("wrong Dispatcher");
-    }
-
-    if (nUndoId == SwUndoId::CONFLICT)
-    {
-        rReq.SetReturnValue( SfxUInt32Item(nId, static_cast<sal_uInt32>(SID_REPAIRPACKAGE)) );
     }
 
     rViewFrame.GetBindings().InvalidateAll(false);
@@ -733,14 +785,13 @@ void SwBaseShell::StateUndo(SfxItemSet &rSet)
         {
             case SID_UNDO:
             {
+                // Vulcan fork: enabled exactly when THIS view has a change of its own it can
+                // take back now (GetLastUndoInfo consults sw::UndoManager::LookupViewUndo);
+                // otherwise disabled. Never the SID_REPAIRPACKAGE "conflict" state.
                 if (rSh.GetLastUndoInfo(nullptr, &nUndoId, &rSh.GetView()))
                 {
                     rSet.Put( SfxStringItem(nWhich,
                         rSh.GetDoString(SwWrtShell::UNDO)));
-                }
-                else if (nUndoId == SwUndoId::CONFLICT)
-                {
-                    rSet.Put( SfxUInt32Item(nWhich, static_cast<sal_uInt32>(SID_REPAIRPACKAGE)) );
                 }
                 else
                     rSet.DisableItem(nWhich);
@@ -753,10 +804,6 @@ void SwBaseShell::StateUndo(SfxItemSet &rSet)
                 {
                     rSet.Put(SfxStringItem(nWhich,
                         rSh.GetDoString(SwWrtShell::REDO)));
-                }
-                else if (nUndoId == SwUndoId::CONFLICT)
-                {
-                     rSet.Put( SfxInt32Item(nWhich, static_cast<sal_uInt32>(SID_REPAIRPACKAGE)) );
                 }
                 else
                     rSet.DisableItem(nWhich);

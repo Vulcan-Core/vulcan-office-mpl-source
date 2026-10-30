@@ -13,10 +13,12 @@ namespace cool {
 	/// A single uniform alpha applied to the wrapped subtree.
 	///
 	/// transparence is a value between 0 and 1, where 0 means fully
-	/// opaque and 1 means fully transparent.
+	/// opaque and 1 means fully transparent. range is [minX, minY, maxX,
+	/// maxY] of the children, left out when they paint nothing.
 	export interface UnifiedTransparencePrimitive extends Primitive {
 		type: typeof UnifiedTransparencePrimitive.type;
 		transparence?: number;
+		range?: number[];
 	}
 
 	export namespace UnifiedTransparencePrimitive {

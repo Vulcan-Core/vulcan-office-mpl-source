@@ -160,6 +160,43 @@ CPPUNIT_TEST_FIXTURE(FontEmbeddingTest, testTdf167214)
     verify();
 }
 
+CPPUNIT_TEST_FIXTURE(FontEmbeddingTest, testBareTrueTypeWithoutFlagPPTX)
+{
+    // The deck stores its font part as a bare TrueType font (no EOT wrapper) and has no
+    // embedTrueTypeFonts, as decks that scripts build often do. Its font is installed
+    // nowhere, and its slide's text is set in it.
+    createSdImpressDoc("EmbeddedFontsBareTTF.pptx");
+
+    // Without the fix in place, the entry was skipped for the missing flag, so embedding stayed off
+    uno::Reference<lang::XMultiServiceFactory> xFactory(mxComponent, uno::UNO_QUERY_THROW);
+    uno::Reference<beans::XPropertySet> xProps(
+        xFactory->createInstance(u"com.sun.star.document.Settings"_ustr), uno::UNO_QUERY_THROW);
+    CPPUNIT_ASSERT_EQUAL(true, xProps->getPropertyValue(u"EmbedFonts"_ustr).get<bool>());
+    CPPUNIT_ASSERT_EQUAL(true, xProps->getPropertyValue(u"EmbedOnlyUsedFonts"_ustr).get<bool>());
+
+// FIXME: as in testRoundtripEmbeddedFontsPPTX, the loaded face is not found in macOS or optimized builds
+#if !defined(NDEBUG) && !defined(MACOSX)
+    // Without the fix in place, the bare font failed the EOT decode and was never loaded
+    {
+        OUString aUrl = EmbeddedFontsManager::fontFileUrl(
+            u"Vulcan Smoke Bare", FAMILY_DONTKNOW, ITALIC_NONE, WEIGHT_NORMAL, PITCH_DONTKNOW,
+            EmbeddedFontsManager::FontRights::ViewingAllowed);
+        CPPUNIT_ASSERT(!aUrl.isEmpty());
+    }
+#endif
+
+    save(TestFilter::PPTX);
+
+    xmlDocUniquePtr pXmlDoc = parseExport(u"ppt/presentation.xml"_ustr);
+    assertXPath(pXmlDoc, xPath_Presentation, "embedTrueTypeFonts", u"1");
+    assertXPath(pXmlDoc, xPath_EmbeddedFont + "[@typeface='Vulcan Smoke Bare']");
+#if !defined(NDEBUG) && !defined(MACOSX)
+    // The face is written back, so the next reader draws it too
+    assertXPath(pXmlDoc, "/p:presentation/p:embeddedFontLst/p:embeddedFont[p:font/"
+                         "@typeface='Vulcan Smoke Bare']/p:regular");
+#endif
+}
+
 CPPUNIT_PLUGIN_IMPLEMENT();
 
 /* vim:set shiftwidth=4 softtabstop=4 expandtab: */

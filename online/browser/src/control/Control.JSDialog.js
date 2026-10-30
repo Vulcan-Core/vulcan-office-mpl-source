@@ -30,6 +30,16 @@ window.L.Control.JSDialog = window.L.Control.extend({
 		this.map.on('closealldialogs', this.onCloseAll, this);
 		this.map.on('closeAutoFilterDialog', this.closePopupsOnTabChange, this);
 		window.L.DomEvent.on(window.document, 'keyup', this.onKeyUp, this);
+		window.L.DomEvent.on(window, 'resize', this.onResize, this);
+		// Vulcan Office: the host's bar, the home indicator and the keyboard
+		// reach this frame as custom properties written on <html>, with no
+		// event (_vulcanBottomInset). Observing that write re-places an open
+		// snackbar, as SlideShowPresenter._syncSafeAreaRail does.
+		if (window.MutationObserver) {
+			this._vulcanInsetObserver = new window.MutationObserver(this.onResize.bind(this));
+			this._vulcanInsetObserver.observe(document.documentElement,
+				{ attributes: true, attributeFilter: ['style'] });
+		}
 
 	},
 
@@ -41,7 +51,23 @@ window.L.Control.JSDialog = window.L.Control.extend({
 		this.map.off('closealldialogs', this.onCloseAll, this);
 		this.map.off('closeAutoFilterDialog', this.closePopupsOnTabChange, this);
 		window.L.DomEvent.off(window.document, 'keyup', this.onKeyUp, this);
+		window.L.DomEvent.off(window, 'resize', this.onResize, this);
+		if (this._vulcanInsetObserver) {
+			this._vulcanInsetObserver.disconnect();
+			this._vulcanInsetObserver = null;
+		}
 
+	},
+
+	// Vulcan Office: setPosition places a snackbar once, from the frame's size
+	// when it opens. "Reconnecting..." stays up for a whole outage, and a phone
+	// rotated in it left the card below the frame, which clips it, or mostly
+	// off its right edge. The host's bar opening or closing, or the keyboard,
+	// moved nothing either (onAdd's observer).
+	onResize: function() {
+		var snackbar = this.dialogs['snackbar'];
+		if (snackbar && snackbar.updatePos)
+			snackbar.updatePos();
 	},
 
 	hasDialogOpened: function() {
@@ -74,6 +100,8 @@ window.L.Control.JSDialog = window.L.Control.extend({
 	clearDialog: function(id) {
 		const dialogInfo = this.dialogs[id];
 		const builder = dialogInfo.builder;
+		// Vulcan Office: closed, though its entry stays until the task below.
+		dialogInfo.cleared = true;
 
 		app.layoutingService.appendLayoutingTask(() => {
 			window.L.DomUtil.remove(dialogInfo.container);
@@ -88,6 +116,13 @@ window.L.Control.JSDialog = window.L.Control.extend({
 	},
 
 	close: function(id, sendCloseEvent, focusHandled) {
+		// Vulcan Office: a snackbar already closed, its entry waiting for
+		// clearDialog's task, is not closed again. An error dialog's closeAll
+		// right after "Reconnecting..." was taken down without moving focus
+		// closed it again, moving focus into the frame (the host's caret), and
+		// that second clear deleted the next snackbar's entry.
+		if (this.dialogs[id] && this.dialogs[id].isSnackbar && this.dialogs[id].cleared)
+			return false;
 		if (id !== undefined && this.dialogs[id]) {
 			const dialog = this.dialogs[id];
 			if (!sendCloseEvent && dialog.overlay && !dialog.isSubmenu) {
@@ -101,13 +136,14 @@ window.L.Control.JSDialog = window.L.Control.extend({
 			if (dialog.isPopup)
 				this.closePopover(id, sendCloseEvent, focusHandled);
 			else
-				this.closeDialog(id, sendCloseEvent);
+				this.closeDialog(id, sendCloseEvent, focusHandled);
 			return true;
 		}
 		return false;
 	},
 
-	closeAll: function(leaveSnackbar, leaveAlert) {
+	// Vulcan Office: focusHandled leaves focus where it is (see close).
+	closeAll: function(leaveSnackbar, leaveAlert, focusHandled) {
 		var alertId = JSDialog.generateModalId('cool_alert');
 		var dialogs = Object.keys(this.dialogs);
 		for (var i = 0; i < dialogs.length; i++) {
@@ -116,7 +152,7 @@ window.L.Control.JSDialog = window.L.Control.extend({
 			if (leaveAlert && dialogs[i] === alertId)
 				continue;
 
-			this.close(dialogs[i], app.idleHandler._active);
+			this.close(dialogs[i], app.idleHandler._active, focusHandled);
 		}
 	},
 
@@ -130,13 +166,16 @@ window.L.Control.JSDialog = window.L.Control.extend({
 		}
 	},
 
-	closeDialog: function(id, sendCloseEvent) {
+	closeDialog: function(id, sendCloseEvent, focusHandled) {
 		if (id === undefined || !this.dialogs[id]) {
 			app.console.warn('missing dialog data');
 			return;
 		}
 
-		this.focusToLastElement(id);
+		// Vulcan Office: as closePopover, a caller that handles focus itself
+		// (a server-ordered closeAll, Socket._onCloseMsg) leaves it alone.
+		if (!focusHandled)
+			this.focusToLastElement(id);
 
 		var builder = this.clearDialog(id);
 
@@ -176,6 +215,13 @@ window.L.Control.JSDialog = window.L.Control.extend({
 		var builder = this.dialogs[id].builder;
 
 		if (sendCloseEvent) {
+			// Vulcan Office: the handlers below close it again (a modal's
+			// UIManager.closeModal), with no word of focus. A close that leaves
+			// focus where it is (focusHandled) leaves it there through that one
+			// too: a reconnect's closeAll while the person typed in the host page
+			// gave focus to the document there (Socket._onStatusMsg).
+			if (focusHandled)
+				this.dialogs[id].closeLeavesFocus = true;
 			// first try to close the dropdown if exists
 			if (clickToCloseElement && typeof clickToCloseElement.closeDropdown === 'function')
 				clickToCloseElement.closeDropdown();
@@ -303,7 +349,9 @@ window.L.Control.JSDialog = window.L.Control.extend({
 
 			let timeoutId = null;
 			const finallyClose = () => {
-				instance.that.close(instance.id, false);
+				// Vulcan Office: a dialog that opened leaving focus where it was
+				// (focusHandled: the busy popup) closes the same way.
+				instance.that.close(instance.id, false, dialogInfo.focusHandled);
 				app.timerRegistry.clearTimeout(timeoutId);
 			};
 
@@ -576,6 +624,13 @@ window.L.Control.JSDialog = window.L.Control.extend({
 	},
 
 	setupInitialFocus: function(instance) {
+		// Vulcan Office: the sender leaves focus where it is. A bar shown again
+		// after "Reconnecting..." gave way (SnackbarController.showSticky) took
+		// focus on its button when it first showed. Taking it again at the
+		// reconnect moved the host's caret (R7), and the member's next
+		// Enter or Space pressed that button.
+		if (instance.focusHandled)
+			return;
 		// Restore focus preserved across a full-dialog rebuild before falling back to default.
 		if (instance.preservedFocusId) {
 			const restored = instance.container.querySelector('[id=\'' + instance.preservedFocusId + '\']');
@@ -646,6 +701,25 @@ window.L.Control.JSDialog = window.L.Control.extend({
 		return null; // Return null if tabcontrol is not found
 	},
 
+	// Vulcan Office: how much of the bottom of this frame something covers, in
+	// CSS px, on the contract every fork bottom bar follows (vulcan-theme.css
+	// 13i.1, #spreadsheet-toolbar): the keyboard's share, plus the host's bottom
+	// bar (the AI assist bar) or the home indicator, whichever is taller. The
+	// host lays both bar and keyboard over the frame, which never shrinks for
+	// them (Capacitor resize 'none'), so a snackbar placed from innerHeight
+	// alone sat under them. Map.WOPI.js (Vulcan_HostSafeArea) and js/global.js
+	// write these inline on <html>. They are unset on desktop and on an older
+	// host, so the snackbar stays where it was there.
+	_vulcanBottomInset: function() {
+		var root = document.documentElement.style;
+		var px = function(name) {
+			var value = parseFloat(root.getPropertyValue(name));
+			return value > 0 ? value : 0;
+		};
+		return px('--vulcan-keyboard-inset')
+			+ Math.max(px('--vulcan-host-rail'), px('--vulcan-safe-bottom'));
+	},
+
 	/// if you use updatePos - instance param is bound automatically
 	setPosition: function(instance, updatedPos) {
 		var calculated = false;
@@ -654,7 +728,7 @@ window.L.Control.JSDialog = window.L.Control.extend({
 		if (instance.isSnackbar) {
 			calculated = true;
 			instance.posx = window.innerWidth/2 - instance.form.offsetWidth/2;
-			instance.posy = window.innerHeight - instance.form.offsetHeight - 40;
+			instance.posy = window.innerHeight - this._vulcanBottomInset() - instance.form.offsetHeight - 40;
 		} else if (instance.nonModal || instance.popupParent) {
 			// in case of toolbox we want to create popup positioned by toolitem not toolbox
 			if (updatedPos) {
@@ -735,8 +809,32 @@ window.L.Control.JSDialog = window.L.Control.extend({
 
 				if (instance.content.clientHeight > window.innerHeight)
 					instance.container.style.maxHeight = (window.innerHeight - instance.posy - 20) + 'px';
-				else if (instance.posy + instance.content.clientHeight > window.innerHeight)
-					instance.posy -= instance.posy + instance.content.clientHeight + 10 - window.innerHeight;
+				else if (instance.posy + instance.content.clientHeight > window.innerHeight) {
+					// FLIP ABOVE THE ANCHOR, do not nudge up into it. Exactly the
+					// reasoning the submenu branch above states for the horizontal
+					// axis -- "nudging lands the submenu on top of the parent" --
+					// which the vertical axis never got.
+					//
+					// WHAT IT COST. A dropdown opens at posy = parent.bottom, so
+					// for any BOTTOM-DOCKED trigger the overflow is guaranteed and
+					// the nudge is guaranteed to walk the list back over the button
+					// that opened it. Measured on the phone sheet strip: trigger
+					// (14,594,46,46), list nudged to (14,564,57.8,92) -- the
+					// trigger's centre INSIDE the list, `elementFromPoint` there
+					// returning a list row. So the universal "tap it again to
+					// dismiss" gesture selected a different sheet: selectedPart
+					// 0 -> 1, tab strip flipped, no undo affordance. A dismissal
+					// that silently mutates the document.
+					//
+					// The flip is only taken when it FITS -- above the anchor and
+					// on screen. Otherwise the old nudge stands, because a list
+					// half off the top edge is worse than one over its trigger,
+					// and this path also serves triggers that are not docked.
+					var flipped = parent.getBoundingClientRect().top
+						- instance.content.clientHeight;
+					instance.posy = flipped >= 0 ? flipped
+						: instance.posy - (instance.posy + instance.content.clientHeight + 10 - window.innerHeight);
+				}
 			}
 			else {
 				var height = instance.form.getBoundingClientRect().height;
@@ -1048,6 +1146,13 @@ window.L.Control.JSDialog = window.L.Control.extend({
 		instance.startY = e.data.posy;
 		instance.updatePos = null;
 		instance.canHaveFocus = !instance.isSnackbar && instance.id !== 'busypopup' && !instance.isAutoCompletePopup;
+		// Vulcan Office: the busy popup ("Save document" while a save runs past
+		// 700 ms) neither takes focus nor gives it back. setupInitialFocus
+		// focused its spinner and the fadeout focused the document, so a message
+		// typed in the host's composer went on into the active cell and was saved
+		// there, and keys typed in a cell went to the spinner.
+		if (instance.id === 'busypopup')
+			instance.focusHandled = true;
 		instance.isDocumentAreaPopup = instance.popupParent === '_POPOVER_' && instance.posx !== undefined && instance.posy !== undefined;
 		instance.isPopup = instance.isModalPopUp || instance.isDocumentAreaPopup || instance.isSnackbar;
 		instance.isAutoPopup = instance.isDocumentAreaPopup && this.map._docLayer.isCalc();
@@ -1077,16 +1182,32 @@ window.L.Control.JSDialog = window.L.Control.extend({
 			app.console.debug('JSDialog: close "' + (instance ? instance.id : '-') + '"');
 			const dialogs = Object.keys(this.dialogs);
 			const hadOpenedDialog = dialogs.length > 0;
+			// Vulcan Office: or the close closePopover asked for leaves it (see there).
+			const focusHandled = instance.focusHandled
+				|| !!(this.dialogs[instance.id] && this.dialogs[instance.id].closeLeavesFocus);
 
-			const didClose = this.close(instance.id, false, instance.focusHandled);
+			const didClose = this.close(instance.id, false, focusHandled);
 
-			if (didClose && !instance.focusHandled) {
+			// Telemetry: duration for real dialogs (no-op for popups that were
+			// never recorded as open — snackbars, dropdowns, busypopup).
+			if (didClose && app.telemetry)
+				app.telemetry.noteDialogClose(instance.id);
+
+			if (didClose && !focusHandled) {
 				// Manage focus
 				this.focusAfterClose(hadOpenedDialog, dialogs);
 			}
 		}
 		else {
 			app.console.debug('JSDialog: full dialog "' + (instance ? instance.id : '-') + '"');
+
+			// Telemetry: dialog usage — id + kind only; transient popups
+			// (snackbars, dropdowns, autocomplete/autofill, busypopup) and
+			// repeated full updates of an open dialog are excluded.
+			if (app.telemetry && !instance.isSnackbar && !instance.isDropdown
+				&& !instance.isAutoCompletePopup && !instance.isAutoFillPreviewTooltip
+				&& instance.id !== 'busypopup')
+				app.telemetry.noteDialogOpen(instance.id, e.data.type || 'dialog');
 
 			// There is no action, so we create a new dialogue.
 			if (instance.isModalPopUp || instance.isDocumentAreaPopup)
@@ -1373,7 +1494,12 @@ window.L.Control.JSDialog = window.L.Control.extend({
 		if (dialogs.length) {
 			var lastKey = dialogs[dialogs.length - 1];
 			var dialogInfo = this.dialogs[lastKey];
-			if (dialogInfo.isPopup) {
+			// Vulcan Office: a snackbar sits at the bottom of the frame, not
+			// on the document, so a zoom moves nothing it points at. Closing
+			// it here focused the frame (its close, then map.focus() below),
+			// taking the host's caret, and took a sticky "Reconnecting..."
+			// down for the rest of its wait.
+			if (dialogInfo.isPopup && !dialogInfo.isSnackbar) {
 				// online-only must remove the DOM here
 				// instead of waiting for a server round-trip that never comes
 				// TODO: use helpers here

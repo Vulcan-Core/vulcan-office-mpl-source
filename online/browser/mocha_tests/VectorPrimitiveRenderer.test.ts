@@ -85,11 +85,12 @@ describe('VectorPrimitiveRenderer', function () {
 			const fillCall = recorder.findCall('fill');
 			nodeassert.ok(fillCall, 'fill not called');
 			nodeassert.strictEqual(recorder.properties.fillStyle, primitive.color);
-			nodeassert.strictEqual(fillCall.args.length, 1);
+			nodeassert.strictEqual(fillCall.args.length, 2);
 			nodeassert.strictEqual(
 				(fillCall.args[0] as Path2DRecorder).path,
 				primitive.path,
 			);
+			nodeassert.strictEqual(fillCall.args[1], 'evenodd');
 		});
 
 		it('applies transparency to polyPolygonRGBA at fill time', function () {
@@ -485,9 +486,7 @@ describe('VectorPrimitiveRenderer', function () {
 		});
 
 		it('recolours a graphic through a CSS filter for drawMode', function () {
-			// The drawMode wire value picks a CSS filter set on the
-			// context inside the save/restore. The greys mode maps to
-			// grayscale(1).
+			// jsdom has no canvas, so this takes the CSS filter fallback.
 			const primitive = loadVectorRenderingReference('testGraphicDrawMode')
 				.primitives[0];
 			nodeassert.strictEqual(primitive.type, 'graphic');
@@ -797,10 +796,64 @@ describe('VectorPrimitiveRenderer', function () {
 			nodeassert.deepStrictEqual(recorder.properties, {});
 		});
 
+		it('paints exclusiveEditView children in the editor view only', function () {
+			// The prompt text of an empty placeholder ("Click to add
+			// Title") rides under exclusiveEditView: the editor paints
+			// it like the tile view does, previews and the slideshow
+			// (the default) leave it out.
+			const primitive: any = {
+				type: 'exclusiveEditView',
+				children: [{ type: 'backgroundcolor', color: '#ff0000' }],
+			};
+			const skipped = new CanvasRecorder();
+			const renderer = new cool.VectorPrimitiveRenderer();
+			renderer.setSlideBounds(1000, 800);
+			renderer.renderPrimitive(skipped as any, primitive);
+			nodeassert.strictEqual(skipped.calls.length, 0);
+
+			const painted = new CanvasRecorder();
+			renderer.setEditView(true);
+			renderer.renderPrimitive(painted as any, primitive);
+			nodeassert.ok(painted.calls.length > 0, 'edit view paints the children');
+			renderer.setEditView(false);
+			const again = new CanvasRecorder();
+			renderer.renderPrimitive(again as any, primitive);
+			nodeassert.strictEqual(again.calls.length, 0);
+		});
+
+		it('translates ONE objectChild member under a member override', function () {
+			// A member drag inside an entered group: the matching
+			// immediate member's subtree draws translated, its sibling
+			// in place; a nested member with the same ordinal is not the
+			// target (depth 0 only).
+			const recorder = new CanvasRecorder();
+			const renderer = new cool.VectorPrimitiveRenderer();
+			renderer.setSlideBounds(1000, 800);
+			renderer.setChildOverride({ ordNum: 1, dxTwips: 300, dyTwips: -50 });
+			const group: any = {
+				type: 'group',
+				children: [
+					{ type: 'objectChild', ordNum: 0, children: [{ type: 'backgroundcolor', color: '#00ff00' }] },
+					{ type: 'objectChild', ordNum: 1, children: [
+						{ type: 'objectChild', ordNum: 1, children: [{ type: 'backgroundcolor', color: '#0000ff' }] },
+					] },
+				],
+			};
+			renderer.renderPrimitive(recorder as any, group);
+			renderer.setChildOverride(null);
+			const translates = recorder.callsOf('translate');
+			nodeassert.strictEqual(translates.length, 1, 'exactly one member translated');
+			nodeassert.deepStrictEqual(translates[0].args, [300, -50]);
+			// The untranslated sibling painted before the translate; the
+			// nested subtree painted inside the translated one.
+			const fills = recorder.callsOf('fillRect');
+			nodeassert.strictEqual(fills.length, 2);
+			nodeassert.strictEqual(fills[0].properties.fillStyle, '#00ff00');
+			nodeassert.strictEqual(fills[1].properties.fillStyle, '#0000ff');
+		});
+
 		it('applies grayscale filter for modifiedColor gray', function () {
-			// The gray modifier maps to canvas filter "grayscale(1)".
-			// The renderer wraps the children in save/restore so the
-			// filter does not leak.
+			// jsdom has no canvas, so this takes the CSS filter fallback.
 			const primitive =
 				loadVectorRenderingReference('testModifiedColorGray').primitives[0];
 			nodeassert.strictEqual(primitive.type, 'modifiedColor');
@@ -835,10 +888,7 @@ describe('VectorPrimitiveRenderer', function () {
 		});
 
 		it('passes through modifiedColor replace without a filter', function () {
-			// The replace modifier carries a colour but the renderer
-			// has not implemented colour substitution yet. The
-			// children must still render with their original colour
-			// and no canvas filter must be set.
+			// jsdom has no canvas, so no layer takes the replace colour.
 			const primitive =
 				loadVectorRenderingReference('testModifiedColorReplace').primitives[0];
 			nodeassert.strictEqual(primitive.type, 'modifiedColor');
@@ -1174,4 +1224,242 @@ describe('VectorPrimitiveRenderer', function () {
 		nodeassert.strictEqual(recorder.countOf('stroke'), 0);
 	});
 
+});
+
+// Gates in CI (see the dxarray describe's note): no reference files needed.
+describe('Vector renderer stroke width', function () {
+	let originalPath2D: any;
+
+	before(function () {
+		originalPath2D = (globalThis as any).Path2D;
+		(globalThis as any).Path2D = Path2DRecorder;
+	});
+
+	after(function () {
+		(globalThis as any).Path2D = originalPath2D;
+	});
+
+	it('a thin stroke is at least one CSS pixel wide under the zoom scale', function () {
+		// A form's checkbox border: 6.8 twips (a third of a point). Under
+		// a 0.1333 twips-to-pixel scale that is 0.9 px and fades to
+		// grey; the floor is one CSS pixel, i.e. dpr/scale in twips
+		// (dpr is 1 here: no window).
+		const primitive: any = {
+			type: 'polygonStroke',
+			path: 'm522 2106h184v184h-184v-184z',
+			line: { color: '#000000', width: 6.8, linejoin: 'none', linecap: 'butt' },
+		};
+		const recorder: any = new CanvasRecorder(200, 150);
+		recorder.getTransform = () => ({ a: 0.1333, b: 0, c: 0, d: 0.1333, e: 0, f: 0 });
+		const renderer = new cool.VectorPrimitiveRenderer();
+		renderer.renderPrimitive(recorder, primitive);
+		const stroke = recorder.findCall('stroke');
+		nodeassert.ok(stroke, 'stroke not called');
+		nodeassert.ok(Math.abs(stroke.properties.lineWidth - 1 / 0.1333) < 1e-6, String(stroke.properties.lineWidth));
+
+		// A width already wider than a pixel is left alone.
+		const wide: any = { ...primitive, line: { ...primitive.line, width: 40 } };
+		const recorder2: any = new CanvasRecorder(200, 150);
+		recorder2.getTransform = () => ({ a: 0.1333, b: 0, c: 0, d: 0.1333, e: 0, f: 0 });
+		renderer.renderPrimitive(recorder2, wide);
+		nodeassert.strictEqual(recorder2.findCall('stroke').properties.lineWidth, 40);
+
+		// A hairline is one device pixel by definition.
+		const hair: any = { type: 'polygonHairline', path: 'm0 0h100', color: '#000000' };
+		const recorder3: any = new CanvasRecorder(200, 150);
+		recorder3.getTransform = () => ({ a: 0.5, b: 0, c: 0, d: 0.5, e: 0, f: 0 });
+		renderer.renderPrimitive(recorder3, hair);
+		nodeassert.strictEqual(recorder3.findCall('stroke').properties.lineWidth, 2);
+	});
+});
+
+// Titled apart from 'VectorPrimitiveRenderer' on purpose: that describe is
+// skip-listed in ci-mocha-skip-suites.txt for its reference-file ENOENTs, and
+// the skip entry covers every title that starts with 'VectorPrimitiveRenderer '.
+// These placement pins need no engine artifacts, so they must gate.
+describe('Vector renderer dxarray placement', function () {
+	function textPortion(dxarray: number[]): any {
+		return {
+			type: 'textSimplePortion',
+			text: 'abc',
+			matrix: [1, 0, 0, 1, 100, 200],
+			fontSize: 20,
+			familyname: 'TestFace',
+			dxarray: dxarray,
+		};
+	}
+
+	it('a letter-spaced run is placed at the server advances: the spacing is part of the step', function () {
+		// 10px glyphs spaced by 2: core's advances are 12, 24, 36. The
+		// browser measures 30 for the string; with the spacing added back
+		// the totals agree and every glyph lands on its server offset.
+		const recorder = new CanvasRecorder(400, 300);
+		const renderer = new cool.VectorPrimitiveRenderer();
+		renderer.setSlideBounds(400, 300);
+		renderer.renderPrimitive(recorder as any, { ...textPortion([12, 24, 36]), letterSpacing: 2 });
+		const fills = recorder.callsOf('fillText');
+		nodeassert.strictEqual(fills.length, 3, JSON.stringify(fills.map((c: any) => c.args)));
+		nodeassert.deepStrictEqual(
+			fills.map((c: any) => c.args),
+			[
+				['a', 100, 200],
+				['b', 112, 200],
+				['c', 124, 200],
+			],
+		);
+	});
+
+	it('a spaced run trusts the advances even when the declared spacing is in another unit', function () {
+		// Declared 5 (not the advances' unit); the steps carry 2 per glyph.
+		// The advances place the glyphs; the declared value is not added.
+		const recorder = new CanvasRecorder(400, 300);
+		const renderer = new cool.VectorPrimitiveRenderer();
+		renderer.setSlideBounds(400, 300);
+		renderer.renderPrimitive(recorder as any, { ...textPortion([12, 24, 36]), letterSpacing: 5 });
+		const fills = recorder.callsOf('fillText');
+		nodeassert.deepStrictEqual(
+			fills.map((c: any) => c.args),
+			[
+				['a', 100, 200],
+				['b', 112, 200],
+				['c', 124, 200],
+			],
+		);
+	});
+
+	it('places each character at the server advance when the font agrees', function () {
+		// CanvasRecorder measures 10px per character, so a dxarray whose
+		// total matches (30) proves the resolved font agrees with the
+		// server layout — per-character placement engages.
+		const recorder = new CanvasRecorder(400, 300);
+		const renderer = new cool.VectorPrimitiveRenderer();
+		renderer.setSlideBounds(400, 300);
+		renderer.renderPrimitive(recorder as any, textPortion([10, 20, 30]));
+
+		const fills = recorder.callsOf('fillText');
+		nodeassert.strictEqual(fills.length, 3);
+		nodeassert.deepStrictEqual(
+			fills.map((c: any) => c.args),
+			[
+				['a', 100, 200],
+				['b', 110, 200],
+				['c', 120, 200],
+			],
+		);
+	});
+
+	it('scales the resolved font\'s own spacing to the server total when glyph widths disagree', function () {
+		// Steps 16/4/10 vs the recorder's 10px glyphs: the total (30)
+		// matches exactly, but drawing 10px glyphs at those advances would
+		// fuse 'b' into 'a' — the platform-fallback failure mode for a
+		// missing deck font (deviation 6 > fontSize 20 * 0.1). Placement
+		// keeps core's extent by scaling the resolved font's own prefix
+		// widths to the server total (scale 1 here), instead of drifting
+		// off it with one natural run.
+		const recorder = new CanvasRecorder(400, 300);
+		const renderer = new cool.VectorPrimitiveRenderer();
+		renderer.setSlideBounds(400, 300);
+		renderer.renderPrimitive(recorder as any, textPortion([16, 20, 30]));
+
+		const fills = recorder.callsOf('fillText');
+		nodeassert.strictEqual(fills.length, 3);
+		nodeassert.deepStrictEqual(
+			fills.map((c: any) => c.args),
+			[
+				['a', 100, 200],
+				['b', 110, 200],
+				['c', 120, 200],
+			],
+		);
+	});
+
+	it('spreads a small total disagreement evenly across the scaled run', function () {
+		// Total 31 vs measured 30 (inside the 5% gate) with per-glyph
+		// deviation (16 vs 10 > tolerance 2): lane 2 scales the 10px
+		// prefixes by 31/30, so the run still ends at the server total.
+		const recorder = new CanvasRecorder(400, 300);
+		const renderer = new cool.VectorPrimitiveRenderer();
+		renderer.setSlideBounds(400, 300);
+		renderer.renderPrimitive(recorder as any, textPortion([16, 20, 31]));
+
+		const fills = recorder.callsOf('fillText');
+		nodeassert.strictEqual(fills.length, 3);
+		nodeassert.deepStrictEqual(
+			fills.map((c: any) => c.args),
+			[
+				['a', 100, 200],
+				['b', 100 + (31 / 30) * 10, 200],
+				['c', 100 + (31 / 30) * 20, 200],
+			],
+		);
+	});
+
+	it("carries a tracked run's character spacing into measurement and placement", function () {
+		// Core lays a letter-spaced run out with the spacing folded into
+		// every advance but the last (SvxFont::QuickGetTextSize) and
+		// exports it beside the dxarray: 10px glyphs at 4px spacing are
+		// 14/28/38. Applied to the canvas, the recorder measures 14 per
+		// character (the last one included, as a real canvas does), the
+		// placement measures like core, and the three-glyph run is a
+		// metric twin placed at the server advances — spaced. Short
+		// runs are the discriminating case: without the trailing
+		// correction this one's total is off by a tenth and falls to the
+		// unspaced single-run lane.
+		const recorder = new CanvasRecorder(400, 300);
+		const renderer = new cool.VectorPrimitiveRenderer();
+		renderer.setSlideBounds(400, 300);
+		const spaced = textPortion([14, 28, 38]);
+		spaced.letterSpacing = 4;
+		renderer.renderPrimitive(recorder as any, spaced);
+
+		nodeassert.strictEqual(recorder.properties.letterSpacing, '4px');
+		const fills = recorder.callsOf('fillText');
+		nodeassert.strictEqual(fills.length, 3);
+		nodeassert.deepStrictEqual(
+			fills.map((c: any) => c.args),
+			[
+				['a', 100, 200],
+				['b', 114, 200],
+				['c', 128, 200],
+			],
+		);
+	});
+
+	it('a run without spacing resets the canvas spacing left by the previous run', function () {
+		// The kicker on one slide must not leak its tracking into the
+		// title drawn after it: every run sets the property, 0 included.
+		const recorder = new CanvasRecorder(400, 300);
+		const renderer = new cool.VectorPrimitiveRenderer();
+		renderer.setSlideBounds(400, 300);
+		const spaced = textPortion([14, 28, 38]);
+		spaced.letterSpacing = 4;
+		renderer.renderPrimitive(recorder as any, spaced);
+		renderer.renderPrimitive(recorder as any, textPortion([10, 20, 30]));
+
+		nodeassert.strictEqual(recorder.properties.letterSpacing, '0px');
+		const fills = recorder.callsOf('fillText');
+		nodeassert.strictEqual(fills.length, 6);
+		nodeassert.deepStrictEqual(
+			fills.slice(3).map((c: any) => c.args),
+			[
+				['a', 100, 200],
+				['b', 110, 200],
+				['c', 120, 200],
+			],
+		);
+	});
+
+	it('falls back to one run when the resolved font disagrees', function () {
+		// dxarray total 150 vs measured 30: the browser substituted an
+		// unrelated font, and its glyphs at the original advances would
+		// read as gappy text. One internally consistent run instead.
+		const recorder = new CanvasRecorder(400, 300);
+		const renderer = new cool.VectorPrimitiveRenderer();
+		renderer.setSlideBounds(400, 300);
+		renderer.renderPrimitive(recorder as any, textPortion([50, 100, 150]));
+
+		const fills = recorder.callsOf('fillText');
+		nodeassert.strictEqual(fills.length, 1);
+		nodeassert.deepStrictEqual(fills[0].args, ['abc', 100, 200]);
+	});
 });

@@ -174,6 +174,7 @@ typedef std::unordered_map<OString, OUString> ActionDataMap;
 
 VCL_DLLPUBLIC void SendNavigatorForView(const sal_uInt64 nShellId);
 VCL_DLLPUBLIC void SendSidebarForView(const sal_uInt64 nShellId);
+VCL_DLLPUBLIC void SendSidebarForView(const sal_uInt64 nShellId, bool bForce);
 VCL_DLLPUBLIC void SendQuickFindForView(const sal_uInt64 nShellId);
 
 /// execute action on a widget
@@ -181,6 +182,7 @@ VCL_DLLPUBLIC bool ExecuteAction(const OUString& nWindowId, const OUString& rWid
                                  const StringMap& rData);
 /// send full update message to the client
 VCL_DLLPUBLIC void SendFullUpdate(const OUString& nWindowId, const OUString& rWidget);
+VCL_DLLPUBLIC void SendFullUpdate(const OUString& nWindowId, const OUString& rWidget, bool bForce);
 /// send full update for the dialog that contains the given widget
 VCL_DLLPUBLIC void SendFullUpdate(weld::Widget& rWidget);
 /// send action message to the client

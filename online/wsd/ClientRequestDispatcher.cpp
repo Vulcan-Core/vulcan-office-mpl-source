@@ -65,6 +65,7 @@
 #include <Poco/DOM/Element.h>
 #include <Poco/DOM/NodeList.h>
 #include <Poco/File.h>
+#include <Poco/JSON/Array.h>
 #include <Poco/MemoryStream.h>
 #include <Poco/Net/HTMLForm.h>
 #include <Poco/Net/HTTPRequest.h>
@@ -479,7 +480,9 @@ public:
 
     void testHostName(const std::string& hostToCheck)
     {
-        _allow &= HostUtil::allowedWopiHost(hostToCheck);
+        // A name reached through X-Forwarded-For belongs to a forwarded, hence
+        // never server-to-server, request: internal alias groups do not count.
+        _allow &= HostUtil::allowedWopiHost(hostToCheck, /*serverToServer=*/false);
     }
 
     // synchronous case
@@ -609,11 +612,29 @@ bool ClientRequestDispatcher::allowPostFrom(const std::string& address)
     return hosts.match(address);
 }
 
+bool ClientRequestDispatcher::isServerToServer(const std::string& peerAddress,
+                                               const Poco::Net::HTTPRequest& request)
+{
+    // Every proxy in front of coolwsd (the load balancer, the docKey router)
+    // stamps X-Forwarded-For, and its own peer address is inside net.post_allow,
+    // so the header is what tells a relayed browser request from a direct server
+    // call. Its mere presence disqualifies, whatever it lists: unlike
+    // allowConvertTo(), which accepts a chain of post_allow hops, a relayed request
+    // was made on someone else's behalf and must not inherit the relay's trust.
+    if (request.has("X-Forwarded-For"))
+        return false;
+
+    return allowPostFrom(peerAddress);
+}
+
 bool ClientRequestDispatcher::allowConvertTo(const std::string& address,
                                              const Poco::Net::HTTPRequest& request,
                                              bool capabilityQuery, const AsyncFn& asyncCb)
 {
-    const bool allow = allowPostFrom(address) || HostUtil::allowedWopiHost(request.getHost());
+    // The Host header is the caller's to choose, and this term only matters for a
+    // peer outside net.post_allow, i.e. never a server-to-server request.
+    const bool allow = allowPostFrom(address) ||
+                       HostUtil::allowedWopiHost(request.getHost(), /*serverToServer=*/false);
     if (!allow)
     {
         LOG_WRN_S("convert-to: Requesting address is denied: " << address);
@@ -688,7 +709,7 @@ namespace
 void launchAsyncCheckFileInfo(
     const std::string& id, const FileServerRequestHandler::ResourceAccessDetails& accessDetails,
     Util::UnorderedStringMap<std::shared_ptr<RequestVettingStation>>& requestVettingStations,
-    const std::size_t highWatermark)
+    const std::size_t highWatermark, const bool serverToServer)
 {
     const std::string requestKey = RequestDetails::getRequestKey(
         accessDetails.wopiSrc(), accessDetails.accessToken());
@@ -717,8 +738,11 @@ void launchAsyncCheckFileInfo(
         options.push_back("userid=" + accessDetails.userId());
 #endif
 
-    const RequestDetails fullRequestDetails =
+    RequestDetails fullRequestDetails =
         RequestDetails(accessDetails.wopiSrc(), options, /*compat=*/std::string());
+    // The ahead-of-time CheckFileInfo goes out with the trust of the request that
+    // served cool.html; the WebSocket that claims this RVS is vetted again with its own.
+    fullRequestDetails.setServerToServer(serverToServer);
 
     if (requestVettingStations.find(requestKey) != requestVettingStations.end())
     {
@@ -1175,6 +1199,10 @@ ClientRequestDispatcher::MessageResult ClientRequestDispatcher::handleMessage(Po
         RequestDetails requestDetails(request, COOLWSD::ServiceRoot);
         // LOG_TRC("Request details " << requestDetails.toString());
 
+        // Establish the caller's trust once; every WOPISrc this request names is
+        // vetted with it (RequestVettingStation, ClientSession -> DocumentBroker).
+        requestDetails.setServerToServer(isServerToServer(socket->clientAddress(), request));
+
         // Config & security ...
         if (requestDetails.isProxy())
         {
@@ -1219,7 +1247,7 @@ ClientRequestDispatcher::MessageResult ClientRequestDispatcher::handleMessage(Po
                         mapAccessDetails.at("permission"),
                         mapAccessDetails.at("configid"));
                     launchAsyncCheckFileInfo(_id, accessDetails, RequestVettingStations,
-                                             RvsHighWatermark);
+                                             RvsHighWatermark, requestDetails.isServerToServer());
                 }
             }
         }
@@ -1266,7 +1294,7 @@ ClientRequestDispatcher::MessageResult ClientRequestDispatcher::handleMessage(Po
                         "Expected identical WOPISrc in the request as in cool.html");
 
                     launchAsyncCheckFileInfo(_id, accessDetails, RequestVettingStations,
-                                             RvsHighWatermark);
+                                             RvsHighWatermark, requestDetails.isServerToServer());
                 }
             }
         }
@@ -1939,7 +1967,11 @@ bool ClientRequestDispatcher::handleWopiAccessCheckRequest(
     if (!wopiHostAllowed) {
         // port and scheme from wopi host config are currently ignored by HostUtil
         LOG_TRC("Wopi Access Check, matching allowed wopi host for host " << host);
-        wopiHostAllowed = HostUtil::allowedWopiHost(host);
+        // This endpoint probes a caller-chosen URL without authentication, so a
+        // host only an internal alias group admits is probed for a
+        // server-to-server caller alone.
+        wopiHostAllowed = HostUtil::allowedWopiHost(
+            host, isServerToServer(socket->clientAddress(), request));
     }
     if (!wopiHostAllowed)
     {
@@ -3088,6 +3120,14 @@ std::string getCapabilitiesJson(bool convertToAvailable)
 
     // Advertise wopiAccessCheck endpoint availability
     capabilities->set("hasWopiAccessCheck", true);
+
+    // Vulcan: what this build guarantees, for an operator or a later roll
+    // rule to read (nothing reads it yet). shutdown_commit_v1: a save made
+    // because the broker is going away commits every spreadsheet view's
+    // in-progress cell first (DocumentBroker::autoSaveAndStop).
+    Poco::JSON::Array::Ptr vulcanCapabilities = new Poco::JSON::Array;
+    vulcanCapabilities->add("shutdown_commit_v1");
+    capabilities->set("vulcanCapabilities", vulcanCapabilities);
 
     const std::string serverName = ConfigUtil::getString("indirection_endpoint.server_name", "");
     if (const char* podName = std::getenv("POD_NAME"))

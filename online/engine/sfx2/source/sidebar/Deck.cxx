@@ -38,10 +38,15 @@ namespace sfx2::sidebar {
 
 void Deck::KitSendSidebarFullUpdate()
 {
+    KitSendSidebarFullUpdate(false);
+}
+
+void Deck::KitSendSidebarFullUpdate(bool bForce)
+{
     if (comphelper::COKit::isActive())
     {
         sal_uInt64 nShellId = reinterpret_cast<sal_uInt64>(SfxViewShell::Current());
-        jsdialog::SendSidebarForView(nShellId);
+        jsdialog::SendSidebarForView(nShellId, bForce);
     }
 }
 

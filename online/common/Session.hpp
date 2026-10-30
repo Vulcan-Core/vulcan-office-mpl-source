@@ -305,6 +305,8 @@ public:
 
     void setAccessibilityState(bool val) { _accessibilityState = val; }
 
+    bool isVulcanPhoneChrome() const { return _vulcanPhoneChrome; }
+
     void disableSpellCheckIfReadOnly();
 
     const std::string& getDocTemplate() const { return _docTemplate; }
@@ -518,6 +520,9 @@ private:
 
     /// Specifies whether accessibility support is enabled for this session.
     bool _accessibilityState;
+
+    /// Whether the browser selected Vulcan's phone chrome for this session.
+    bool _vulcanPhoneChrome;
 
     /// Specifies whether certification verification for the wopi server
     /// should be disabled in core

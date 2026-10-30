@@ -377,7 +377,12 @@ if (window.ThisIsTheEmscriptenApp) {
 	map.loadDocument(global.socket);
 }
 
-window.addEventListener('beforeunload', function () {
+// End the session on pagehide, not beforeunload. Chromium fires beforeunload
+// in every frame when a link in the host page answers with a redirect to
+// another origin (a My Files download goes to S3), and nothing unloads:
+// closing there dropped the lock and left the editor reconnecting.
+// pagehide fires only when this frame really goes away.
+window.addEventListener('pagehide', function () {
 	if (map && app.socket) {
 		if (app.socket.setUnloading)
 			app.socket.setUnloading();

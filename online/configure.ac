@@ -3,7 +3,7 @@
 
 AC_PREREQ([2.63])
 
-AC_INIT([coolwsd], [26.04.3.0], [https://github.com/CollaboraOnline/online/issues], [coolwsd], [https://www.collaboraoffice.org/])
+AC_INIT([coolwsd], [26.04.3.0], [https://github.com/Vulcan-Core/vulcan-office-mpl-source/issues], [coolwsd], [https://vulcan.ai/])
 LT_INIT([shared, disable-static, dlopen])
 
 AM_INIT_AUTOMAKE([1.10 foreign subdir-objects tar-pax -Wno-portability])
@@ -311,11 +311,6 @@ AC_ARG_WITH(info-url,
         [Set the info url of the build.]),
 ,)
 
-AC_ARG_WITH(welcome-url,
-    AS_HELP_STRING([--with-welcome-url=<url>],
-        [Set the welcome url of the build.]),
-,)
-
 AC_ARG_ENABLE([seccomp],
               AS_HELP_STRING([--disable-seccomp],
                              [Disable use of linux/seccomp.h header when kernel on target system does not support it.
@@ -448,14 +443,6 @@ AC_ARG_WITH([max-documents],
              AS_HELP_STRING([--with-max-documents],
                            [Set the limit on the total number of documents. Def: 10, Min: 2.]))
 
-AC_ARG_WITH([feedback-url],
-            AS_HELP_STRING([--with-feedback-url=<url>],
-                           [User feedback URL.]))
-
-AC_ARG_WITH([infobar-url],
-            AS_HELP_STRING([--with-infobar-url=<url>],
-                           [Infobar URL.]))
-
 AC_ARG_WITH([coverage],
              AS_HELP_STRING([--with-coverage=<gcov>],
                             [Enable a code-coverage method. Currently only gcov is supported (works with both gcc and clang).
@@ -494,7 +481,7 @@ AC_ARG_ENABLE([tests],
 
 AC_ARG_WITH([help-url],
             AS_HELP_STRING([--with-help-url=<url>],
-                [Set the base URL of the online help. Default is https://help.collaboraoffice.com/help.html?])
+                [Set the base URL of the online help. Default is empty (help buttons disabled).])
                 [--without-help-url Help buttons of dialogs will be disabled, external help website will not be used.],,)
 
 AC_ARG_WITH([dictionaries],
@@ -1181,7 +1168,8 @@ else
 fi
 AC_SUBST(VENDOR)
 
-INFO_URL='https://www.collaboraoffice.org/'
+# Vulcan Office: no default info/product URL pointing at an external host.
+INFO_URL=
 if test -n "$with_info_url" -a "$with_info_url" != "no"; then
     INFO_URL="$with_info_url"
 fi
@@ -1320,40 +1308,24 @@ AS_IF([test "$MAX_DOCUMENTS" -lt "2"],
 AC_DEFINE_UNQUOTED([MAX_DOCUMENTS],[$MAX_DOCUMENTS],[Limit the maximum number of open documents])
 AC_SUBST(MAX_DOCUMENTS)
 
+# Vulcan Office: the user-feedback iframe and the update-check ("infobar")
+# phone-home surfaces are removed at source. The URLs are hard-empty and
+# deliberately not configurable.
 FEEDBACK_URL=
-
-if test -n "$with_feedback_url"; then
-   FEEDBACK_URL=$with_feedback_url
-fi
-
 AC_DEFINE_UNQUOTED([FEEDBACK_URL],["$FEEDBACK_URL"],[User feedback URL.])
 
 INFOBAR_URL=
-if test -n "$with_infobar_url"; then
-   INFOBAR_URL=$with_infobar_url
-fi
-
 AC_DEFINE_UNQUOTED([INFOBAR_URL],["$INFOBAR_URL"],[Infobar URL.])
 
+# Vulcan Office: the welcome screen is removed at source; no welcome config
+# is emitted and no default brand product URL points at an external host.
 WELCOME_CONFIG_FRAGMENT=
 HOME_MODE_CONFIGURATION=
 ENABLE_WELCOME_MESSAGE=0
 WELCOME_URL=
-CONFIG_INTERFACE_FRAGMENT=
-if test -n "$with_welcome_url"; then
-    WELCOME_URL=$with_welcome_url
-    ENABLE_WELCOME_MESSAGE=1
-    HOME_MODE_CONFIGURATION="<home_mode>
-        <enable desc=\"Home users can enable this setting, which in turn disables welcome screen and user feedback popups, but also limits concurrent open connections to 20 and concurrent open documents to 10. The default means that number of concurrent open connections and concurrent open documents are unlimited, but welcome screen and user feedback cannot be switched off.\" type=\"bool\" default=\"false\">false</enable>
-    </home_mode>"
-else
-    WELCOME_CONFIG_FRAGMENT="<welcome>
-      <enable type=\"bool\" desc=\"Controls whether the welcome screen should be shown to the users on new install and updates. When enabled, your custom welcome screen must be created at /usr/share/coolwsd/browser/dist/welcome/welcome.html.\" default=\"false\">false</enable>
-    </welcome>"
-    CONFIG_INTERFACE_FRAGMENT="<brandProductName desc=\"Change the displayed name the application will have for the user.\" type=\"string\"></brandProductName>
-    <brandProductURL desc=\"Change the product URL, empty makes disable the link\" type=\"string\">https://www.collaboraonline.com</brandProductURL>
-    <logoURL desc=\"Change the URL of the logo used by Collabora Online, use none to hide it.\" type=\"string\"></logoURL>"
-fi
+CONFIG_INTERFACE_FRAGMENT="<brandProductName desc=\"Change the displayed name the application will have for the user.\" type=\"string\"></brandProductName>
+    <brandProductURL desc=\"Change the product URL, empty makes disable the link\" type=\"string\"></brandProductURL>
+    <logoURL desc=\"Change the URL of the logo used by the product, use none to hide it.\" type=\"string\"></logoURL>"
 
 AC_SUBST([WELCOME_CONFIG_FRAGMENT])
 AM_SUBST_NOTMAKE(WELCOME_CONFIG_FRAGMENT)
@@ -2495,8 +2467,10 @@ elif test "$with_help_url" = "no"; then
     HELP_URL=
     AC_MSG_RESULT([none, help buttons are disabled])
 else
-    HELP_URL="https://help.collaboraoffice.com/help.html?"
-    AC_MSG_RESULT([default: $HELP_URL])
+    # Vulcan Office: no default external help host; help buttons are disabled
+    # unless --with-help-url points somewhere explicitly.
+    HELP_URL=
+    AC_MSG_RESULT([none, help buttons are disabled (Vulcan Office default)])
 fi
 AC_SUBST(HELP_URL)
 AC_DEFINE_UNQUOTED([HELP_URL],["$HELP_URL"],[Default value of help root URL])

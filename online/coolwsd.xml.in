@@ -57,8 +57,8 @@
 
     <memproportion desc="The maximum percentage of available memory consumed by all of the @APP_NAME@ processes, after which we start cleaning up idle documents. If cgroup memory limits are set, this is the maximum percentage of that limit to consume." type="double" default="80.0"></memproportion>
     <num_prespawn_children desc="Number of child processes to keep started in advance and waiting for new clients." type="uint" default="@NUM_PRESPAWN_CHILDREN@">@NUM_PRESPAWN_CHILDREN@</num_prespawn_children>
-    <fetch_update_check desc="Every number of hours will fetch latest version data. Defaults to 10 hours." type="uint" default="10">10</fetch_update_check>
-    <allow_update_popup desc="Allows notification about an update in the editor" type="bool" default="true">true</allow_update_popup>
+    <fetch_update_check desc="Unused in Vulcan Office: the update check is removed at source and never fetches." type="uint" default="0">0</fetch_update_check>
+    <allow_update_popup desc="Allows notification about an update in the editor" type="bool" default="false">false</allow_update_popup>
     <per_document desc="Document-specific settings, including LO Core settings.">
         <max_concurrency desc="The maximum number of threads to use while processing a document." type="uint" default="4">4</max_concurrency>
         <batch_priority desc="A (lower) priority for use by batch eg. convert-to processes to avoid starving interactive ones" type="uint" default="5">5</batch_priority>
@@ -80,6 +80,7 @@
         <limit_convert_secs desc="Maximum number of seconds to wait for a document conversion to succeed. 0 for unlimited." type="uint" default="100">100</limit_convert_secs>
         <min_time_between_saves_ms desc="Minimum number of milliseconds between saving the document on disk." type="uint" default="500">500</min_time_between_saves_ms>
         <min_time_between_uploads_ms desc="Minimum number of milliseconds between uploading the document to storage." type="uint" default="5000">5000</min_time_between_uploads_ms>
+        <view_update_coalesce_ms desc="Vulcan: coalesce roster (viewinfo:) and other-view cursor/selection updates (cellviewcursor:, textviewselection:) per client, sending at most one update of each kind per view in this many milliseconds. The final state always arrives, and the order of the messages forwarded from the document is preserved. 0 disables coalescing, which is the upstream behaviour and the default; 100 is a sensible value for large multiplayer sessions." type="uint" default="0">0</view_update_coalesce_ms>
         <cleanup desc="Checks for resource consuming (bad) documents and kills associated kit process. A document is considered resource consuming (bad) if is in idle state for idle_time_secs period and memory usage passed limit_dirty_mem_mb or CPU usage passed limit_cpu_per" enable="true">
             <cleanup_interval_ms desc="Interval between two checks" type="uint" default="10000">10000</cleanup_interval_ms>
             <bad_behavior_period_secs desc="Minimum time period for a document to be in bad state before associated kit process is killed. If in this period the condition for bad document is not met once then this period is reset" type="uint" default="60">60</bad_behavior_period_secs>
@@ -223,7 +224,7 @@
       frame-ancestors server-embedding-collabora-online-iframe
       -->
       </content_security_policy>
-      <frame_ancestors desc="OBSOLETE: Use content_security_policy. Specify who is allowed to embed the Collabora Online iframe (coolwsd and WOPI host are always allowed). Separate multiple hosts by space."></frame_ancestors>
+      <frame_ancestors desc="OBSOLETE: Use content_security_policy. Specify who is allowed to embed the Vulcan Office iframe (coolwsd and WOPI host are always allowed). Separate multiple hosts by space."></frame_ancestors>
       <connection_timeout_secs desc="Specifies the connection, send, recv timeout in seconds for connections initiated by coolwsd (such as WOPI connections)." type="int" default="30">30</connection_timeout_secs>
 
       <!-- this setting radically changes how online works, it should not be used in a production environment -->
@@ -302,10 +303,19 @@
                 <refresh desc="How frequently we should re-acquire a lock with the storage server, in seconds (default 15 mins) or 0 for no refresh" type="int" default="900">900</refresh>
             </locking>
 
-            <alias_groups desc="default mode is 'first' it allows only the first host connecting to coolwsd when groups are not defined. set mode to 'groups' and define group to allow multiple host and its aliases" mode="first">
+            <alias_groups desc="default mode is 'first' it allows only the first host connecting to coolwsd when groups are not defined. set mode to 'groups' and define group to allow multiple host and its aliases" mode="first" secondary_groups_internal="true">
             <!-- If you need to use multiple wopi hosts, change the mode to "groups" and
                     add the hosts below. If one host is accessible under multiple ip addresses
                     or names, add them as aliases. -->
+            <!-- secondary_groups_internal (default true): the first <group> serves every
+                    caller; the hosts and aliases of every later <group> are WOPI hosts only
+                    for server-to-server requests, i.e. a TCP peer matching net.post_allow
+                    that sends no X-Forwarded-For. Any other caller naming such a host (as a
+                    WOPISrc, a wopiAccessCheck callbackUrl, or a name that resolves into it)
+                    is refused exactly as an unlisted host. Those groups also stay out of
+                    the hosts documents may pull external data from (KIT_HOST_ALLOWLIST).
+                    This relies on every proxy in front of coolwsd adding X-Forwarded-For.
+                    Set false to let every group serve every caller. -->
             <!--
             <group>
                     <host desc="hostname to allow or deny." allow="true">scheme://hostname:port</host>

@@ -19,14 +19,14 @@
  *     id: 'my-chip',
  *     type: 'chip',
  *     text: 'Zen',
- *     icon: '🧘',                          // optional: emoji or lc_*.svg
+ *     icon: 'lc_symbolshapes.puzzle.svg',  // optional: lc_*.svg sprite only
  *     pressed: false,                      // optional: drives aria-pressed
  *     enabled: true,
  *     aria: { label: 'Zen tone' },
  *     actions: [                           // optional: 0..n trailing actions
  *         {
  *             id: 'my-chip-edit',
- *             text: '✎',                   // or image: 'lc_edit.svg'
+ *             image: 'lc_edit.svg',        // or text: a short plain label
  *             aria: { label: 'Edit' },
  *         },
  *     ],
@@ -72,15 +72,13 @@ JSDialog.chip = function (
 	main.setAttribute('tabindex', '0');
 	main.setAttribute('aria-pressed', data.pressed === true ? 'true' : 'false');
 
-	if (data.icon) {
+	// Only lc_*.svg sprites render; any other icon string (a legacy glyph
+	// from stored prefs, say) produces an empty slot rather than text.
+	if (data.icon && _chipIsLCIcon(data.icon)) {
 		const iconSpan = window.L.DomUtil.create('span', 'ui-chip-icon', main);
-		if (_chipIsLCIcon(data.icon)) {
-			const img = window.L.DomUtil.create('img', '', iconSpan);
-			app.LOUtil.setImage(img, data.icon, builder.map);
-			img.alt = '';
-		} else {
-			iconSpan.textContent = data.icon;
-		}
+		const img = window.L.DomUtil.create('img', '', iconSpan);
+		app.LOUtil.setImage(img, data.icon, builder.map);
+		img.alt = '';
 	}
 
 	const textSpan = window.L.DomUtil.create('span', 'ui-chip-text', main);

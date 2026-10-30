@@ -30,6 +30,7 @@ $(eval $(call gb_CppunitTest_add_exception_objects,sw_writerfilter_dmapper, \
     sw/qa/writerfilter/dmapper/PropertyMap \
     sw/qa/writerfilter/dmapper/SdtHelper \
     sw/qa/writerfilter/dmapper/SettingsTable \
+    sw/qa/writerfilter/dmapper/StyleSheetTable \
 ))
 
 $(eval $(call gb_CppunitTest_use_libraries,sw_writerfilter_dmapper, \

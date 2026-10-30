@@ -36,6 +36,10 @@
 #include <sortparam.hxx>
 #include <columnspanset.hxx>
 #include <undomanager.hxx>
+#include <comphelper/kit.hxx>
+#include <sfx2/bindings.hxx>
+#include <sfx2/sfxsids.hrc>
+#include <sfx2/viewfrm.hxx>
 #include <sizedev.hxx>
 
 
@@ -643,96 +647,91 @@ bool ScUndoWrapper::CanRepeat(SfxRepeatTarget& rTarget) const
 ScUndoManager::~ScUndoManager() {}
 
 /**
- * Checks if the topmost undo action owned by pView is independent from the topmost action undo
- * action.
+ * Checks if the topmost undo action owned by pView can be undone although other views' undo
+ * actions sit above it. Sets rOffset to the offset of that undo action on success.
  */
 bool ScUndoManager::IsViewUndoActionIndependent(const SfxViewShell* pView, sal_uInt16& rOffset) const
 {
-    if (GetUndoActionCount() <= 1)
-    {
-        // Single or less undo, owned by another view.
+    const SfxViewUndoLookup aLookup = LookupViewUndo(pView);
+    if (aLookup.eStatus != SfxViewUndoLookup::Status::Independent)
         return false;
-    }
-
-    if (!pView)
-    {
-        return false;
-    }
-
-    // Last undo action that doesn't belong to the view.
-    const SfxUndoAction* pTopAction = GetUndoAction();
-
-    ViewShellId nViewId = pView->GetViewShellId();
-
-    // Earlier undo action that belongs to the view, but is not the top one.
-    const SfxUndoAction* pViewAction = nullptr;
-    size_t nOffset = 0;
-    for (size_t i = 0; i < GetUndoActionCount(); ++i)
-    {
-        const SfxUndoAction* pAction = GetUndoAction(i);
-        if (pAction->GetViewShellId() == nViewId)
-        {
-            pViewAction = pAction;
-            nOffset = i;
-            break;
-        }
-    }
-
-    if (!pViewAction)
-    {
-        // Found no earlier undo action that belongs to the view.
-        return false;
-    }
-
-    std::optional<ScRange> topRange = getAffectedRangeFromUndo(pTopAction);
-    if (!topRange)
-        return false;
-
-    std::optional<ScRange> viewRange = getAffectedRangeFromUndo(pViewAction);
-    if (!viewRange)
-        return false;
-
-    if (topRange->Intersects(*viewRange))
-        return false;
-
-    for (size_t i = 0; i < GetRedoActionCount(); ++i)
-    {
-        auto pRedoAction = getScSimpleUndo(GetRedoAction(i));
-        if (!pRedoAction)
-        {
-            return false;
-        }
-        std::optional<ScRange> redoRange = getAffectedRangeFromUndo(pRedoAction);
-        if (!redoRange || (redoRange->Intersects(*viewRange) && pRedoAction->GetViewShellId() != nViewId))
-        {
-            // Dependent redo action and owned by another view.
-            return false;
-        }
-    }
-
-    rOffset = nOffset;
+    rOffset = static_cast<sal_uInt16>(aLookup.nOffset);
     return true;
 }
 
-std::optional<ScRange> ScUndoManager::getAffectedRangeFromUndo(const SfxUndoAction* pAction)
+SfxViewUndoLookup ScUndoManager::LookupViewUndo(const SfxViewShell* pView) const
 {
-    auto pSimpleUndo = getScSimpleUndo(pAction);
-    if (!pSimpleUndo)
-        return std::nullopt;
-    return pSimpleUndo->getAffectedRange();
+    if (!pView)
+        return SfxViewUndoLookup();
+
+    auto aCanMove = [](const SfxUndoAction& rMine) {
+        return getAffectedRangesFromUndo(&rMine).has_value();
+    };
+    auto aIndependent = [](const SfxUndoAction& rMine, const SfxUndoAction& rOther) {
+        std::optional<ScRangeList> oMine = getAffectedRangesFromUndo(&rMine);
+        std::optional<ScRangeList> oOther = getAffectedRangesFromUndo(&rOther);
+        if (!oMine || !oOther)
+            return false;
+        for (size_t i = 0; i < oOther->size(); ++i)
+        {
+            if (oMine->Intersects((*oOther)[i]))
+                return false;
+        }
+        return true;
+    };
+    return SdrUndoManager::LookupViewUndo(pView->GetViewShellId(), aCanMove, aIndependent);
 }
 
-const ScSimpleUndo* ScUndoManager::getScSimpleUndo(const SfxUndoAction* pAction)
+void ScUndoManager::AddUndoAction(std::unique_ptr<SfxUndoAction> pAction, bool bTryMerg)
 {
-    const ScSimpleUndo* pSimpleUndo = dynamic_cast<const ScSimpleUndo*>(pAction);
-    if (pSimpleUndo)
-        return pSimpleUndo;
+    SdrUndoManager::AddUndoAction(std::move(pAction), bTryMerg);
+    if (comphelper::COKit::isActive())
+        InvalidateUndoStateInAllViews();
+}
+
+void ScUndoManager::InvalidateUndoStateInAllViews()
+{
+    for (SfxViewFrame* pFrame = SfxViewFrame::GetFirst(); pFrame; pFrame = SfxViewFrame::GetNext(*pFrame))
+    {
+        pFrame->GetBindings().Invalidate(SID_UNDO);
+        pFrame->GetBindings().Invalidate(SID_REDO);
+    }
+}
+
+SfxViewUndoLookup ScUndoManager::LookupViewRedo(const SfxViewShell* pView) const
+{
+    if (!pView)
+        return SfxViewUndoLookup();
+    return SdrUndoManager::LookupViewRedo(pView->GetViewShellId());
+}
+
+std::optional<ScRangeList> ScUndoManager::getAffectedRangesFromUndo(const SfxUndoAction* pAction)
+{
+    if (!pAction)
+        return std::nullopt;
+
+    if (auto pSimpleUndo = dynamic_cast<const ScSimpleUndo*>(pAction))
+    {
+        std::optional<ScRange> oRange = pSimpleUndo->getAffectedRange();
+        if (!oRange)
+            return std::nullopt;
+        return ScRangeList(*oRange);
+    }
+
     auto pListAction = dynamic_cast<const SfxListUndoAction*>(pAction);
-    if (!pListAction)
-        return nullptr;
-    if (pListAction->maUndoActions.size() > 1)
-        return nullptr;
-    return dynamic_cast<ScSimpleUndo*>(pListAction->maUndoActions[0].pAction.get());
+    if (!pListAction || pListAction->maUndoActions.empty())
+        return std::nullopt;
+
+    ScRangeList aRet;
+    for (const MarkedUndoAction& rChild : pListAction->maUndoActions)
+    {
+        std::optional<ScRangeList> oChild = getAffectedRangesFromUndo(rChild.pAction.get());
+        if (!oChild)
+            return std::nullopt;
+        for (size_t i = 0; i < oChild->size(); ++i)
+            aRet.push_back((*oChild)[i]);
+    }
+    return aRet;
 }
 
 /* vim:set shiftwidth=4 softtabstop=4 expandtab: */

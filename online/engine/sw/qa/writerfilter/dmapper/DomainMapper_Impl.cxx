@@ -22,6 +22,10 @@
 #include <com/sun/star/document/XDocumentInsertable.hpp>
 #include <com/sun/star/text/XTextViewCursorSupplier.hpp>
 #include <com/sun/star/text/XPageCursor.hpp>
+#include <com/sun/star/text/XFootnotesSupplier.hpp>
+#include <com/sun/star/text/XEndnotesSupplier.hpp>
+#include <com/sun/star/container/XIndexAccess.hpp>
+#include <com/sun/star/container/XEnumerationAccess.hpp>
 
 #include <vcl/scheduler.hxx>
 #include <editeng/fhgtitem.hxx>
@@ -575,6 +579,113 @@ CPPUNIT_TEST_FIXTURE(Test, testAnnotationMarkRedline)
     // Without the accompanying fix in place, this test would have failed, the anchor point was not
     // inside a redline.
     CPPUNIT_ASSERT(pRedline);
+}
+
+/// The text of the nIndex-th footnote or endnote, in document order.
+OUString getNoteText(const uno::Reference<container::XIndexAccess>& xNotes, sal_Int32 nIndex)
+{
+    uno::Reference<text::XTextRange> xNote(xNotes->getByIndex(nIndex), uno::UNO_QUERY);
+    return xNote->getString().trim();
+}
+
+CPPUNIT_TEST_FIXTURE(Test, testNoteRefsOutOfIdOrder)
+{
+    // Given a document whose footnote references cite <w:footnoteReference w:id="3"/>, then 1,
+    // then 2, and whose endnote references cite 2, then 1, where the text of each note names its
+    // own w:id ("footnote 3" is <w:footnote w:id="3">):
+    // When importing that document:
+    createSwDoc("note-refs-out-of-id-order.docx");
+
+    // Then each reference shows the note with the w:id it carries, as Word does:
+    uno::Reference<text::XFootnotesSupplier> xFootnotesSupplier(mxComponent, uno::UNO_QUERY);
+    uno::Reference<container::XIndexAccess> xFootnotes = xFootnotesSupplier->getFootnotes();
+    CPPUNIT_ASSERT_EQUAL(static_cast<sal_Int32>(3), xFootnotes->getCount());
+    // Without the accompanying fix in place, this test would have failed with:
+    // - Expected: footnote 3
+    // - Actual  : footnote 1
+    // i.e. the k-th reference showed the note with the k-th lowest w:id, whatever it cited.
+    CPPUNIT_ASSERT_EQUAL(u"footnote 3"_ustr, getNoteText(xFootnotes, 0));
+    CPPUNIT_ASSERT_EQUAL(u"footnote 1"_ustr, getNoteText(xFootnotes, 1));
+    CPPUNIT_ASSERT_EQUAL(u"footnote 2"_ustr, getNoteText(xFootnotes, 2));
+
+    uno::Reference<text::XEndnotesSupplier> xEndnotesSupplier(mxComponent, uno::UNO_QUERY);
+    uno::Reference<container::XIndexAccess> xEndnotes = xEndnotesSupplier->getEndnotes();
+    CPPUNIT_ASSERT_EQUAL(static_cast<sal_Int32>(2), xEndnotes->getCount());
+    CPPUNIT_ASSERT_EQUAL(u"endnote 2"_ustr, getNoteText(xEndnotes, 0));
+    CPPUNIT_ASSERT_EQUAL(u"endnote 1"_ustr, getNoteText(xEndnotes, 1));
+}
+
+CPPUNIT_TEST_FIXTURE(Test, testNoteRefsOrphanMissingTwice)
+{
+    // Given a document with footnotes 1, 2 and 3 whose references cite 3, then 1, then 7 (no such
+    // footnote), then 3 again, so footnote 2 is cited by nothing:
+    // When importing that document:
+    createSwDoc("note-refs-orphan-missing-twice.docx");
+
+    // Then the uncited footnote is not shown, the reference to the missing one keeps an empty
+    // note, and footnote 3 is shown at both of its references:
+    uno::Reference<text::XFootnotesSupplier> xFootnotesSupplier(mxComponent, uno::UNO_QUERY);
+    uno::Reference<container::XIndexAccess> xFootnotes = xFootnotesSupplier->getFootnotes();
+    CPPUNIT_ASSERT_EQUAL(static_cast<sal_Int32>(4), xFootnotes->getCount());
+    // Without the accompanying fix in place, this test would have failed with:
+    // - Expected: footnote 3
+    // - Actual  : footnote 1
+    // and the other references showed footnote 2 (the uncited one), footnote 3 and nothing.
+    CPPUNIT_ASSERT_EQUAL(u"footnote 3"_ustr, getNoteText(xFootnotes, 0));
+    CPPUNIT_ASSERT_EQUAL(u"footnote 1"_ustr, getNoteText(xFootnotes, 1));
+    CPPUNIT_ASSERT_EQUAL(u""_ustr, getNoteText(xFootnotes, 2));
+    CPPUNIT_ASSERT_EQUAL(u"footnote 3"_ustr, getNoteText(xFootnotes, 3));
+}
+
+/// Whether the text of a footnote holds a tracked deletion, i.e. a "Delete" redline portion.
+bool hasTrackedDeletion(const uno::Reference<text::XText>& xNote)
+{
+    uno::Reference<container::XEnumerationAccess> xNoteText(xNote, uno::UNO_QUERY_THROW);
+    uno::Reference<container::XEnumeration> xParagraphs = xNoteText->createEnumeration();
+    while (xParagraphs->hasMoreElements())
+    {
+        uno::Reference<container::XEnumerationAccess> xParagraph(xParagraphs->nextElement(),
+                                                                 uno::UNO_QUERY_THROW);
+        uno::Reference<container::XEnumeration> xPortions = xParagraph->createEnumeration();
+        while (xPortions->hasMoreElements())
+        {
+            uno::Reference<beans::XPropertySet> xPortion(xPortions->nextElement(),
+                                                         uno::UNO_QUERY_THROW);
+            if (xPortion->getPropertyValue(u"TextPortionType"_ustr).get<OUString>() == "Redline"
+                && xPortion->getPropertyValue(u"RedlineType"_ustr).get<OUString>() == "Delete")
+                return true;
+        }
+    }
+    return false;
+}
+
+CPPUNIT_TEST_FIXTURE(Test, testNoteRefsTrackedChanges)
+{
+    // Given a document whose footnotes.xml stores the footnotes 4, 2, 5, 1, 3 in that order, whose
+    // references cite 2, 5, 1, 3, 4, and where each footnote "footnote N" ends with a tracked
+    // deletion " goneN":
+    // When importing that document:
+    createSwDoc("note-refs-tracked-changes.docx");
+
+    // Then each reference shows the note it cites, and every note keeps its tracked deletion:
+    uno::Reference<text::XFootnotesSupplier> xFootnotesSupplier(mxComponent, uno::UNO_QUERY);
+    uno::Reference<container::XIndexAccess> xFootnotes = xFootnotesSupplier->getFootnotes();
+    CPPUNIT_ASSERT_EQUAL(static_cast<sal_Int32>(5), xFootnotes->getCount());
+    const sal_Int32 aCited[] = { 2, 5, 1, 3, 4 };
+    for (sal_Int32 i = 0; i < 5; ++i)
+    {
+        const OUString aId = OUString::number(aCited[i]);
+        uno::Reference<text::XText> xNote(xFootnotes->getByIndex(i), uno::UNO_QUERY_THROW);
+        CPPUNIT_ASSERT_EQUAL(OUString("footnote " + aId + " gone" + aId), xNote->getString().trim());
+        // Without the accompanying fix in place, this test would have failed for footnotes 2 and
+        // 4: copying the notes in the order of their references (here 5 first) dropped the stored
+        // tracked changes of the notes before the copied one in footnotes.xml (4 and 2), and the
+        // first reference's footnote (2) was filled at the end of the import from the endnote
+        // list, so " gone2" and " gone4" were plain text.
+        CPPUNIT_ASSERT_MESSAGE(std::string("footnote ") + std::to_string(aCited[i])
+                                   + " lost its tracked deletion",
+                               hasTrackedDeletion(xNote));
+    }
 }
 }
 

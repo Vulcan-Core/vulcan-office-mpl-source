@@ -472,6 +472,15 @@ class CanvasOverlay extends CanvasSectionObject {
 			this.ctx.strokeStyle = path.color;
 			this.ctx.lineCap = path.lineCap;
 			this.ctx.lineJoin = path.lineJoin;
+			// 🔴 UNCONDITIONAL, both ways. The dash pattern is 2D-context
+			// state, not path state: it survives to the next path drawn on
+			// this overlay. Setting it only when a path asks for one would
+			// leave every following stroke — the cell cursor, a selection
+			// border, a view cursor, on desktop as much as on the phone —
+			// dashed until something else happened to reset it. One call,
+			// taking the pattern or the empty reset, is what makes a dashed
+			// path a local decision.
+			this.ctx.setLineDash(path.dashArray ? path.dashArray : []);
 			this.ctx.stroke();
 		}
 

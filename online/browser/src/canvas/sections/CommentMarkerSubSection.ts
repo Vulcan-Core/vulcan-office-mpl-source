@@ -74,6 +74,21 @@ class CommentMarkerSubSection extends HTMLObjectSection {
 		if (app.sectionContainer.isDraggingSomething()) {
 			if (this.sectionProperties.parent === null) return;
 
+			/*
+				dragStartPosition is a MOUSEDOWN anchor: on the call that seeds
+				it, no drag code has moved this marker yet, so it holds the
+				pre-drag position, and dragDistance is measured from mousedown
+				as well. Base plus TOTAL distance is absolute tracking, which
+				is why CommentSection's note on the 44 px marker box can say
+				the grab point cancels out, and why a wider touch latch in
+				CanvasSectionContainer.getTouchDragLatchSquared() costs only a
+				single catch-up jump onto the finger.
+
+				Do not re-seed this with the drag distance at the latch: the
+				marker would then trail the finger by the slop for the whole
+				drag, and onDragEnd posts this.position to .uno:EditAnnotation,
+				so the comment would be SAVED at the offset position.
+			*/
 			if (this.sectionProperties.dragStartPosition === null)
 				this.sectionProperties.dragStartPosition = this.position.slice();
 
@@ -100,9 +115,34 @@ class CommentMarkerSubSection extends HTMLObjectSection {
 	onClick(point: cool.SimplePoint, e: MouseEvent): void {
 		e.stopPropagation();
 		this.stopPropagating();
-		this.sectionProperties.parentSection.sectionProperties.commentListSection.selectById(
-			this.sectionProperties.data.id,
-		);
+		const listSection =
+			this.sectionProperties.parentSection.sectionProperties.commentListSection;
+		listSection.selectById(this.sectionProperties.data.id);
+
+		/*
+			IMPRESS PHONE READ ROUTE.
+
+			The marker already clears the touch floor -- CommentSection
+			.createMarkerSubSection grows this sub-section's box to 44 px on
+			the phone chrome while keeping the 28 px icon -- so the tap lands.
+			What it landed in was selectById() alone, and on a phone that is a
+			no-op the user can see: select() styles and repositions
+			sectionProperties.container, and Comment.onInitialize never
+			appended that container to the document on a small screen. So the
+			44 px target opened nothing.
+
+			The parent Comment section has carried the wizard call for
+			presentation and drawing since upstream (Comment.onMouseUp), but it
+			never runs for a marker tap: this handler stops propagation, which
+			is correct -- letting it through would reach the document canvas
+			listener that treats a canvas-targeted click as a click OUTSIDE the
+			comment and closes it again. So the route has to be repeated here
+			rather than delegated upward.
+
+			openCommentOnPhone returns false on desktop and tablet, where
+			selectById alone is the whole of the intended behaviour.
+		*/
+		listSection.openCommentOnPhone(this.sectionProperties.parentSection);
 	}
 
 	onMouseDown(point: cool.SimplePoint, e: MouseEvent): void {

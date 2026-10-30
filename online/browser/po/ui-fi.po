@@ -5103,7 +5103,7 @@ msgid ""
 "Unlinking citations will prevent Collabora Online from updating citations "
 "and bibliography in this document."
 msgstr ""
-"Lainausten linkin poistaminen estää Collabora Onlinea päivittämästä tämän "
+"Lainausten linkin poistaminen estää Vulcan Officea päivittämästä tämän "
 "asiakirjan viittauksia ja bibliografiaa."
 
 #: src/control/HRuler.ts:321
@@ -6680,7 +6680,7 @@ msgstr ""
 #: src/map/handler/Map.VersionBar.js:50
 msgid "Your Collabora Online server needs updating. Version {0} is available."
 msgstr ""
-"Collabora Online -palvelimesi on päivitettävä. Versio {0} on saatavilla."
+"Vulcan Office -palvelimesi on päivitettävä. Versio {0} on saatavilla."
 
 #: src/map/handler/Map.WOPI.js:194
 msgid "Creating new file from template..."
@@ -6970,7 +6970,7 @@ msgstr ""
 
 #: welcome/welcome.html%2Bhtml.head.title:9-3
 msgid "Collabora Online Welcome"
-msgstr "Collabora Online Tervetuloa"
+msgstr "Vulcan Office Tervetuloa"
 
 #: welcome/welcome.html%2Bhtml.body.div.div.div.div.h1:26-7
 msgid "Explore The New {coolversion}"
@@ -6979,7 +6979,7 @@ msgstr "Tutki uutta {coolversion}"
 #: welcome/welcome.html%2Bhtml.body.div.div.div.div.h2:27-7
 #: welcome/welcome.html%2Bhtml.body.div.div.div.div.h2:38-7
 msgid "Collabora Online Development Edition"
-msgstr "Collabora Onlinen kehitysversio"
+msgstr "Vulcan Officen kehitysversio"
 
 #: welcome/welcome.html%2Bhtml.body.div.div.div.div.p:28-7
 #, fuzzy
@@ -7010,7 +7010,7 @@ msgid ""
 msgstr ""
 "Tarkista <a target=\"_blank\" href=\"https://www.collaboraonline.com/"
 "code-26-04-release-notes/\">julkaisutiedot</a> ja lue kaikki: uusin "
-"Collabora Online Development Edition, tarkoitettu kotikäyttäjille ja "
+"Vulcan Office Development Edition, tarkoitettu kotikäyttäjille ja "
 "pienille ryhmille."
 
 #: welcome/welcome.html%2Bhtml.body.div.div.div.div.h1:48-7
@@ -7466,7 +7466,7 @@ msgstr ""
 #~ "nopeammasta kielentarkistuksesta ja muista parannuksista."
 
 #~ msgid "Integrate Collabora Online into your webapp"
-#~ msgstr "Integroi Collabora Online web-sovellukseesi"
+#~ msgstr "Integroi Vulcan Office web-sovellukseesi"
 
 #~ msgid "Or get involved in the development"
 #~ msgstr "Tai osallistu kehittämiseen"
@@ -7482,7 +7482,7 @@ msgstr ""
 #~ "all the essential steps on how to reproduce it."
 #~ msgstr ""
 #~ "Lue lisää web-applikaatioosi integroimisesta <a href=\"%coolSdkURL\" target="
-#~ "\"_blank\">Collabora Online SDK:sta</a>. Tai suuntaa kohti <a href=\"%"
+#~ "\"_blank\">Vulcan Office SDK:sta</a>. Tai suuntaa kohti <a href=\"%"
 #~ "coolStepByStepURL\" target=\"_blank\">vaiheittaisia ohjeita</a> ja buildaa "
 #~ "CODE ihan itse. Voit myös auttaa <a href=\"%coolTranslationsURL\" target=\""
 #~ "_blank\">tekemällä käännöksiä</a> tai <a href=\"%coolBugreportURL\" target=\""
@@ -7526,7 +7526,7 @@ msgstr ""
 #~ msgstr "Palvelin käynnistetään uudelleen ja on käytettävissä hetken kuluttua"
 
 #~ msgid "Oops, there is a problem connecting to Collabora Online : "
-#~ msgstr "Yhteydessä Collabora Onlineen tapahtui virhe: "
+#~ msgstr "Yhteydessä Vulcan Officeen tapahtui virhe: "
 
 #~ msgid "Number of views"
 #~ msgstr "Katselujen määrä"

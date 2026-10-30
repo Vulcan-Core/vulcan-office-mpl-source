@@ -5,47 +5,20 @@ var impressHelper = require('../../common/impress_helper');
 var mobileHelper = require('../../common/mobile_helper');
 var repairHelper = require('../../common/repair_document_helper');
 
+// NOTE: phone saving is HOST-DRIVEN. Save, Save As and version history were
+// removed from the phone kebab deliberately (Google routes all three to a
+// computer); the host posts Action_Save and coolwsd autosaves. There is
+// therefore no 'Save' case below any more -- do not re-add one against
+// File > Save, it no longer exists in mobilepresentation.
 describe.skip(['tagmobile'], 'Trigger hamburger menu options.', function() {
-	var newFilePath;
-
 	beforeEach(function() {
-		newFilePath = helper.setupAndLoadDocument('impress/hamburger_menu.odp');
+		helper.setupAndLoadDocument('impress/hamburger_menu.odp');
 
 		// Click on edit button
 		mobileHelper.enableEditingMobile();
 		cy.getFrameWindow().then((win) => {
 			this.win = win;
 		});
-	});
-
-	it('Save', function() {
-		// Change the document content and save it
-		impressHelper.selectTextShapeInTheCenter();
-
-		cy.cGet('#document-container g.Page .TextPosition tspan')
-			.should('have.text', 'X');
-
-		// Type a new text
-		impressHelper.dblclickOnSelectedShape();
-
-		helper.typeIntoDocument('new');
-
-		impressHelper.triggerNewSVGForShapeInTheCenter();
-
-		cy.cGet('#document-container g.Page .TextPosition tspan')
-			.should('have.text', 'Xnew');
-
-		mobileHelper.selectHamburgerMenuItem(['File', 'Save']);
-
-		// Reopen the document and check content.
-		helper.reloadDocument(newFilePath);
-
-		mobileHelper.enableEditingMobile();
-
-		impressHelper.selectTextShapeInTheCenter();
-
-		cy.cGet('#document-container g.Page .TextPosition tspan')
-			.should('have.text', 'Xnew');
 	});
 
 	it('Print', function() {

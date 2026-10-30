@@ -52,6 +52,15 @@ public:
         NextConnectionId = 1;
     }
 
+#if !MOBILEAPP
+    /// True iff the request came straight from a trusted server rather than through
+    /// a proxy: its TCP peer matches net.post_allow (allowPostFrom()) and it carries
+    /// no X-Forwarded-For. Only such a request may name a WOPI host that an internal
+    /// alias group alone admits (HostUtil::allowedWopiHost()).
+    static bool isServerToServer(const std::string& peerAddress,
+                                 const Poco::Net::HTTPRequest& request);
+#endif // !MOBILEAPP
+
 private:
     // NB: these names are part of the published API, and should not be renamed or altered but can be expanded
     STATE_ENUM(CheckStatus, Ok, NotHttpSuccess, HostNotFound, WopiHostNotAllowed, UnspecifiedError,

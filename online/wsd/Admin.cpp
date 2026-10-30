@@ -30,6 +30,7 @@
 #include <common/Unit.hpp>
 #include <common/Uri.hpp>
 #include <common/Util.hpp>
+#include <common/VulcanLogScrub.hpp>
 #include <net/Socket.hpp>
 #if ENABLE_SSL
 #include <net/SslSocket.hpp>
@@ -733,7 +734,8 @@ void Admin::pollingThread()
             oss << "End Admin " << getpid() << " Dump State.\n";
 
             const std::string str = oss.str();
-            fprintf(stderr, "%s", str.c_str());
+            // Vulcan: raw stderr bypasses the logger's scrub, so it gets the same one.
+            fprintf(stderr, "%s", Vulcan::scrubLogSecrets(str).c_str());
             LOG_WRN(str);
         }
 

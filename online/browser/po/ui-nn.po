@@ -7195,7 +7195,7 @@ msgstr ""
 #~ msgstr "Tenaren startar på nytt og er snart tilgjengeleg"
 
 #~ msgid "Oops, there is a problem connecting to Collabora Online : "
-#~ msgstr "Uff. Det er problem med å kopla til Collabora Online: "
+#~ msgstr "Uff. Det er problem med å kopla til Vulcan Office: "
 
 #~ msgid "Number of views"
 #~ msgstr "Talet på visingar"

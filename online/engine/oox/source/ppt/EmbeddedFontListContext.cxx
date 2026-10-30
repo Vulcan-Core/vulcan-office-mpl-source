@@ -82,7 +82,17 @@ void EmbeddedFontListContext::onEndElement()
     if (!isCurrentElement(PPT_TOKEN(embeddedFont)))
         return;
 
-    if (!mbEmbedTrueType || !moCurrentFont)
+    if (!moCurrentFont)
+        return;
+
+    // An entry that names font parts carries its fonts whatever embedTrueTypeFonts says: the
+    // attribute asks the next writer to embed again, and decks that other tools write often leave
+    // it out. Without the flag such a deck drew in a substitute font and its first save dropped
+    // every part. Load those parts, and keep embedding on save, as for a flagged deck.
+    const bool bHasFontParts
+        = !moCurrentFont->aRegularID.isEmpty() || !moCurrentFont->aBoldID.isEmpty()
+          || !moCurrentFont->aItalicID.isEmpty() || !moCurrentFont->aBoldItalicID.isEmpty();
+    if (!mbEmbedTrueType && !bHasFontParts)
         return;
 
     if (mxDocSettings.is())

@@ -137,6 +137,16 @@ interface BaseTextEditView
         ExecMethod = ExecViewOptions ;
         StateMethod = StateViewOptions ;
     ]
+    // VULCAN: the client-stated browse width. Deliberately NOT on
+    // ExecViewOptions: that method's first act is
+    //   bSet = static_cast<const SfxBoolItem*>(pAttr)->GetValue();
+    // on any argument whose Which matches the slot, and this slot's argument
+    // is an SfxInt32Item. Routing it there would read an int as a bool through
+    // an unrelated-type static_cast. It goes to SwView::Execute instead.
+    FN_BROWSE_WIDTH
+    [
+        ExecMethod = Execute ;
+    ]
 
     FN_SINGLE_PAGE_PER_ROW
     [

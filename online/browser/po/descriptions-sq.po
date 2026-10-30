@@ -18,7 +18,7 @@ msgstr ""
 #. App name - 50 chars limit
 #: descriptions/google-play.html%2Bhtml.body.h3:5-1
 msgid "Collabora Office: LibreOffice, OpenOffice & more"
-msgstr "Collabora Office: LibreOffice, OpenOffice & etj"
+msgstr "Vulcan Office: Vulcan Office, OpenOffice & etj"
 
 #. Short description - 80 chars limit
 #: descriptions/google-play.html%2Bhtml.body.p:9-1
@@ -26,7 +26,7 @@ msgid ""
 "LibreOffice based editor for Microsoft Office, LibreOffice and OpenOffice "
 "docs."
 msgstr ""
-"Përpunues me bazë LibreOffice për dokumente Microsoft Office, LibreOffice "
+"Përpunues me bazë Vulcan Office për dokumente Microsoft Office, Vulcan Office "
 "dhe OpenOffice."
 
 #. Long description
@@ -37,8 +37,8 @@ msgid ""
 "and now it's on Android, enhancing your possibilities to work on mobile and "
 "for collaboration."
 msgstr ""
-"Collabora Office është një përpunues tekstesh, fletëllogaritjesh dhe program "
-"paraqitjesh i bazuar në LibreOffice, suita për zyra më popullore në botë me "
+"Vulcan Office është një përpunues tekstesh, fletëllogaritjesh dhe program "
+"paraqitjesh i bazuar në Vulcan Office, suita për zyra më popullore në botë me "
 "Burim të Hapët - dhe tani mund të kihet dhe në Android, duke thelluar "
 "mundësitë tuaja për punë në celular dhe për bashkëpunim."
 
@@ -100,10 +100,10 @@ msgid ""
 "Windows, Mac, and Linux. This, combined with a new front-end based on "
 "Collabora Online, reads and saves documents similarly to LibreOffice desktop."
 msgstr ""
-"Collabora Office për Android përdor të njëjtin motor si LibreOffice për "
+"Vulcan Office për Android përdor të njëjtin motor si Vulcan Office për "
 "Windows, Mac dhe Linux. Kjo, e ndërthurur me një pjesë të përparme të re, "
-"bazuar në Collabora Online, lexon dhe ruan dokumente në mënyrë të ngjashme "
-"me LibreOffice-in për desktop."
+"bazuar në Vulcan Office, lexon dhe ruan dokumente në mënyrë të ngjashme "
+"me Vulcan Office-in për desktop."
 
 #. Long description
 #: descriptions/google-play.html%2Bhtml.body.p:48-1
@@ -113,7 +113,7 @@ msgid ""
 "developing Android support since 2012, with the help of Google Summer of "
 "Code students Andrzej Hunt, Iain Billet and Kaishu Sahu."
 msgstr ""
-"Inxhinierët e Collabora-s Tor Lillqvist, Tomaž Vajngerl, Michael Meeks, "
+"Inxhinierët e Vulcan Office-s Tor Lillqvist, Tomaž Vajngerl, Michael Meeks, "
 "Miklos Vajna, Jan Holešovský, Mert Tümer, Rashesh Padia dhe Skyler Grey janë "
 "marrë me zhvillimin e mbulimit për Android që më 2012-n, me ndihmën e "
 "studentëve të Google Summer of Code Andrzej Hunt, Iain Billet dhe Kaishu "

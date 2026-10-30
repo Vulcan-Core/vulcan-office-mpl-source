@@ -953,7 +953,12 @@ void VclMetafileProcessor2D::processObjectInfoPrimitive2D(
     primitive2d::ObjectInfoPrimitive2D const& rObjectInfoPrimitive2D)
 {
     // tdf#154982 process content first, so this object overrides any nested one
-    process(rObjectInfoPrimitive2D.getChildren());
+    {
+        const OUString aOuterObjectName(maCurrentObjectName);
+        maCurrentObjectName = rObjectInfoPrimitive2D.getName();
+        process(rObjectInfoPrimitive2D.getChildren());
+        maCurrentObjectName = aOuterObjectName;
+    }
 
     // currently StructureTagPrimitive2D is only used for SdrObjects - have to
     // avoid adding Alt text if the SdrObject is not actually tagged, as it
@@ -2456,6 +2461,24 @@ void VclMetafileProcessor2D::processUnifiedTransparencePrimitive2D(
     // - uses DrawTransparent for single PolyPolygons directly. Can be detected by
     //   checking the content for single PolyPolygonColorPrimitive2D
     const primitive2d::Primitive2DContainer& rContent = rUniTransparenceCandidate.getChildren();
+
+    // Editable scanned PDFs: a hidden-ink OCR line draws its runs with
+    // alpha-0 characters, which would write nothing at all below. When the
+    // export asks for it (the PDF canvas's save), its text goes out between
+    // two comments the PDF writer turns into render-mode-3 text - searchable
+    // and selectable, painting nothing - and everything else inside the
+    // group (text decorations) is dropped there. Only objects named "ocr:"
+    // qualify, so every other document's fully transparent content is
+    // exported exactly as before.
+    if (!rContent.empty() && rUniTransparenceCandidate.getTransparence() >= 1.0
+        && mpPDFExtOutDevData && mpPDFExtOutDevData->GetIsExportInvisibleText()
+        && maCurrentObjectName.startsWith(u"ocr:"))
+    {
+        mpMetaFile->AddAction(new MetaCommentAction("VULCAN_INVISIBLE_TEXT_BEGIN"_ostr));
+        process(rContent);
+        mpMetaFile->AddAction(new MetaCommentAction("VULCAN_INVISIBLE_TEXT_END"_ostr));
+        return;
+    }
 
     if (!rContent.empty())
     {

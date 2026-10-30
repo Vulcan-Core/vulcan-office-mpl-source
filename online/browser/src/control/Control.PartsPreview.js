@@ -12,7 +12,7 @@
  * window.L.Control.PartsPreview
  */
 
-/* global _ app $ Hammer _UNO cool JSDialog */
+/* global _ app $ Hammer _UNO cool JSDialog VulcanFilmstripFollow VulcanLiveCanvas */
 window.L.Control.PartsPreview = window.L.Control.extend({
 	options: {
 		fetchThumbnail: true,
@@ -22,7 +22,15 @@ window.L.Control.PartsPreview = window.L.Control.extend({
 		axis: '',
 		allowOrientation: true,
 		maxWidth: window.mode.isDesktop() ? 180: (window.mode.isTablet() ? 120: 60),
-		maxHeight: window.mode.isDesktop() ? 180: (window.mode.isTablet() ? 120: 60)
+		maxHeight: window.mode.isDesktop() ? 180: (window.mode.isTablet() ? 120: 60),
+		// The phone card strip paints a fixed-height card, not a square box:
+		// vulcan-theme.css §13i.4 gives .preview-img height 58px inside a
+		// 128px width cap. Asking for that box makes the aspect fit in
+		// Parts.getPreview() return the card the CSS already reserves room
+		// for, so the inline width/height it writes agree with the sheet
+		// instead of overriding it. Keep these two numbers equal to §13i.4.
+		phoneCardMaxWidth: 128,
+		phoneCardHeight: 58
 	},
 	partsFocused: false,
 
@@ -49,9 +57,18 @@ window.L.Control.PartsPreview = window.L.Control.extend({
 		this._menuPosEl = null;
 		this.partsFocusedApplied = false;
 		this._dragState = null;
+		this._phoneSlideSelectionMode = false;
+		this._phoneDeleteUndoSelection = null;
+		this._phoneSlideSuppressedClick = null;
+		this._phoneSlideSuppressedClickTimer = null;
+		this._previewTouchGesture = null;
 		// Part hashes of the preview requests that are under way, keyed by
 		// the part index the request was made with.
 		this._pendingPreviewHashes = {};
+		// Which of the two card geometries the previews are currently sized
+		// to (see _previewRequestBox). Stays false off the phone strip, so
+		// the rotation re-fit in _resize can never fire there.
+		this._phoneCardStripApplied = false;
 
 		// A click clears the slide sorter focus mode, unless that same click
 		// re-focused a preview.
@@ -62,6 +79,15 @@ window.L.Control.PartsPreview = window.L.Control.extend({
 			if (!this.partsFocusedApplied && this.partsFocused)
 				this.partsFocused = false;
 		});
+
+		// R6-6: edit entry SHOWS the phone strip (vulcan-theme.css 13i.1c
+		// hides it for the whole read posture) — load its cards then. Same
+		// registration shape as ImpressTileLayer's own permission listener;
+		// lives for the document session like the control itself. Here and
+		// not in onAdd: onAdd is lifted as source text by
+		// ImpressMasterThemeInvalidation's map-event harness, which stubs
+		// only the map contract.
+		app.events.on('updatepermission', this._onVulcanPermissionChanged.bind(this));
 	},
 
 	onAdd: function (map) {
@@ -74,6 +100,7 @@ window.L.Control.PartsPreview = window.L.Control.extend({
 			this.options.axis;
 
 		map.on('updateparts', this._updateDisabled, this);
+		map.on('beforeundocommand', this._onPhoneUndoCommand, this);
 		map.on('updatepart', this._updatePart, this);
 		map.on('invalidateparts', this._invalidateParts, this);
 		map.on('tilepreview', this._updatePreview, this);
@@ -84,7 +111,12 @@ window.L.Control.PartsPreview = window.L.Control.extend({
 		map.on('scrolltopart', this._scrollToPart, this);
 		map.on('beforerequestpreview', this._beforeRequestPreview, this);
 		map.on('updatesections', this._updateSections, this);
+		// Slide-presence dots: repaint when a remote view changes slide,
+		// joins, leaves, or the filmstrip rebuilds.
+		map.on('vulcanviewparts addview removeview updateparts', this._updatePresenceDots, this);
 		map.on('docloaded', this._focusCurrentSlideOnLoad, this);
+		// A growing canvas can reveal a lazy card without scrolling the sorter.
+		map.on('sizeincreased', this._onScroll, this);
 
 		window.addEventListener('resize', window.L.bind(this._resize, this));
 	},
@@ -94,6 +126,8 @@ window.L.Control.PartsPreview = window.L.Control.extend({
 	},
 
 	_updateDisabled: function () {
+		this._reconcilePhoneSlideSelectionMode();
+		this._reconcilePhoneDeleteUndoSelection();
 		const selectedPart = app.map._docLayer._selectedPart;
 
 		const docType = app.map._docLayer._docType;
@@ -131,8 +165,7 @@ window.L.Control.PartsPreview = window.L.Control.extend({
 				for (var i = 0; i < app.impress.partList.length; i++) {
 					this._previewTiles.push(this._createPreview(i, app.impress.partList[i].hash));
 				}
-				if (!app.file.fileBasedView)
-					window.L.DomUtil.addClass(this._previewTiles[selectedPart], 'preview-img-currentpart');
+				window.L.DomUtil.addClass(this._previewTiles[selectedPart], 'preview-img-currentpart');
 				this._ensureVisiblePreviews(); // Load previews.
 				this._previewInitialized = true;
 				this._updateSelectedSection();
@@ -239,6 +272,403 @@ window.L.Control.PartsPreview = window.L.Control.extend({
 		return this._menuPosEl;
 	},
 
+	// True only on the surface vulcan-theme.css §13i.1-13i.5 restyles: the
+	// Google-Slides phone filmstrip. The conditions mirror that selector
+	// exactly (html.vulcan-mobile-chrome + body[data-doctype='presentation'] +
+	// #slide-sorter.portrait) because the point of the card box below is that
+	// the inline size and the stylesheet describe the same card. Landscape
+	// keeps the stock rail, whose device-mobile.css caps .preview-img at 60px
+	// wide - a 58px-tall card there would be clamped in one axis only and
+	// come out squashed.
+	// True inside the Vulcan phone chrome, in either orientation: a
+	// small-screen device AND the pre-paint html.vulcan-mobile-chrome marker
+	// (js/global.js stamps it iff !desktopChrome && isSmallScreenDevice()).
+	// Both halves matter -- ?vulcanChrome=desktop forces desktop chrome on a
+	// phone-sized screen, and isTablet() is *defined* as
+	// !isSmallScreenDevice(). Unlike _isPhoneCardStrip below this does not
+	// require portrait or presentation: it gates what the chrome offers, not
+	// how the filmstrip is laid out.
+	_isVulcanPhoneChrome: function () {
+		return !!(window.mode.isSmallScreenDevice() &&
+			document.documentElement.classList.contains('vulcan-mobile-chrome'));
+	},
+
+	// The phone presentation card is the interaction target, not merely its
+	// bitmap. In short landscape a 16:9 preview can be only 60x34 CSS pixels;
+	// the frame supplies the accessible card box around it. Binding navigation
+	// and long press to the frame makes that whole box live while preserving the
+	// stock image-only owner for tablets, Draw, and forced desktop chrome.
+	_getPreviewInteractionTarget: function (frame, img) {
+		return this._isVulcanPhoneChrome() &&
+			this._map && this._map.getDocType() === 'presentation' ? frame : img;
+	},
+
+	_isPhoneCardStrip: function () {
+		return !!(window.mode.isSmallScreenDevice() &&
+			document.documentElement.classList.contains('vulcan-mobile-chrome') &&
+			this._map && this._map.getDocType() === 'presentation' &&
+			window.L.DomUtil.isPortrait());
+	},
+
+	// Multi-select is a phone Impress interaction, in both orientations. Draw
+	// shares PartsPreview but not the Google Slides selection contract.
+	_isPhonePresentationSelectionSurface: function () {
+		return !!(this._isVulcanPhoneChrome() &&
+			this._map && this._map.getDocType() === 'presentation' &&
+			this._map.isEditMode());
+	},
+
+	_setPhoneSlideSelectionMode: function (enabled) {
+		enabled = !!enabled && this._isPhonePresentationSelectionSurface();
+		this._phoneSlideSelectionMode = enabled;
+		if (!this._partsPreviewCont)
+			return;
+		this._partsPreviewCont.classList.toggle('vulcan-slide-selection-mode', enabled);
+		var baseLabel = this._map && this._map.getDocType() === 'drawing' ?
+			_('Pages') : _('Slides');
+		this._partsPreviewCont.setAttribute(
+			'aria-label',
+			enabled ? _('Slides, selection mode') : baseLabel,
+		);
+	},
+
+	_reconcilePhoneSlideSelectionMode: function () {
+		if (!this._phoneSlideSelectionMode)
+			return;
+		// One selected slide is the intentional initial state of this mode: the
+		// long press arms it before the user taps a second card. Do not use a
+		// later updateparts event with that same count as evidence that a deck
+		// mutation collapsed the batch. Our mutation paths and the explicit
+		// non-current toggle handle their own exits; reconciliation is the
+		// safety net for losing the phone/edit/presentation surface.
+		if (!this._isPhonePresentationSelectionSurface())
+			this._exitPhoneSlideSelectionMode(false);
+	},
+
+	// Prepare the pressed card without switching away from an existing batch.
+	// setPart is forbidden after mode entry: core's SwitchPage clears every
+	// selected page before making the new current page selected.
+	_preparePhoneSlidePress: function (partId) {
+		if (!this._isPhonePresentationSelectionSurface())
+			return false;
+		// A new explicit selection supersedes any pending normalization from a
+		// prior batch delete. Its later Undo must not collapse this new batch.
+		if (!this._phoneSlideSelectionMode)
+			this._phoneDeleteUndoSelection = null;
+		if (this._phoneSlideSelectionMode) {
+			if (!app.impress.isSlideSelected(partId))
+				this._map.selectPart(partId, 1, false);
+			return true;
+		}
+		this._map.deselectAll();
+		this._map.setPart(partId);
+		this._map.selectPart(partId, 1, false);
+		return true;
+	},
+
+	_collapsePhoneSlideSelectionToCurrent: function () {
+		var current = this._map._docLayer._selectedPart;
+		this._map.deselectAll();
+		// ChildSession ignores selectclientpart for the current page, which is
+		// fine: core already keeps it selected. This restores the client model
+		// without a setPart that would race and erase a new batch.
+		this._map.selectPart(current, 1, false);
+	},
+
+	_exitPhoneSlideSelectionMode: function (collapse) {
+		if (!this._phoneSlideSelectionMode)
+			return;
+		this._setPhoneSlideSelectionMode(false);
+		if (collapse === false)
+			return;
+		this._collapsePhoneSlideSelectionToCurrent();
+	},
+
+	_handlePhoneSlideSelectionTap: function (partId) {
+		if (!this._isPhonePresentationSelectionSurface() ||
+			!this._phoneSlideSelectionMode)
+			return false;
+		var current = this._map._docLayer._selectedPart;
+		if (partId === current) {
+			this._exitPhoneSlideSelectionMode(true);
+			return true;
+		}
+		this._map.selectPart(
+			partId,
+			app.impress.isSlideSelected(partId) ? 0 : 1,
+			false,
+		);
+		// Core can report the current page separately from partList.selected,
+		// but it remains the semantic anchor of the phone selection.
+		var semanticSelectedCount = app.impress.getSelectedSlidesCount();
+		if (!app.impress.isSlideSelected(current))
+			semanticSelectedCount++;
+		if (semanticSelectedCount <= 1)
+			this._exitPhoneSlideSelectionMode(false);
+		return true;
+	},
+
+	// Undo reinserts deleted slides but intentionally preserves the low-level
+	// page-selection bits. On the phone those bits are hidden after the batch
+	// action, yet a later Delete would still consume them. Wait until an
+	// authoritative status first proves the deck shrank and then grew again;
+	// a queued pre-delete status with the original count must never collapse
+	// the batch before .uno:DeletePage consumes it.
+	_reconcilePhoneDeleteUndoSelection: function () {
+		var pending = this._phoneDeleteUndoSelection;
+		if (!pending)
+			return;
+		if (!this._isPhonePresentationSelectionSurface()) {
+			this._phoneDeleteUndoSelection = null;
+			return;
+		}
+		var partList = app.impress && app.impress.partList;
+		if (!partList || !partList.length)
+			return;
+		var partCount = partList.length;
+		if (pending.minimumCount === null) {
+			if (partCount < pending.beforeCount)
+				pending.minimumCount = partCount;
+			else if (partCount > pending.beforeCount)
+				this._phoneDeleteUndoSelection = null;
+			return;
+		}
+		// Core emits a status for each removed or reinserted page, so a batch
+		// can report 3 -> 2 -> 1 and Undo 1 -> 2 -> 3. Keep the shrink floor
+		// through those intermediate frames and accept only the original count
+		// as restoration.
+		if (partCount < pending.minimumCount) {
+			pending.minimumCount = partCount;
+			return;
+		}
+		if (partCount === pending.minimumCount)
+			return;
+		if (!pending.undoRequested) {
+			this._phoneDeleteUndoSelection = null;
+			return;
+		}
+		if (partCount < pending.beforeCount)
+			return;
+
+		this._phoneDeleteUndoSelection = null;
+		if (partCount === pending.beforeCount)
+			this._collapsePhoneSlideSelectionToCurrent();
+	},
+
+	_onPhoneUndoCommand: function () {
+		if (this._phoneDeleteUndoSelection &&
+			this._isPhonePresentationSelectionSurface())
+			this._phoneDeleteUndoSelection.undoRequested = true;
+	},
+
+	// Deck mutations end the transient phone selection posture, but must not
+	// collapse the selected pages first: the action has already consumed that
+	// selection and its resulting insert/delete/update will reconcile it.
+	_phoneDeckMutationCompleted: function (preserveDeleteReconciliation) {
+		if (!preserveDeleteReconciliation)
+			this._phoneDeleteUndoSelection = null;
+		this._exitPhoneSlideSelectionMode(false);
+	},
+
+	_deleteSlidesFromCardMenu: function () {
+		if (!this._phoneSlideSelectionMode ||
+			!this._isPhonePresentationSelectionSurface()) {
+			app.dispatcher.dispatch('deletepage');
+			return;
+		}
+
+		// Google Slides removes the selected slide batch immediately. This is
+		// still recoverable: map.deletePage dispatches .uno:DeletePage, whose
+		// Impress handler groups every selected page removal into one undo step;
+		// the phone edit top bar keeps .uno:Undo directly exposed.
+		this._phoneDeleteUndoSelection = {
+			beforeCount: app.impress.partList.length,
+			minimumCount: null,
+			undoRequested: false,
+		};
+		this._map.deletePage();
+		this._phoneDeckMutationCompleted(true);
+	},
+
+	_runPhoneSlideMutationAction: function (entryId, part) {
+		switch (entryId) {
+		case 'paste':
+			this._pasteSlide(part);
+			return true;
+		case 'newslide':
+			this._map.insertPage();
+			this._phoneDeckMutationCompleted();
+			return true;
+		case 'duplicateslide':
+			this._map.duplicatePage();
+			this._phoneDeckMutationCompleted();
+			return true;
+		case 'delete':
+			this._deleteSlidesFromCardMenu();
+			return true;
+		default:
+			return false;
+		}
+	},
+
+	_armPhoneSlideCompatibilityClickSuppression: function (img, e) {
+		if (e && e.preventDefault)
+			e.preventDefault();
+		if (e && e.originalEvent && e.originalEvent.preventDefault)
+			e.originalEvent.preventDefault();
+		clearTimeout(this._phoneSlideSuppressedClickTimer);
+		this._phoneSlideSuppressedClick = img;
+		this._phoneSlideSuppressedClickTimer = setTimeout(function () {
+			if (this._phoneSlideSuppressedClick === img)
+				this._phoneSlideSuppressedClick = null;
+		}.bind(this), 700);
+	},
+
+	_consumePhoneSlideCompatibilityClick: function (img, e) {
+		if (this._phoneSlideSuppressedClick !== img)
+			return false;
+		clearTimeout(this._phoneSlideSuppressedClickTimer);
+		this._phoneSlideSuppressedClickTimer = null;
+		this._phoneSlideSuppressedClick = null;
+		if (e && e.preventDefault)
+			e.preventDefault();
+		if (e && e.stopPropagation)
+			e.stopPropagation();
+		return true;
+	},
+
+	_completePhoneSlideLongPress: function (img, e) {
+		this._armPhoneSlideCompatibilityClickSuppression(img, e);
+		this._openCardMenuFromPress(img, e);
+	},
+
+	_shouldUpdatePhoneTouchDrag: function (state, clientX, clientY) {
+		if (!state.touchOrigin || state.touchDragStarted)
+			return true;
+		var deltaX = clientX - state.touchOrigin.x;
+		var deltaY = clientY - state.touchOrigin.y;
+		// Ten CSS pixels keeps normal finger jitter in long-press territory.
+		// Once crossed, the decision is latched so returning toward the origin
+		// cannot turn a real reorder back into a menu-opening press.
+		if (deltaX * deltaX + deltaY * deltaY < 100)
+			return false;
+		state.touchDragStarted = true;
+		return true;
+	},
+
+	// The box every preview request is fitted into. Parts.getPreview() shrinks
+	// it to the slide's aspect ratio and returns what it settled on, which is
+	// what gets written to the img as an inline size.
+	_previewRequestBox: function () {
+		if (this._isPhoneCardStrip())
+			return { maxWidth: this.options.phoneCardMaxWidth, maxHeight: this.options.phoneCardHeight };
+
+		return { maxWidth: this.options.maxWidth, maxHeight: this.options.maxHeight };
+	},
+
+	_handlePreviewInteractionClick: function (e, frame, img) {
+		// The frame stays pointer-active so its first touch can continue to send
+		// move/end events. Consume any second pointer/click while that gesture is
+		// live instead of changing the selection under its drag state.
+		if (this._previewTouchGesture) {
+			window.L.DomEvent.stopPropagation(e);
+			window.L.DomEvent.stop(e);
+			return;
+		}
+		if (this._consumePhoneSlideCompatibilityClick(img, e))
+			return;
+		window.L.DomEvent.stopPropagation(e);
+		window.L.DomEvent.stop(e);
+		var part = this._findClickedPart(frame);
+		// _findClickedPart reports "no frame here" as -1, never as null.
+		if (part !== -1)
+			var partId = parseInt(part) - 1; // The first part is just a drop-site for reordering.
+		if (part !== -1 && this._handlePhoneSlideSelectionTap(partId)) {
+			img.focus();
+			return;
+		}
+		if (!window.mode.isDesktop() && partId === this._map._docLayer._selectedPart && !app.file.fileBasedView) {
+			// A second tap opens the phone format sheet or the tablet Property deck.
+			if (this._map._permission === 'edit') {
+				// Remove object selection so the slide properties are targeted.
+				app.socket.sendMessage('resetselection');
+				setTimeout(function () {
+					if (window.mode.isSmallScreenDevice())
+						app.dispatcher.dispatch('mobile_wizard');
+					else
+						app.map.sendUnoCommand('.uno:SidebarDeck.PropertyDeck');
+				}, 0);
+			}
+		} else {
+			this._setPart(e, frame);
+			if (!window.mode.isDesktop()) {
+				// needed so on-screen keyboard doesn't pop up when switching slides,
+				// but would cause PgUp/Down to not work on desktop in slide sorter
+				document.activeElement.blur();
+			}
+		}
+		img.focus();
+	},
+
+	// Colored dots on a slide's preview frame for the OTHER views sitting
+	// on that slide — collaborators used to type slide numbers at each
+	// other. Inline-styled so both chromes render it; the data source is
+	// the docLayer's _vulcanViewParts map, fed by the per-view messages
+	// that already carry a part.
+	_updatePresenceDots: function () {
+		if (!this._map || !VulcanLiveCanvas.isCanvasDocType(this._map.getDocType())) return;
+		var docLayer = this._map._docLayer;
+		var viewParts = (docLayer && docLayer._vulcanViewParts) || {};
+		var viewInfo = this._map._viewInfo || {};
+
+		var byPart = {};
+		for (var viewId in viewParts) {
+			if (!viewInfo[viewId]) continue;
+			var part = viewParts[viewId];
+			if (!byPart[part]) byPart[part] = [];
+			byPart[part].push(parseInt(viewId));
+		}
+
+		for (var i = 0; i < this._previewTiles.length; i++) {
+			var img = this._previewTiles[i];
+			var frame = img && img.parentNode;
+			if (!frame) continue;
+			var holder = frame.querySelector('.vulcan-preview-presence');
+			var viewIds = byPart[i];
+			if (!viewIds || !viewIds.length) {
+				if (holder) holder.remove();
+				continue;
+			}
+			if (!holder) {
+				if (window.getComputedStyle(frame).position === 'static')
+					frame.style.position = 'relative';
+				holder = window.L.DomUtil.create('div', 'vulcan-preview-presence', frame);
+				holder.style.position = 'absolute';
+				holder.style.right = '6px';
+				holder.style.bottom = '6px';
+				holder.style.display = 'flex';
+				holder.style.gap = '3px';
+				holder.style.pointerEvents = 'none';
+				holder.style.zIndex = '3';
+				holder.setAttribute('aria-hidden', 'true');
+			}
+			while (holder.children.length > viewIds.length)
+				holder.removeChild(holder.lastChild);
+			while (holder.children.length < viewIds.length) {
+				var dot = window.L.DomUtil.create('span', 'vulcan-preview-presence-dot', holder);
+				dot.style.width = '8px';
+				dot.style.height = '8px';
+				dot.style.borderRadius = '50%';
+				dot.style.border = '1.5px solid rgba(255,255,255,0.9)';
+				dot.style.boxSizing = 'border-box';
+			}
+			for (var d = 0; d < viewIds.length; d++) {
+				holder.children[d].style.background =
+					app.LOUtil.rgbToHex(app.LOUtil.getViewIdColor(viewIds[d]));
+			}
+		}
+	},
+
 	_createPreview: function (i, hashCode) {
 		var frameClass = 'preview-frame ' + this.options.frameClass;
 		var frame = window.L.DomUtil.create('div', frameClass, this._partsPreviewCont);
@@ -246,14 +676,14 @@ window.L.Control.PartsPreview = window.L.Control.extend({
 		this._addDnDHandlers(frame);
 		window.L.DomUtil.create('span', 'preview-helper', frame);
 
-		// The visible digit comes from a CSS counter keyed off DOM order (see
-		// partsPreviewControl.css), so it always matches the frame's current
-		// position without any renumbering when frames are inserted or removed.
+		// The visible digit is written by _setPreviewPositionLabels below,
+		// alongside the alt text and tooltip.
 		const slideNumber = window.L.DomUtil.create('span', 'preview-slide-number', frame);
 		slideNumber.setAttribute('aria-hidden', 'true');
 
 		var imgClassName = 'preview-img ' + this.options.imageClass;
 		var img = window.L.DomUtil.create('img', imgClassName, frame);
+		img.slideNumber = slideNumber;
 		this._setPreviewPositionLabels(img, i);
 		// A drag grabbed on the picture starts from the frame, the nearest
 		// draggable ancestor, so it carries the slide marker data and shows
@@ -269,38 +699,71 @@ window.L.Control.PartsPreview = window.L.Control.extend({
 		img.hash = hashCode;
 		img.src = document.querySelector('meta[name="previewSmile"]').content;
 		img.fetched = false;
+		var interactionTarget = this._getPreviewInteractionTarget(frame, img);
 		if (!window.mode.isDesktop()) {
-			(new Hammer(img, {recognizers: [[Hammer.Press]]}))
+			var hammerOptions = { recognizers: [[Hammer.Press]] };
+			if (interactionTarget === frame) {
+				// PointerEventInput binds pointerdown to Hammer's manager element,
+				// so the frame itself must be that element for its padding/number to
+				// take the press. Preserve native mouse/trackpad reorder by omitting
+				// only Hammer's `userDrag: none` manager CSS on that draggable frame.
+				var hammerCssProps = Object.assign({}, Hammer.defaults.cssProps);
+				delete hammerCssProps.userDrag;
+				hammerOptions.cssProps = hammerCssProps;
+			}
+			(new Hammer(interactionTarget, hammerOptions))
 				.on('press', function (e) {
+					// A MOUSE MUST NOT ARM THIS. What the press arms is a
+					// TOUCH state machine: _addDnDTouchHandlers binds its only
+					// teardown to touchmove/touchcancel/touchend, and
+					// _handleTouchMove steers off e.originalEvent.touches[0].
+					// Hammer does not filter for us -- with window.PointerEvent
+					// present it builds PointerEventInput, whose handler takes
+					// any pointerdown with button 0 (hammer.js:892), and
+					// PressRecognizer weighs only pointer count, distance and
+					// time (hammer.js:1889-1897). So a 251ms mouse hold armed a
+					// gesture nothing could release: `pointer-events: none`
+					// stayed on every .preview-img, the ghost stayed in the
+					// body, and the collapsed frames stayed collapsed until
+					// reload. !isDesktop() is UA-mobile, which iPadOS Safari
+					// reports with a trackpad or mouse attached, so this is a
+					// live posture, not a lab one -- and the filmstrip is the
+					// read-posture navigation, so the wedge takes the deck away.
+					//
+					// NARROWED RATHER THAN MADE SYMMETRIC. A symmetric teardown
+					// alone would not produce a working mouse gesture -- the
+					// MOVE half is touch-only too, so the ghost would freeze at
+					// the press point -- and a pointer-generic rewrite would be
+					// a second mouse reorder racing the one already here: the
+					// native HTML5 drag (_addDnDHandlers, bound unconditionally
+					// in _createPreview) reorders through the SAME _updateDropGap
+					// parting, and `contextmenu` -> openCardMenu opens the SAME
+					// card menu the long press opens. Arming from a mouse never
+					// added an affordance, it disabled the working one, since
+					// `pointer-events: none` kills the native drag. It is also
+					// Slides' shape: touch-and-hold is the touch idiom, a mouse
+					// drags straight away and right-clicks for the menu, and
+					// putting a 251ms hold in front of a mouse drag would be
+					// friction added on purpose.
+					//
+					// A STYLUS KEEPS THE GESTURE. On a UA-mobile device a pen
+					// (Apple Pencil, Android stylus) dispatches real touch
+					// events, so it can release what it arms; only 'mouse' is
+					// turned away. pointerType is never undefined -- every
+					// Hammer input backend labels it (hammer.js:828, 912, 969,
+					// 1024) -- so this tests the one value that cannot finish.
+					// Same idiom as HRuler.ts:1477.
+					if (e.pointerType === 'mouse')
+						return;
+					if (this._previewTouchGesture)
+						return;
 					if (this._map.isEditMode()) {
-						this._addDnDTouchHandlers(e);
+						this._addDnDTouchHandlers(e, interactionTarget, frame, img);
 					}
 				}.bind(this));
 		}
-		window.L.DomEvent.on(img, 'click', function (e) {
-			window.L.DomEvent.stopPropagation(e);
-			window.L.DomEvent.stop(e);
-			var part = this._findClickedPart(e.target.parentNode);
-			if (part !== null)
-				var partId = parseInt(part) - 1; // The first part is just a drop-site for reordering.
-			if (!window.mode.isDesktop() && partId === this._map._docLayer._selectedPart && !app.file.fileBasedView) {
-				// if mobile or tab then second tap will open the mobile wizard
-				if (this._map._permission === 'edit') {
-					// Remove selection to get the slide properties in mobile wizard.
-					app.socket.sendMessage('resetselection');
-					setTimeout(function () {
-						app.dispatcher.dispatch('mobile_wizard');
-					}, 0);
-				}
-			} else {
-				this._setPart(e);
-				if (!window.mode.isDesktop()) {
-					// needed so on-screen keyboard doesn't pop up when switching slides,
-					// but would cause PgUp/Down to not work on desktop in slide sorter
-					document.activeElement.blur();
-				}
-			}
-			img.focus();
+		window.L.DomEvent.on(interactionTarget, 'click', function (e) {
+			this._handlePreviewInteractionClick(e, frame, img);
 		}, this);
 
 		var that = this;
@@ -317,6 +780,24 @@ window.L.Control.PartsPreview = window.L.Control.extend({
 			if (isMasterView === 'true')
 				return;
 			e.preventDefault();
+			// A LONG PRESS ALREADY OWNS THIS GESTURE. On the phone strip the
+			// Hammer press has armed _previewTouchGesture and the _dragState
+			// whose release opens the card menu, and set `pointer-events: none`
+			// on every card image, before the Android WebView raises its own
+			// long-press `contextmenu` (~500 ms in, finger still down). With the
+			// image out of hit testing that event lands HERE, on the frame, and
+			// opened this Paste / New slide menu; the release then opened the
+			// card menu over it (_handleTouchEnd -> _openCardMenuFromPress): two
+			// stacked menus for one press (redroid event log, 9/30). The release
+			// decides what opens, a menu or a drop, so this event only keeps the
+			// system menu away. Both halves are needed: a tablet arms the gesture
+			// but no _dragState (phone chrome only, _addDnDTouchHandlers), its
+			// release opens nothing, and this menu stays that press's one menu;
+			// a desktop drag holds _dragState with no gesture. A mouse never
+			// arms the gesture (the Hammer 'press' above) and iOS raises no
+			// `contextmenu` for a touch.
+			if (this._previewTouchGesture && this._dragState)
+				return;
 			// The frame area only offers Paste and Insert, both of which need
 			// edit access, so in read-only mode just suppress the system menu.
 			if (app.map.isReadOnlyMode())
@@ -372,6 +853,7 @@ window.L.Control.PartsPreview = window.L.Control.extend({
 					that._pasteSlide(nPos);
 				} else if (entry.id === 'newslide') {
 					that._map.insertPage(nPos);
+					that._phoneDeckMutationCompleted();
 				}
 				JSDialog.CloseAllDropdowns();
 				return true;
@@ -389,7 +871,12 @@ window.L.Control.PartsPreview = window.L.Control.extend({
 			);
 		}, this);
 
-		window.L.DomEvent.on(img, 'contextmenu', function(e) {
+		// THE CARD MENU. Named rather than inlined into the listener because
+		// the phone reaches it from a LONG PRESS, not from a `contextmenu`
+		// event, and both routes have to arrive at the same menu — see
+		// _handleTouchEnd for the gesture and for why there is no second menu
+		// definition here.
+		var openCardMenu = function(e) {
 			e.stopPropagation();
 			var isMasterView = this._map['stateChangeHandler'].getItemValue('.uno:SlideMasterPage');
 			if (isMasterView === 'true')
@@ -449,14 +936,21 @@ window.L.Control.PartsPreview = window.L.Control.extend({
 					pos: 0,
 				});
 			}
-			entries.push({
-				id: 'slideproperties',
-				type: 'comboboxentry',
-				text: _UNO(isPresentation ? '.uno:SlideSetup' : '.uno:PageSetup', 'presentation'),
-				img: 'PageSetup',
-				class: 'slideproperties',
-				pos: 0,
-			});
+			// Slide setup / page setup is desktop-only on phones. Google:
+			// "no slide-size/page-setup control [...] on phone". It is the
+			// one entry in this menu that changes the deck rather than a
+			// slide, and it opens a core dialog sized for a desktop. Every
+			// other entry here is a direct slide operation and stays.
+			if (!that._isVulcanPhoneChrome()) {
+				entries.push({
+					id: 'slideproperties',
+					type: 'comboboxentry',
+					text: _UNO(isPresentation ? '.uno:SlideSetup' : '.uno:PageSetup', 'presentation'),
+					img: 'PageSetup',
+					class: 'slideproperties',
+					pos: 0,
+				});
+			}
 			if (isPresentation && app.impress.isSlideHidden(partIndex)) {
 				entries.push({
 					id: 'showslide',
@@ -471,13 +965,55 @@ window.L.Control.PartsPreview = window.L.Control.extend({
 				entries.push({
 					id: 'hideslide',
 					type: 'comboboxentry',
-					text: _UNO('.uno:HideSlide', 'presentation'),
+					text: that._isVulcanPhoneChrome()
+						? _('Skip Slide')
+						: _UNO('.uno:HideSlide', 'presentation'),
 					img: 'Hideslide',
 					class: 'hideslide',
 					pos: 0,
 				});
 			}
 
+			// Add Section is desktop-only on phones, and it is a CUT rather
+			// than a gap: SECTIONS DO NOT EXIST IN GOOGLE SLIDES AT ALL.
+			// google-slides.json is searched, not remembered — the string
+			// "section" occurs in exactly one of its 76 features, "Offline
+			// section in the nav drawer", which is a list heading in the file
+			// browser and not a deck structure. There is no phone flow to
+			// copy and no desktop flow either, so this row cannot be scored
+			// against Slides; the standing rule is that what Slides does not
+			// ship is a cut.
+			//
+			// It is also the wrong SHAPE for this menu on a phone. Every
+			// other entry here acts on the slide you long-pressed — copy it,
+			// duplicate it, delete it, hide it. A section is a deck-wide
+			// grouping, the same "changes the deck rather than a slide"
+			// objection that already took Slide Setup out five lines above,
+			// and the filmstrip has no way to SHOW a section once you have
+			// made one: the phone strip renders slide cards only, so the
+			// result of tapping this is invisible on the surface you tapped
+			// it from. Renaming or deleting the section afterwards lives on
+			// the section HEADER's own context menu (_renameSection below),
+			// which the phone strip never draws — so on a phone this is a
+			// one-way door into a state with no control.
+			//
+			// Where it lives instead: this same menu on desktop, which takes
+			// the gate's false branch and is byte-identical to HEAD, plus the
+			// desktop slide-sorter's section headers.
+			//
+			// Both halves of the gate, per the branch rule: isSmallScreenDevice()
+			// alone is not it, because ?vulcanChrome=desktop puts the desktop
+			// chrome back on a phone-sized screen and must keep the desktop
+			// menu with it. _isVulcanPhoneChrome() (:270-274) reads the
+			// pre-paint html.vulcan-mobile-chrome marker as well.
+			//
+			// Deliberately NOT doctype-scoped, matching the Slide Setup gate
+			// directly above: Draw on a phone shares this menu and loses the
+			// entry too. That is if anything more correct there — app.impress
+			// .sections is a presentation namespace, so in a Draw document
+			// `sections` is falsy, isFirstSectionSlide never becomes true and
+			// the row is pushed unconditionally today.
+			//
 			// if not the first section slide then add entry for section
 			var isFirstSectionSlide = false;
 			const sections = app.impress.sections;
@@ -489,7 +1025,7 @@ window.L.Control.PartsPreview = window.L.Control.extend({
 					}
 				}
 			}
-			if (!isFirstSectionSlide) {
+			if (!isFirstSectionSlide && !that._isVulcanPhoneChrome()) {
 				entries.push({
 					id: 'addsection',
 					type: 'comboboxentry',
@@ -517,23 +1053,12 @@ window.L.Control.PartsPreview = window.L.Control.extend({
 			var callback = function(objectType, eventType, object, data, entry) {
 				if (eventType !== 'selected')
 					return false;
-				switch (entry.id) {
+				if (!that._runPhoneSlideMutationAction(entry.id, part)) {
+					switch (entry.id) {
 				case 'copy':
 					that._map._clip.clearSelection();
 					that._map._clip.setTextSelectionType('slide');
 					that._map._clip._execCopyCutPaste('copy', '.uno:CopySlide');
-					break;
-				case 'paste':
-					that._pasteSlide(part);
-					break;
-				case 'newslide':
-					that._map.insertPage();
-					break;
-				case 'duplicateslide':
-					that._map.duplicatePage();
-					break;
-				case 'delete':
-					app.dispatcher.dispatch('deletepage');
 					break;
 				case 'slideproperties':
 					app.socket.sendMessage('uno .uno:PageSetup');
@@ -547,6 +1072,7 @@ window.L.Control.PartsPreview = window.L.Control.extend({
 				case 'addsection':
 					app.socket.sendMessage('uno .uno:AddSlideSection');
 					break;
+					}
 				}
 				JSDialog.CloseAllDropdowns();
 				return true;
@@ -562,11 +1088,20 @@ window.L.Control.PartsPreview = window.L.Control.extend({
 				false,
 				true,
 			);
-		}, this);
+		};
 
+		window.L.DomEvent.on(img, 'contextmenu', openCardMenu, this);
+		// The phone's entry point. Bound here, next to the definition, so the
+		// touch path cannot pick up a different `this` than the mouse path.
+		img.vulcanOpenCardMenu = window.L.bind(openCardMenu, this);
+
+		var box = this._previewRequestBox();
+		// Remembered so _resize can tell a rotation that changes the box from
+		// one that does not.
+		this._phoneCardStripApplied = this._isPhoneCardStrip();
 		var imgSize = this._map.getPreview(i, i,
-						   this.options.maxWidth,
-						   this.options.maxHeight,
+						   box.maxWidth,
+						   box.maxHeight,
 						   {autoUpdate: this.options.autoUpdate,
 						    fetchThumbnail: false});
 
@@ -578,13 +1113,29 @@ window.L.Control.PartsPreview = window.L.Control.extend({
 		return img;
 	},
 
-	// Unlike the visible digit, the alt text and tooltip are plain
-	// attribute strings, so they only ever hold the position they were
-	// given here. Callers that move a preview to a different position
-	// must call this again with the new position.
+	// The visible digit, alt text and tooltip only ever hold the position
+	// they were given here. Callers that move a preview to a different
+	// position must call this again with the new position.
+	//
+	// The digit used to be a CSS counter keyed off DOM order, but Chromium
+	// does not recount when a frame is removed while the counter-increment
+	// sits on a descendant of it (the number span): deleting slide 5 left
+	// the rail reading 4, 6, 7. A counter also skips frames hidden in a
+	// collapsed section, which shifted every later number down. The digit
+	// is now an attribute that partsPreviewControl.css paints as generated
+	// content, so the browser's own Find still does not match rail numbers.
 	_setPreviewPositionLabels: function (img, i) {
+		// A drop relabels the whole deck; most previews keep their position.
+		if (img.labelledPosition === i)
+			return;
+		img.labelledPosition = i;
 		img.setAttribute('alt', _('preview of page %1').replace('%1', String(i + 1)));
-		img.setAttribute('data-cooltip', _('Slide %1').replace('%1', String(i + 1)));
+		// A Draw document (the PDF page canvas) has pages, not slides — same
+		// split as the panel title above.
+		img.setAttribute('data-cooltip',
+			(app.map._docLayer._docType === 'drawing' ? _('Page %1') : _('Slide %1'))
+				.replace('%1', String(i + 1)));
+		img.slideNumber.setAttribute('data-slide-number', String(i + 1));
 	},
 
 	// Relabels every preview from startIndex onward to match its current
@@ -1047,16 +1598,45 @@ window.L.Control.PartsPreview = window.L.Control.extend({
 		);
 	},
 
+	// part is optional: Parts.js fires 'scrolltopart' with no data, but
+	// Events.fire still hands every listener an event object, so "no part was
+	// named" reaches us as {type, target} rather than as undefined. Anything
+	// that is not a part number therefore means the current part - without
+	// that test the event object was used as an index, the tile lookup came
+	// back undefined and the strip silently stopped following the slide in
+	// edit mode (view mode passes a real number and kept working).
 	_scrollToPart: function(part) {
-		var partNo = part !== undefined ? part : this._map.getCurrentPartNumber();
+		var partNo = typeof part === 'number' ? part : this._map.getCurrentPartNumber();
 		// Use the preview tile's parent frame directly instead of child index
 		var node = this._previewTiles[partNo] ? this._previewTiles[partNo].parentNode : null;
 
-		if (node && (!this._previewTiles[partNo] || !this._isPreviewVisible(partNo))) {
+		if (node && (!this._previewTiles[partNo] || !this._isPreviewFullyVisible(partNo))) {
 			if (this.scrollTimer) clearTimeout(this.scrollTimer);
 
 			 this.scrollTimer = setTimeout(() => {
-				node.scrollIntoView();
+				// Inside the phone chrome, scroll only the strip -- and only as
+				// far as it takes. A bare scrollIntoView() defaults to
+				// block:'start' and walks EVERY scrollable ancestor, up to the
+				// document and on into the host document the fork's iframe sits
+				// in. 'nearest' is a no-op for an axis already in view, so the
+				// strip moves the minimum distance and nothing outside it moves
+				// at all. Desktop keeps the stock bare call.
+				//
+				// The gate is _isVulcanPhoneChrome(), NOT _isPhoneCardStrip():
+				// the card strip predicate also requires isPortrait(), because
+				// it additionally decides the portrait card BOX, and
+				// MouseControl.isVulcanPhoneImpress -- which gates the
+				// per-pan-frame caller -- does not test orientation. A phone in
+				// LANDSCAPE therefore satisfied the caller and failed this
+				// branch, and took the page-walking call. Landscape is not a
+				// case where the bare call was right either: vulcan-theme.css
+				// §13i.6 makes #slide-sorter.landscape a VERTICAL rail
+				// (flex-direction: column; overflow-y: auto), so block:'start'
+				// jams the current card to the top of the rail rather than
+				// moving it the least it can. 'nearest' is correct in both
+				// orientations; only the axis it acts on differs.
+				node.scrollIntoView(
+					VulcanFilmstripFollow.scrollIntoViewArg(this._isVulcanPhoneChrome()));
 				this.scrollTimer = null;
 			}, 50);
 		}
@@ -1142,6 +1722,7 @@ window.L.Control.PartsPreview = window.L.Control.extend({
 				|| window.ThisIsTheiOSApp || window.ThisIsTheMacOSApp || window.ThisIsTheWindowsApp;
 			if (canReadClipboard) {
 				let html = '';
+				let readRefused = false;
 				try {
 					const items = await clip._readClipboardItems();
 					let foundItem = null;
@@ -1158,11 +1739,30 @@ window.L.Control.PartsPreview = window.L.Control.extend({
 					}
 				} catch (e) {
 					html = '';
+					readRefused = true;
 				}
 				if (html) {
 					// preferInternal=false skips the pTransferClip shortcut,
 					// so the most recent system-clipboard content wins.
 					clip.dataTransferToDocument(null, false, html, false);
+					this._phoneDeckMutationCompleted();
+					return;
+				}
+				// B-0254: the Android WebView REFUSES the clipboard read. No
+				// PermissionRequest resource exists for it on Android, so the
+				// host cannot grant it. The fallback below then raised the
+				// 'very limited access to the clipboard' sheet and never
+				// pasted (redroid: Copy then Paste on card 3, 10 slides stayed
+				// 10). Core still holds the slide that .uno:CopySlide put in
+				// its own clipboard (pTransferClip), so paste it without the
+				// system clipboard, the way the internal paste does. Only with
+				// the phone chrome on the Android host (the B-0074/B-0094 gate,
+				// _vulcanAndroidReadRefused): an Android tablet keeps the stock
+				// chrome this phase, so it keeps the fallback below, and so does
+				// desktop, where a refusal is the user's own permission answer.
+				if (readRefused && clip._vulcanAndroidReadRefused()) {
+					clip._doInternalPaste(this._map, false);
+					this._phoneDeckMutationCompleted();
 					return;
 				}
 			}
@@ -1171,6 +1771,7 @@ window.L.Control.PartsPreview = window.L.Control.extend({
 			// internal copy): let the paste event / native clipboard bridge
 			// drive things.
 			clip.filterExecCopyPaste('.uno:Paste');
+			this._phoneDeckMutationCompleted();
 		} finally {
 			this._pastePending = false;
 		}
@@ -1185,7 +1786,7 @@ window.L.Control.PartsPreview = window.L.Control.extend({
 			return app.impress.isSlideSelected(partId);
 	},
 
-	_setPart: function (e) {
+	_setPart: function (e, previewFrame) {
 		const editingComment = cool.Comment.isAnyEdit();
 		if (editingComment) {
 			const commentSection = app.sectionContainer.getSectionWithName(app.CSections.CommentList.name);
@@ -1194,8 +1795,10 @@ window.L.Control.PartsPreview = window.L.Control.extend({
 			}
 			return;
 		}
+		if (this._isPhonePresentationSelectionSurface())
+			this._phoneDeleteUndoSelection = null;
 
-		var part = this._findClickedPart(e.target.parentNode);
+		var part = this._findClickedPart(previewFrame || e.target.parentNode);
 		if (part !== -1) {
 			var partId = parseInt(part) - 1; // The first part is just a drop-site for reordering.
 
@@ -1265,7 +1868,8 @@ window.L.Control.PartsPreview = window.L.Control.extend({
 
 	_updatePart: function (e) {
 		if ((e.docType === 'presentation' || e.docType === 'drawing') && e.part >= 0) {
-			this._map.getPreview(e.part, e.part, this.options.maxWidth, this.options.maxHeight, {autoUpdate: this.options.autoUpdate});
+			var box = this._previewRequestBox();
+			this._map.getPreview(e.part, e.part, box.maxWidth, box.maxHeight, {autoUpdate: this.options.autoUpdate});
 		}
 	},
 
@@ -1340,7 +1944,8 @@ window.L.Control.PartsPreview = window.L.Control.extend({
 						this._previewTiles[it].src = knownPreview.src;
 						this._previewTiles[it].fetched = knownPreview.fetched;
 					} else {
-						this._map.getPreview(it, it, this.options.maxWidth, this.options.maxHeight, {autoUpdate: this.options.autoUpdate});
+						var box = this._previewRequestBox();
+						this._map.getPreview(it, it, box.maxWidth, box.maxHeight, {autoUpdate: this.options.autoUpdate});
 					}
 				}
 			}
@@ -1356,6 +1961,16 @@ window.L.Control.PartsPreview = window.L.Control.extend({
 			return;
 
 		if (this._previewInitialized) {
+			// A rotation swaps the phone card strip for the stock landscape
+			// rail, and the two ask for different preview boxes. The inline
+			// size is only written when a preview is (re)requested, so
+			// without this the size fitted for the old orientation survives
+			// into the new one's CSS. Nothing else can reach this branch:
+			// every other form factor's box is orientation-independent.
+			var cardStrip = this._isPhoneCardStrip();
+			if (cardStrip !== this._phoneCardStripApplied)
+				this._invalidateParts();
+
 			clearTimeout(this._resizeTimer);
 			this._resizeTimer = setTimeout(window.L.bind(this._onScroll, this), 50);
 		}
@@ -1432,6 +2047,19 @@ window.L.Control.PartsPreview = window.L.Control.extend({
 			}
 
 			this._ensureVisiblePreviews(); // Load previews
+
+			// B-0247: follow the slide the user just added. The add-slide
+			// button (and the card menu's New Slide / Duplicate / Paste on the
+			// last card) makes the new slide current, but nothing on this
+			// 'updateparts' path scrolled the strip, so its card was left off
+			// screen: redroid, 10 slides, the new card at x 1156-1271 against
+			// a 360 px strip at scrollLeft 0, with no strip scroll at all.
+			// Only the CURRENT slide is followed (a collaborator's insert
+			// does not move this user's strip), and only on the phone
+			// chrome (desktop keeps the stock behaviour).
+			if (this._isVulcanPhoneChrome() &&
+				newIndex === this._map._docLayer._selectedPart)
+				this._scrollToPart(newIndex);
 		}
 	},
 
@@ -1458,11 +2086,25 @@ window.L.Control.PartsPreview = window.L.Control.extend({
 	_ensureVisiblePreviews: function () {
 		if (this._previewTimer) clearTimeout(this._previewTimer);
 		this._previewTimer = setTimeout(window.L.bind(function () {
+			// R6-6: the phone read posture hides the strip outright
+			// (vulcan-theme.css 13i.1c). Hidden, every getBoundingClientRect
+			// below is 0x0 and the intersection test degenerates to TRUE for
+			// every card — a browse-mode open would fetch the WHOLE deck's
+			// previews. Refuse while the strip is not laid out;
+			// _onVulcanPermissionChanged re-kicks this the moment edit entry
+			// shows it. Phone chrome only: the desktop Navigation card's
+			// sorter can also be hidden (panel closed) and stock has always
+			// fetched there — that stays byte for byte.
+			if (this._isVulcanPhoneChrome() &&
+				this._partsPreviewCont &&
+				this._partsPreviewCont.offsetParent === null)
+				return;
+			var box = this._previewRequestBox();
 			for (var i = 0; i < this._previewTiles.length; ++i) {
 				if (this._isPreviewVisible(i)) {
 					var img = this._previewTiles[i];
 					if (img && !img.fetched) {
-						this._map.getPreview(i, i, this.options.maxWidth, this.options.maxHeight, {autoUpdate: this.options.autoUpdate});
+						this._map.getPreview(i, i, box.maxWidth, box.maxHeight, {autoUpdate: this.options.autoUpdate});
 					}
 				}
 			}
@@ -1471,6 +2113,19 @@ window.L.Control.PartsPreview = window.L.Control.extend({
 
 	_onScroll: function () {
 		this._ensureVisiblePreviews();
+	},
+
+	// R6-6: the read posture hides the strip (vulcan-theme.css 13i.1c) and
+	// the loader above refuses a hidden strip, so the flip INTO edit is the
+	// moment the freshly shown cards must load — nothing else fires on the
+	// posture flip alone. The measurement itself is deferred inside
+	// _ensureVisiblePreviews (setTimeout 0), so by the time the strip is
+	// measured the posture class flip has landed whatever order the
+	// permission listeners ran in.
+	_onVulcanPermissionChanged: function (e) {
+		if (!e || !e.detail || e.detail.perm !== 'edit') return;
+		if (!this._isVulcanPhoneChrome()) return;
+		this._onScroll();
 	},
 
 	_isPreviewVisible: function(part) {
@@ -1485,6 +2140,27 @@ window.L.Control.PartsPreview = window.L.Control.extend({
 			viewRect.left <= elemRect.right &&
 			elemRect.top <= viewRect.bottom &&
 			viewRect.top <= elemRect.bottom)
+	},
+
+	// Stricter than _isPreviewVisible, which asks whether the tile overlaps
+	// the strip at all - the right question for "is it worth fetching this
+	// bitmap", the wrong one for "has the user already got a good look at
+	// it". A tile with a few pixels poking past the edge intersects, so the
+	// intersection test declines to scroll and leaves the current slide
+	// clipped at the end of the strip. Only a tile that is wholly inside the
+	// strip needs no scrolling.
+	_isPreviewFullyVisible: function(part) {
+		var el = this._previewTiles[part];
+		if (!el)
+			return false;
+
+		var elemRect = el.getBoundingClientRect();
+		var viewRect = document.getElementById('slide-sorter').getBoundingClientRect();
+
+		return (elemRect.left >= viewRect.left &&
+			elemRect.right <= viewRect.right &&
+			elemRect.top >= viewRect.top &&
+			elemRect.bottom <= viewRect.bottom)
 	},
 
 	_addDnDHandlers: function (elem) {
@@ -1512,48 +2188,103 @@ window.L.Control.PartsPreview = window.L.Control.extend({
 		this._containerDnDHandlersAdded = true;
 	},
 
-	_addDnDTouchHandlers: function (e) {
-		$(e.target).bind('touchmove', this._handleTouchMove.bind(this));
-		$(e.target).bind('touchcancel', this._handleTouchCancel.bind(this));
-		$(e.target).bind('touchend', this._handleTouchEnd.bind(this));
+	_addDnDTouchHandlers: function (e, owner, frame, img) {
+		// Hammer can report a second press before the first touch has released.
+		// Keep the original owner/state intact so its teardown cannot be orphaned.
+		if (this._previewTouchGesture)
+			return;
+		this._previewTouchGesture = { owner: owner, frame: frame, img: img };
+		$(owner).bind('touchmove', this._handleTouchMove.bind(this));
+		$(owner).bind('touchcancel', this._handleTouchCancel.bind(this));
+		$(owner).bind('touchend', this._handleTouchEnd.bind(this));
 
 		// To avoid having to add a new message to move an arbitrary part, let's select the
 		// slide that is being dragged.
-		var part = this._findClickedPart(e.target.parentNode);
-		if (part !== null) {
+		var part = this._findClickedPart(frame);
+		// -1, not null, is how _findClickedPart says the press landed outside
+		// every frame; the old null test let that through as part -2, which
+		// selectPart then dereferenced off the end of the part list.
+		if (part !== -1) {
 			var partId = parseInt(part) - 1; // The first part is just a drop-site for reordering.
-			this._map.setPart(partId);
-			this._map.selectPart(partId, 1, false); // And select.
+			if (!this._preparePhoneSlidePress(partId)) {
+				this._map.setPart(partId);
+				this._map.selectPart(partId, 1, false); // And select.
+			}
 		}
 		this.draggedSlide = window.L.DomUtil.create('img', '', document.body);
-		this.draggedSlide.setAttribute('src', e.target.currentSrc);
+		this.draggedSlide.setAttribute('src', img.currentSrc);
 		$(this.draggedSlide).css('position', 'absolute');
-		$(this.draggedSlide).css('height', e.target.height);
-		$(this.draggedSlide).css('width', e.target.width);
-		$(this.draggedSlide).css('left', e.center.x - (e.target.width/2));
-		$(this.draggedSlide).css('top', e.center.y - e.target.height);
+		$(this.draggedSlide).css('height', img.height);
+		$(this.draggedSlide).css('width', img.width);
+		$(this.draggedSlide).css('left', e.center.x - (img.width/2));
+		$(this.draggedSlide).css('top', e.center.y - img.height);
 		$(this.draggedSlide).css('z-index', '10');
 		$(this.draggedSlide).css('opacity', '75%');
 		$(this.draggedSlide).css('pointer-events', 'none');
 		$('.preview-img').css('pointer-events', 'none');
 
+		// google-slides.json (reorder slides): "drag the selection
+		// horizontally to the new position. Neighbors part to show the drop
+		// target." A touch drag used to get neither half of that: it held the
+		// strip still, so only the positions already on screen were reachable,
+		// and it marked the drop with a border on the frame under the finger
+		// rather than by parting anything.
+		//
+		// So on the phone the touch drag runs the same _dragState the
+		// drag-and-drop path runs. The pressed slides' frames close, the edge
+		// auto-scroll steers off the same {pointer, autoScrollId} fields, and
+		// _updateDropGap opens a slide-sized gap at the insertion point: the
+		// neighbours part. _handleTouchEnd then drops on that gap's
+		// insertIndex, so what the gap shows and where the slide lands are the
+		// same number.
+		//
+		// includeSelection is true: the press above just set the selection,
+		// and 'moveselectedclientparts' moves whatever is selected, so the
+		// frames that close have to be exactly the slides app.impress reports
+		// as selected -- which is what _beginDrag(_, true) collects.
+		//
+		// Phone-gated on BOTH halves (?vulcanChrome=desktop forces desktop
+		// chrome on a phone-sized screen). With the gate false _dragState
+		// stays null here, every touch handler below takes its pre-existing
+		// dropsite-highlight path, and the drag behaves exactly as before.
+		if (this._isVulcanPhoneChrome() && part !== -1 && partId >= 0) {
+			// The ghost's own size was fixed above from img, so the grab
+			// offset is taken from the same measurement at the same moment
+			// rather than re-read from the live picture on every move: the
+			// frame under it is about to collapse, and a ghost whose offset
+			// and size disagree would slide out from under the finger.
+			this._touchGhostGrab = { x: img.width / 2, y: img.height };
+			this._beginDrag(partId, true);
+			this._dragState.touchOrigin = { x: e.center.x, y: e.center.y };
+			this._dragState.touchDragStarted = false;
+		}
+
 		this.currentNode = null;
 		this.previousNode = null;
 	},
 
-	_removeDnDTouchHandlers: function (e) {
-		$(e.target).unbind('touchmove');
-		$(e.target).unbind('touchcancel');
-		$(e.target).unbind('touchend');
+	_removeDnDTouchHandlers: function () {
+		var gesture = this._previewTouchGesture;
+		if (gesture && gesture.owner) {
+			$(gesture.owner).unbind('touchmove');
+			$(gesture.owner).unbind('touchcancel');
+			$(gesture.owner).unbind('touchend');
+		}
+		this._previewTouchGesture = null;
 		$('.preview-img').css('pointer-events', '');
+
+		// A phone touch drag's own state is _dragState, ended by the
+		// _finishDrag call in _handleTouchEnd/_handleTouchCancel -- which also
+		// cancels its auto-scroll frame. Only the ghost's grab offset is left.
+		this._touchGhostGrab = null;
 	},
 
-	_handleTouchMove: function (e) {
-		if (e.preventDefault) {
-			e.preventDefault();
-		}
-
-		this.currentNode = document.elementFromPoint(e.originalEvent.touches[0].clientX, e.originalEvent.touches[0].clientY);
+	// The drop-site highlight for the frame under a point, and the
+	// this.currentNode that _handleTouchEnd reads as the drop position.
+	// Called from touchmove, and from the edge auto-scroll, which moves the
+	// frames under a finger that is holding still.
+	_updateTouchDropTarget: function (clientX, clientY) {
+		this.currentNode = document.elementFromPoint(clientX, clientY);
 
 		if (this.currentNode !== this.previousNode && this.previousNode !== null) {
 			$('.preview-frame').removeClass('preview-img-dropsite');
@@ -1564,26 +2295,134 @@ window.L.Control.PartsPreview = window.L.Control.extend({
 		}
 
 		this.previousNode = this.currentNode;
+	},
 
-		$(this.draggedSlide).css('left', e.originalEvent.touches[0].clientX - (e.target.width/2));
-		$(this.draggedSlide).css('top', e.originalEvent.touches[0].clientY - e.target.height);
+	_handleTouchMove: function (e) {
+		if (e.preventDefault) {
+			e.preventDefault();
+		}
+		const gesture = this._previewTouchGesture;
+		const img = gesture && gesture.img;
+		if (!img)
+			return false;
+
+		const touchX = e.originalEvent.touches[0].clientX;
+		const touchY = e.originalEvent.touches[0].clientY;
+
+		// A phone drag (_dragState set in _addDnDTouchHandlers) shows the drop
+		// position by parting the neighbours, and the under-the-finger
+		// highlight is deliberately not applied on top of it: the two do not
+		// always name the same position -- with the finger on the left half of
+		// a slide the gap opens before that slide while the highlight sits on
+		// it -- and only the gap matches where the release inserts.
+		//
+		// The finger position also feeds the shared edge auto-scroll, which
+		// only scrolls the strip's own scrollLeft/scrollTop, never
+		// scrollIntoView, so it cannot walk up to the page and yank it
+		// vertically.
+		const state = this._dragState;
+		if (state) {
+			if (this._shouldUpdatePhoneTouchDrag(state, touchX, touchY)) {
+				state.pointer = { x: touchX, y: touchY };
+				this._updateDropGap();
+				this._ensureAutoScroll();
+			}
+		} else {
+			this._updateTouchDropTarget(touchX, touchY);
+		}
+
+		const grab = state && this._touchGhostGrab ?
+			this._touchGhostGrab : { x: img.width / 2, y: img.height };
+		$(this.draggedSlide).css('left', touchX - grab.x);
+		$(this.draggedSlide).css('top', touchY - grab.y);
 		return false;
 	},
 
-	_handleTouchCancel: function(e) {
+	_handleTouchCancel: function() {
+		// A cancelled phone drag puts the slides back: the gap closes and the
+		// collapsed frames grow again at their original position.
+		this._finishDrag(true);
 		$('.preview-frame').removeClass('preview-img-dropsite');
 		$('.slide-section-dropsite').removeClass('slide-section-dropsite');
 		$(this.draggedSlide).remove();
-		this._removeDnDTouchHandlers(e);
+		this._removeDnDTouchHandlers();
 	},
 
 	_handleTouchEnd: function (e) {
 		if (e.stopPropagation) {
 			e.stopPropagation();
 		}
-		if (this.currentNode) {
+		// A phone drag drops on the gap it has been showing. insertIndex is
+		// the slide the dragged ones go in front of, so position is the slide
+		// they land after (-1 = the front of the deck) -- the same message and
+		// the same instant local settle _handleContainerDrop sends, off the
+		// same field, so the parting and the drop cannot disagree.
+		//
+		// insertIndex is null when the finger never moved (no pointer, so no
+		// gap was ever placed): that is a long-press with no drag, not a
+		// reorder, and it puts the slide back rather than moving it.
+		// A long press that never moved is not a cancelled reorder, it is
+		// Google's slide-selection gesture, and it is where SKIP SLIDE lives
+		// on a phone (parity matrix row 23).
+		//
+		// google-slides.json is explicit that these are the SAME press:
+		// "Drag-to-reorder slides" is "Long-press a slide in the filmstrip
+		// (optionally tap more to select several), THEN drag the selection
+		// horizontally"; "Slide long-press multi-select in filmstrip" is
+		// "Touch and hold a slide in the bottom strip to select it"; and
+		// "Skip slide / Show slide" is "Long-press a slide, More > Skip
+		// Slide". One gesture, and what it does is decided by whether the
+		// finger then travels. So no new gesture is invented here and none is
+		// taken away — the drag keeps the press it already had, and the press
+		// that ends where it started stops being a no-op.
+		//
+		// WHY THE MENU WAS UNREACHABLE, since the entries themselves are not
+		// new: Show slide / Hide slide have been in the card menu the whole
+		// time (see openCardMenu in _createPreview, which pushes one or the
+		// other off app.impress.isSlideHidden and is NOT among the two rows
+		// the phone gate removes). The menu's only opener was a DOM
+		// `contextmenu` bind, and on the phone strip the long-press slot that
+		// would raise it is taken by the Hammer.Press that arms this drag
+		// (_createPreview -> _addDnDTouchHandlers), which additionally sets
+		// `pointer-events: none` on every .preview-img for the duration. The
+		// gap was the opener, not the command.
+		//
+		// The idiom is the house one: Control.Tabs.js answers Hammer.Press on
+		// a sheet tab by opening that tab's menu on small screens. Same
+		// gesture, same "the press IS the menu" contract; the only difference
+		// is that a slide card's press has to let a drag win first, which is
+		// what the insertIndex test below is.
+		//
+		// Already both-halves gated, with nothing added: _dragState is only
+		// ever set under this._isVulcanPhoneChrome() (_addDnDTouchHandlers),
+		// so ?vulcanChrome=desktop takes the `else if (this.currentNode)`
+		// path below and behaves exactly as it does today.
+		var pressNoDrag = null;
+		const gesture = this._previewTouchGesture;
+		const dragState = this._dragState;
+		if (dragState) {
+			if (dragState.insertIndex === null) {
+				this._finishDrag(true);
+				this._setPhoneSlideSelectionMode(true);
+				// Opened after the cleanup at the bottom of this function,
+				// not here: _removeDnDTouchHandlers has to restore
+				// `pointer-events` on the cards first, or the menu would come
+				// up over a strip that cannot be tapped.
+				pressNoDrag = gesture && gesture.img;
+			} else {
+				app.socket.sendMessage('moveselectedclientparts position=' +
+					(dragState.insertIndex - 1));
+				this._applyDropLocally(dragState.insertIndex, dragState.draggedParts);
+				this._finishDrag(false);
+			}
+		} else if (this.currentNode) {
 			var part = this._findClickedPart(this.currentNode);
-			if (part !== null) {
+			// A release that landed on no frame at all - the strip's own
+			// background, the dead band under the cards, anywhere off the
+			// strip - is not a drop position. _findClickedPart says so with
+			// -1, which the old null test let through: -1 - 1 clamped back to
+			// -1 and moved the slide to the front of the deck instead.
+			if (part !== -1) {
 				var partId = parseInt(part) - 1; // First frame is a drop-site for reordering.
 				if (partId < 0)
 					partId = -1; // First item is -1.
@@ -1593,8 +2432,54 @@ window.L.Control.PartsPreview = window.L.Control.extend({
 		$('.preview-frame').removeClass('preview-img-dropsite');
 		$('.slide-section-dropsite').removeClass('slide-section-dropsite');
 		$(this.draggedSlide).remove();
-		this._removeDnDTouchHandlers(e);
+		this._removeDnDTouchHandlers();
+		if (pressNoDrag)
+			this._completePhoneSlideLongPress(pressNoDrag, e);
 		return false;
+	},
+
+	// Raise the card menu for a long press that ended where it began.
+	//
+	// It calls the SAME openCardMenu the desktop `contextmenu` listener calls,
+	// through the reference _createPreview stashed on the card, rather than
+	// building a second list of entries. That is the point: Show slide / Hide
+	// slide, Copy, Paste, New slide, Duplicate and Delete are defined once,
+	// the read-only filter at the end of that function applies once, and a row
+	// added to the desktop menu later cannot silently miss the phone.
+	//
+	// The argument is a plain object rather than a synthesised MouseEvent
+	// because that function only ever reads five things off its event, and a
+	// real dispatched `contextmenu` would additionally bubble to the FRAME's
+	// own listener (Paste / New slide, for the gap between cards) — a second,
+	// wrong menu behind the right one. openCardMenu guards that for the mouse
+	// with e.stopPropagation(); calling it directly means there is nothing to
+	// stop.
+	//
+	// The coordinates are the release point, which for a press with no drag is
+	// also the press point, so the menu opens under the finger that asked for
+	// it.
+	_openCardMenuFromPress: function (img, touchEvent) {
+		if (!img || typeof img.vulcanOpenCardMenu !== 'function')
+			return;
+
+		var touch = touchEvent && touchEvent.originalEvent &&
+			touchEvent.originalEvent.changedTouches &&
+			touchEvent.originalEvent.changedTouches[0];
+		// A release with no reported touch point still gets a menu, anchored
+		// to the card instead of to the finger: losing the only phone route to
+		// Skip slide is worse than a menu that opens a few pixels off.
+		var rect = img.getBoundingClientRect();
+		var clientX = touch ? touch.clientX : rect.left + rect.width / 2;
+		var clientY = touch ? touch.clientY : rect.top + rect.height / 2;
+
+		var noop = function () {};
+		img.vulcanOpenCardMenu({
+			target: img,
+			clientX: clientX,
+			clientY: clientY,
+			preventDefault: noop,
+			stopPropagation: noop,
+		});
 	},
 
 	_handleDragStart: function (e) {
@@ -1875,6 +2760,11 @@ window.L.Control.PartsPreview = window.L.Control.extend({
 	// drag, so slides outside the visible area can be reached. Runs as an
 	// animation frame loop; the speed grows the closer the pointer is to
 	// the edge, and the loop ends when the pointer moves away from it.
+	//
+	// One state serves both drags that can want it -- the HTML5
+	// drag-and-drop one on a pointer device and the phone's touch drag --
+	// because the phone touch drag is a _dragState too. They never overlap:
+	// dragstart does not fire for a touch drag.
 	_autoScrollStep: function () {
 		const state = this._dragState;
 		if (!state)
@@ -1904,7 +2794,9 @@ window.L.Control.PartsPreview = window.L.Control.extend({
 		else
 			this._partsPreviewCont.scrollTop += speed;
 
-		// Scrolling moved the frames under the pointer.
+		// Scrolling moved the frames under the pointer, so the insertion gap
+		// is re-placed: it keeps naming the position the finger is over as
+		// slides scroll past under a finger that is holding still.
 		this._updateDropGap();
 
 		state.autoScrollId = requestAnimationFrame(this._autoScrollStep.bind(this));
@@ -1976,8 +2868,8 @@ window.L.Control.PartsPreview = window.L.Control.extend({
 			this._previewTiles.indexOf(anchorTile) : this._previewTiles.length;
 		Array.prototype.splice.apply(this._previewTiles, [insertAt, 0].concat(draggedTiles));
 
-		// The slide numbers in the alt text and tooltip are positional,
-		// so renumber every preview after the previews change order.
+		// The visible digit, alt text and tooltip are positional, so
+		// renumber every preview after the previews change order.
 		this._updatePreviewPositionLabelsFrom(0);
 	},
 
@@ -2057,11 +2949,13 @@ window.L.Control.PartsPreview = window.L.Control.extend({
 		    !this._previewTiles)
 			return;
 
+		var box = this._previewRequestBox();
+		this._phoneCardStripApplied = this._isPhoneCardStrip();
 		for (var part = 0; part < this._previewTiles.length; part++) {
 			this._previewTiles[part].fetched = false;
 			var imgSize = this._map.getPreview(part, part,
-					     this.options.maxWidth,
-					     this.options.maxHeight,
+					     box.maxWidth,
+					     box.maxHeight,
 					     {autoUpdate: this.options.autoUpdate,
 					      fetchThumbnail: this.options.fetchThumbnail});
 			window.L.DomUtil.setStyle(this._previewTiles[part], 'width', imgSize.width + 'px');
@@ -2083,9 +2977,10 @@ window.L.Control.PartsPreview = window.L.Control.extend({
 			return;
 		}
 		this._previewTiles[this._map._docLayer._selectedPart].fetched = false;
+		var box = this._previewRequestBox();
 		this._map.getPreview(this._map._docLayer._selectedPart, this._map._docLayer._selectedPart,
-				     this.options.maxWidth,
-				     this.options.maxHeight,
+				     box.maxWidth,
+				     box.maxHeight,
 				     {autoUpdate: this.options.autoUpdate,
 				      fetchThumbnail: this.options.fetchThumbnail});
 	},
@@ -2103,6 +2998,12 @@ window.L.Control.PartsPreview = window.L.Control.extend({
 		if (!e || !e.status)
 			return;
 		if (!this._previewInitialized)
+			return;
+		// Vulcan Office: the second load-time focus grab, gated by
+		// the same host policy as the one in Map.js 'docloaded'. A host that
+		// asked us not to take focus on load must not have it taken by the
+		// slide filmstrip either. Absent policy keeps today's behaviour.
+		if (this._map._vulcanAutoFocusOnLoad === false)
 			return;
 
 		var active = document.activeElement;

@@ -15,14 +15,14 @@ msgstr ""
 #. App name - 50 chars limit
 #: descriptions/google-play.html%2Bhtml.body.h3:5-1
 msgid "Collabora Office: LibreOffice, OpenOffice & more"
-msgstr "Collabora Office: LibreOffice, OpenOffice ແລະ ອື່ນໆ"
+msgstr "Vulcan Office: Vulcan Office, OpenOffice ແລະ ອື່ນໆ"
 
 #. Short description - 80 chars limit
 #: descriptions/google-play.html%2Bhtml.body.p:9-1
 msgid ""
 "LibreOffice based editor for Microsoft Office, LibreOffice and OpenOffice "
 "docs."
-msgstr "ໂປຣແກຣມແກ້ໄຂເອກະສານ MS Office ແລະ LibreOffice ທີ່ອີງໃສ່ LibreOffice."
+msgstr "ໂປຣແກຣມແກ້ໄຂເອກະສານ MS Office ແລະ Vulcan Office ທີ່ອີງໃສ່ Vulcan Office."
 
 #. Long description
 #: descriptions/google-play.html%2Bhtml.body.p:13-1
@@ -32,7 +32,7 @@ msgid ""
 "and now it's on Android, enhancing your possibilities to work on mobile and "
 "for collaboration."
 msgstr ""
-"Collabora Office ແມ່ນໂປຣແກຣມແກ້ໄຂຂໍ້ຄວາມ, ສະເປຣດຊີດ ແລະ ນຳສະເໜີ ທີ່ອີງໃສ່ LibreOffice "
+"Vulcan Office ແມ່ນໂປຣແກຣມແກ້ໄຂຂໍ້ຄວາມ, ສະເປຣດຊີດ ແລະ ນຳສະເໜີ ທີ່ອີງໃສ່ Vulcan Office "
 "ເຊິ່ງເປັນຊຸດໂປຣແກຣມຫ້ອງການແບບໂອເພັນຊອດ (Open Source) ທີ່ໄດ້ຮັບຄວາມນິຍົມທີ່ສຸດໃນໂລກ - ແລະ "
 "ຕອນນີ້ມີໃຫ້ໃຊ້ໃນ Android ແລ້ວ, ເພີ່ມຂີດຄວາມສາມາດໃນການເຮັດວຽກຜ່ານມືຖື ແລະ ການເຮັດວຽກຮ່ວມກັນ."
 
@@ -92,9 +92,9 @@ msgid ""
 "Windows, Mac, and Linux. This, combined with a new front-end based on "
 "Collabora Online, reads and saves documents similarly to LibreOffice desktop."
 msgstr ""
-"Collabora Office ສຳລັບ Android ແມ່ນໃຊ້ກົນໄກດຽວກັນກັບ LibreOffice ສຳລັບ Windows, "
-"Mac, ແລະ Linux. ສິ່ງນີ້, ເມື່ອລວມເຂົ້າກັບສ່ວນຕິດຕໍ່ຜູ້ໃຊ້ໃໝ່ທີ່ອີງໃສ່ Collabora Online, "
-"ຈະເຮັດໃຫ້ການອ່ານ ແລະ ບັນທຶກເອກະສານຄ້າຍຄືກັບ LibreOffice ເວີຊັນເດັສທັອບ."
+"Vulcan Office ສຳລັບ Android ແມ່ນໃຊ້ກົນໄກດຽວກັນກັບ Vulcan Office ສຳລັບ Windows, "
+"Mac, ແລະ Linux. ສິ່ງນີ້, ເມື່ອລວມເຂົ້າກັບສ່ວນຕິດຕໍ່ຜູ້ໃຊ້ໃໝ່ທີ່ອີງໃສ່ Vulcan Office, "
+"ຈະເຮັດໃຫ້ການອ່ານ ແລະ ບັນທຶກເອກະສານຄ້າຍຄືກັບ Vulcan Office ເວີຊັນເດັສທັອບ."
 
 #. Long description
 #: descriptions/google-play.html%2Bhtml.body.p:48-1
@@ -104,7 +104,7 @@ msgid ""
 "developing Android support since 2012, with the help of Google Summer of "
 "Code students Andrzej Hunt, Iain Billet and Kaishu Sahu."
 msgstr ""
-"ວິສະວະກອນຂອງ Collabora ປະກອບມີ Tor Lillqvist, Tomaž Vajngerl, Michael Meeks, "
+"ວິສະວະກອນຂອງ Vulcan Office ປະກອບມີ Tor Lillqvist, Tomaž Vajngerl, Michael Meeks, "
 "Miklos Vajna, Jan Holešovský, Mert Tümer, Rashesh Padia ແລະ Skyler Grey "
 "ໄດ້ພັດທະນາການຮອງຮັບ Android ມາຕັ້ງແຕ່ປີ 2012, ໂດຍໄດ້ຮັບການຊ່ວຍເຫຼືອຈາກນັກສຶກສາໃນໂຄງການ "
 "Google Summer of Code ຄື Andrzej Hunt, Iain Billet ແລະ Kaishu Sahu."

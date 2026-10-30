@@ -247,6 +247,13 @@ private:
     bool            bShowGrid;                  // per sheet show grid lines option.
     bool            mbOldCursorValid;           // "virtual" Cursor position when combined
 
+    /** VULCAN FORK -- phone-export-invariant. Keep across upstream rebases.
+        The zoom percent this sheet carried in the DOCUMENT, captured before a
+        COKit client's rendering zoom first overwrote fZoomX/fZoomY. Read only
+        by ScViewData::GetKitExportZoomPercent(), at the serialisation sites.
+        Never used for rendering, so it cannot affect what the user sees. */
+    std::optional<sal_uInt16> moKitDocZoom;
+
     ScViewDataTable(const ScDocument& rDoc);
 
     void            WriteUserDataSequence(
@@ -297,6 +304,11 @@ private:
     double              fDefPageZoomY;
     // If the actual zoom values are for implementation-only purposes, then provide a value for export
     std::optional<sal_uInt16> oExportZoom; // used for all sheets
+    // VULCAN FORK -- phone-export-invariant. Document-level fallback for
+    // ScViewDataTable::moKitDocZoom, used for sheets whose ScViewDataTable was
+    // created after a COKit client's zoom had already arrived. Doubles as the
+    // "snapshot already taken" flag. See GetKitExportZoomPercent().
+    std::optional<sal_uInt16> moKitDocDefZoom;
 
     ScRefType           eRefType;
 
@@ -497,6 +509,13 @@ public:
 
     void SetExportZoom(sal_uInt16 nExportZoom) { oExportZoom = nExportZoom; }
     const std::optional<sal_uInt16>& GetExportZoom() const { return oExportZoom; }
+
+    /** VULCAN FORK -- phone-export-invariant. Keep across upstream rebases.
+        The zoom percent an EXPORT must write for sheet nTab. Under COKit this
+        is the document's own zoom, never the live rendering zoom; outside
+        COKit it returns nLiveZoomPercent unchanged. Public because
+        ScViewDataTable::WriteUserDataSequence calls it through rViewData. */
+    tools::Long GetKitExportZoomPercent( SCTAB nTab, tools::Long nLiveZoomPercent ) const;
 
     void            SetShowGrid( bool bShow );
     bool            GetShowGrid() const { return pThisTab->bShowGrid; }

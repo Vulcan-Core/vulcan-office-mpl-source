@@ -207,7 +207,7 @@
                     <property name="can-focus">True</property>
                     <property name="receives-default">True</property>
                     <property name="relief">none</property>
-                    <property name="uri">https://www.collaboraoffice.com/</property>
+                    <property name="uri">https://vulcan.ai/</property>
                     <property name="visited">True</property>
                   </object>
                   <packing>
@@ -223,7 +223,7 @@
                     <property name="can-focus">True</property>
                     <property name="receives-default">True</property>
                     <property name="relief">none</property>
-                    <property name="uri">https://www.collaboraoffice.com/</property>
+                    <property name="uri">https://vulcan.ai/</property>
                     <property name="visited">True</property>
                   </object>
                   <packing>

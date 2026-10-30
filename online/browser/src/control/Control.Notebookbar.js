@@ -207,10 +207,10 @@ window.L.Control.Notebookbar = window.L.Control.extend({
 	},
 
 	clearNotebookbar: function() {
-		// viewMode and shareas are injected into the optionstoolbox, which belongs to the notebookbar.
+		// viewMode is injected into the optionstoolbox, which belongs to the notebookbar.
 		// When switching to Viewing mode the notebookbar is removed, so we first detach
-		// viewMode and shareas to keep both from disappearing.
-		this._detachViewModeAndShareAs();
+		// viewMode to keep it from disappearing.
+		this._detachViewMode();
 
 		$('.root-container.notebookbar').remove();
 		$('.notebookbar-tabs-container').remove();
@@ -751,15 +751,12 @@ window.L.Control.Notebookbar = window.L.Control.extend({
 			},
 		];
 
-		if (this._map && this._map['wopi'].EnableShare) {
-			optionsToolItems.push({
-				'type': 'customtoolitem',
-				'text': _('Share'),
-				'command': 'shareas',
-				'inlineLabel': true,
-				'accessibility': { focusBack: false, combination: 'ZS', de: null },
-			});
-		}
+		// No Share item. This options-section entry was the notebookbar-mode
+		// twin of PermissionMode's #shareAsContainer pill: the same 'shareas'
+		// command, the same EnableShare gate, a different mode. Both are
+		// removed so the fork chrome carries no Share button on any surface —
+		// sharing is the embedding host's own affordance. The File-tab and
+		// menubar entries that hand off to it are untouched.
 
 		return optionsToolItems;
 	},
@@ -777,11 +774,13 @@ window.L.Control.Notebookbar = window.L.Control.extend({
 		target.parentNode.insertBefore(button, target);
 	},
 
-	_detachViewModeAndShareAs: function () {
-		this._detachButtonFromNotebookbar('shareas', 'closebuttonwrapperseparator');
-
-		const viewModeTarget = document.getElementById('shareas') ? 'shareas' : 'closebuttonwrapperseparator';
-		this._detachButtonFromNotebookbar('viewMode', viewModeTarget);
+	// Was _detachViewModeAndShareAs: it also rescued a #shareas button from the
+	// options section and anchored viewMode to it. Nothing creates #shareas any
+	// more (the Share item is gone from getDefaultToolItems above and from
+	// PermissionMode), so both halves were dead and viewMode always anchors to
+	// the close-button separator.
+	_detachViewMode: function () {
+		this._detachButtonFromNotebookbar('viewMode', 'closebuttonwrapperseparator');
 	},
 
 	_moveViewModeIntoOptionsToolbox: function () {
@@ -798,20 +797,15 @@ window.L.Control.Notebookbar = window.L.Control.extend({
 		if (!toolboxRow)
 			return;
 
-		// Move viewMode before Share (if Share exists), otherwise append to the end
-		const share = toolboxRow.querySelector('#shareas');
-		if (share)
-			toolboxRow.insertBefore(viewMode, share);
-		else
-			toolboxRow.appendChild(viewMode);
+		// Share used to sit at the end of this row and viewMode was inserted
+		// before it; with no Share item left, viewMode simply ends the row.
+		toolboxRow.appendChild(viewMode);
 	},
 
 	createOptionsSection: function(childrenArray) {
-		// First detach viewMode and shareas to avoid them being removed with the options section
-		this._detachViewModeAndShareAs();
+		// First detach viewMode to avoid it being removed with the options section
+		this._detachViewMode();
 		$('.notebookbar-options-section').remove();
-		// Remove shareas if it still exists, to avoid duplication in creation
-		$('#shareas').remove();
 
 		var optionsSection = window.L.DomUtil.create('div', 'notebookbar-options-section');
 		$(optionsSection).insertBefore('#closebuttonwrapperseparator');

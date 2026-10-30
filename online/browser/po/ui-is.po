@@ -5077,7 +5077,7 @@ msgid ""
 "Unlinking citations will prevent Collabora Online from updating citations "
 "and bibliography in this document."
 msgstr ""
-"Aftenging tilvitnana mun koma í veg fyrir að Collabora Online geti uppfært "
+"Aftenging tilvitnana mun koma í veg fyrir að Vulcan Office geti uppfært "
 "tilvitnanir og heimildaskrár í þessu skjali."
 
 #: src/control/HRuler.ts:321
@@ -6916,7 +6916,7 @@ msgstr ""
 
 #: welcome/welcome.html%2Bhtml.head.title:9-3
 msgid "Collabora Online Welcome"
-msgstr "Velkomin í Collabora Online"
+msgstr "Velkomin í Vulcan Office"
 
 #: welcome/welcome.html%2Bhtml.body.div.div.div.div.h1:26-7
 msgid "Explore The New {coolversion}"
@@ -6925,7 +6925,7 @@ msgstr "Kynntu þér nýju útgáfuna af {coolversion}"
 #: welcome/welcome.html%2Bhtml.body.div.div.div.div.h2:27-7
 #: welcome/welcome.html%2Bhtml.body.div.div.div.div.h2:38-7
 msgid "Collabora Online Development Edition"
-msgstr "þróunarútgáfu Collabora Online"
+msgstr "þróunarútgáfu Vulcan Office"
 
 #: welcome/welcome.html%2Bhtml.body.div.div.div.div.p:28-7
 #, fuzzy
@@ -6956,7 +6956,7 @@ msgid ""
 msgstr ""
 "Skoðaðu <a target=\"_blank\" href=\"https://www.collaboraonline.com/"
 "code-26-04-release-notes/\">útgáfuupplýsingarnar</a> og lærðu allt um: "
-"nýjustu þróunarútgáfu Collabora Online, sem hönnuð er fyrir heimanotendur og "
+"nýjustu þróunarútgáfu Vulcan Office, sem hönnuð er fyrir heimanotendur og "
 "smærri teymi."
 
 #: welcome/welcome.html%2Bhtml.body.div.div.div.div.h1:48-7
@@ -7382,7 +7382,7 @@ msgstr ""
 #~ msgstr "Kanna nýju {coolversion}"
 
 #~ msgid "Integrate Collabora Online into your webapp"
-#~ msgstr "Samþættu Collabora Online við vefhugbúnaðinn þinn"
+#~ msgstr "Samþættu Vulcan Office við vefhugbúnaðinn þinn"
 
 #~ msgid "Or get involved in the development"
 #~ msgstr "Eða taktu þátt í þróuninni"
@@ -7447,7 +7447,7 @@ msgstr ""
 #~ msgstr "Þjónninn er að keyra sig upp og verður tiltækur innan skamms"
 
 #~ msgid "Oops, there is a problem connecting to Collabora Online : "
-#~ msgstr "Úbbs, það kom upp villa við að tengjast Collabora Online : "
+#~ msgstr "Úbbs, það kom upp villa við að tengjast Vulcan Office : "
 
 #~ msgid "Number of views"
 #~ msgstr "Fjöldi skoðana"

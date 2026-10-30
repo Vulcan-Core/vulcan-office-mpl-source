@@ -582,6 +582,96 @@ div.leaflet-cursor-container:hover > .leaflet-cursor-header {
 	}
 }
 
+/* THE CARET PAINTS THE INVERSE OF WHAT IS UNDER IT, AND ONLY UNDER ITSELF.
+ *
+ * --color-cursor-blink-background is keyed on `data-bg-theme`, the paper
+ * SETTING, not on the paint the caret lands on. The two diverge for real: the
+ * document theme keeps an author's explicit cell fill, so a dark-themed
+ * session editing a white-filled cell drew a white caret on white (D7). No
+ * colour chosen from a stylesheet can know the ground -- fills, conditional
+ * formats, images, a dark slide -- so the caret reads its ground instead.
+ *
+ * The filter turns the backdrop under the caret's own box into black or
+ * white, whichever is the opposite: grayscale takes its luma, brightness
+ * moves the switch between grey 117 and 118 (near WCAG L = 0.179, where
+ * black and white tie), invert flips it, and contrast() snaps it to one end.
+ * So every grey gets at least 4.61:1 and 99.99% of the colour cube at least
+ * 3:1. The exception is a sliver of saturated magenta-pink near rgb(255, 62,
+ * 255), at 2.84:1, because grayscale weights gamma-encoded channels.
+ * VulcanCaretContrast.test.ts sweeps the ramp and the cube through this
+ * chain.
+ *
+ * THE GAIN IS TWO STAGES OF 10^4, AND BOTH HALVES OF THAT ARE LOAD-BEARING.
+ * It has to reach ~10^8 because the nearest 8-bit colour sits 4e-7 from the
+ * switch, and a colour the gain does not push to an end paints a grey of
+ * its ground's own lightness: with contrast(1000), ~21,000 colours were not
+ * snapped and the nearest came out at 1.00:1, measured in Chromium and
+ * WebKit alike. But no ONE stage may be that large: Skia types colour-matrix
+ * coefficients as `half`, which Android's Mali and Adreno GPUs run as fp16
+ * (max 65504; GLSL ES guarantees mediump only to 2^14), so contrast(10^8)
+ * overflows to infinity there and the caret stops reading its ground.
+ * Chromium clamps after every filter function (measured: brightness(2)
+ * brightness(0.5) paints white at 128), so two 10^4 stages give 10^8 with
+ * every coefficient inside mediump. WebKit folds the chain into one matrix
+ * (the same probe paints 255), which on Apple GPUs runs at full precision:
+ * the folded 10^8 snapped every colour in the iOS 26.5 Simulator.
+ *
+ * WHY NOT THE 1px RING THIS REPLACES. A ring in the inverse of the
+ * core was legible on any ground, but in the common case it is the paper's
+ * colour, painted over the neighbouring glyph: next to an "i", the ring
+ * erased the left half of its stem. A ring beside a 1px core always lands on
+ * ink sooner or later. This caret paints nothing outside its own box.
+ *
+ * WHY NOT mix-blend-mode: difference. A plain invert leaves a mid-grey on
+ * mid-grey (128 becomes 127). Thresholding needs the filter chain.
+ *
+ * The stacking question the ring was parked on is answered: the filter reads
+ * #document-canvas through the container's z-index (Cursor.ts writes it) in
+ * Chromium and in WebKit (iOS 26.5 Simulator), measured against a canvas in
+ * the same layering. An engine without backdrop-filter skips this block and
+ * keeps the plain core above.
+ *
+ * DESKTOP ONLY, FOR NOW. Phone chrome (html.vulcan-mobile-chrome, which
+ * js/global.js stamps before first paint) is scoped out, so "NO
+ * backdrop-filter on mobile" (docs/mobile-redesign/04-constraints.md rule
+ * 1) holds with no exception. On Android this caret's correctness rests on
+ * the fp16 model above, which has never been measured on a Mali or Adreno
+ * device. Phones keep the plain core above with no ring, so stays
+ * fixed there; what they lose is D7's narrow case (a dark theme over a
+ * white fill). The scope is the chrome, not the GPU: Android tablets and
+ * ARM Chromebooks resolve to vulcan-desktop-chrome (js/global.js never
+ * counts a Chromebook as a small screen, and a tablet window wide enough
+ * gets `desktop` from the host), so they still run this filter, in fp16 on
+ * a Mali or Adreno GPU, unmeasured. Measure the caret on a physical Android
+ * phone, an Android tablet, an ARM Chromebook and in the iOS shell before
+ * lifting the phone scope; a tablet or Chromebook that fails narrows this
+ * scope too. The scope sits inside
+ * :where(), which adds no specificity: the rule must rank with the base
+ * .blinking-cursor, whose background its `transparent` beats by coming
+ * later, and below .blinking-cursor.blinking-suspended.
+ *
+ * The off phase is a keyframe of its own, and it blinks `visibility`.
+ * `blink` animates `background`, which would paint an opaque core over the
+ * filtered backdrop, and toggling the filter itself would re-run a
+ * backdrop pass on every tick. The filter is declared statically and
+ * applied once, so the 500ms .blinking-suspended window after every move
+ * keeps the caret, and a Cursor built with options.color (an inline
+ * background) still blinks off. */
+@supports (backdrop-filter: invert(1)) {
+	:where(html:not(.vulcan-mobile-chrome)) .blinking-cursor {
+		animation-name: blink-visibility;
+		background: transparent;
+		-webkit-backdrop-filter: grayscale(1) brightness(1.087) invert(1) contrast(10000) contrast(10000);
+		backdrop-filter: grayscale(1) brightness(1.087) invert(1) contrast(10000) contrast(10000);
+	}
+}
+
+@keyframes blink-visibility {
+	50% {
+		visibility: hidden;
+	}
+}
+
 @keyframes MoveUpDown {
 	0%, 100% {bottom: -38px;}
 	50% {bottom: -48px;}

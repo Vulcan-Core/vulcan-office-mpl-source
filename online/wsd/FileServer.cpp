@@ -42,6 +42,7 @@
 #include <wsd/AIUtil.hpp>
 #include <wsd/Auth.hpp>
 #include <wsd/COOLWSD.hpp>
+#include <wsd/ClientRequestDispatcher.hpp>
 #include <wsd/HostUtil.hpp>
 #include <wsd/ContentSecurityPolicy.hpp>
 #include <wsd/Exceptions.hpp>
@@ -284,13 +285,16 @@ std::string stringifyBoolFromConfig(const Poco::Util::LayeredConfiguration& conf
 }
 
 /// Returns true if the host is allowed, false otherwise.
-bool isAllowedWopiHost(const Poco::URI& uri)
+/// serverToServer is the trust of the request that named the URL
+/// (ClientRequestDispatcher::isServerToServer()): a host that an internal alias
+/// group alone admits is allowed for a server-to-server request only.
+bool isAllowedWopiHost(const Poco::URI& uri, const bool serverToServer)
 {
     if (!HostUtil::isWopiEnabled())
         return false;
 
     const std::string& targetHost = uri.getHost();
-    if (HostUtil::allowedWopiHost(targetHost))
+    if (HostUtil::allowedWopiHost(targetHost, serverToServer))
         return true;
 
     if (HostUtil::isWopiHostsEmpty() && net::isLocalhost(targetHost))
@@ -300,11 +304,22 @@ bool isAllowedWopiHost(const Poco::URI& uri)
     const auto hostAddresses(net::resolveAddresses(targetHost));
     for (const auto& address : hostAddresses)
     {
-        if (HostUtil::allowedWopiHost(address))
+        if (HostUtil::allowedWopiHost(address, serverToServer))
             return true;
     }
 
     return false;
+}
+
+/// True iff host resolves, and every address it resolves to is a public internet
+/// address (see HostUtil::isNonPublicAddress()).
+bool resolvesToPublicAddressesOnly(const std::string& host)
+{
+    const std::vector<std::string> addresses = net::resolveAddresses(host);
+    return !addresses.empty() &&
+           std::none_of(addresses.begin(), addresses.end(),
+                        [](const std::string& address)
+                        { return HostUtil::isNonPublicAddress(address); });
 }
 
 } // namespace
@@ -570,12 +585,6 @@ bool FileServerRequestHandler::handleRequest(const HTTPRequest& request,
                                               requestUri.toString() + "].");
         }
 
-        if (endPoint == "welcome.html")
-        {
-            preprocessWelcomeFile(request, response, requestDetails, message, socket);
-            return true;
-        }
-
         if (endPoint == "cool.html" ||
             endPoint == "help-localizations.json" ||
             endPoint == "localizations.json" ||
@@ -639,6 +648,12 @@ bool FileServerRequestHandler::handleRequest(const HTTPRequest& request,
                 mimeType = "image/png";
             else if (fileType == "svg")
                 mimeType = "image/svg+xml";
+            else if (fileType == "ttf")
+                // Metric-twin webfonts for the vector renderer (dist/fonts).
+                mimeType = "font/ttf";
+            else if (fileType == "otf")
+                // The URW serif twins (C059, P052, URW Bookman) ship as OTF.
+                mimeType = "font/otf";
 #if !MOBILEAPP
             else if (fileType == "wasm" &&
                      COOLWSD::WASMEnabled)
@@ -1549,30 +1564,14 @@ FileServerRequestHandler::ResourceAccessDetails FileServerRequestHandler::prepro
     const unsigned int minSavedMessTimeoutSecs = config.getUInt("per_view.min_saved_message_timeout_secs", 0);
     Poco::replaceInPlace(preprocess, std::string("%MIN_SAVED_MESSAGE_TIMEOUT_SECS%"), std::to_string(minSavedMessTimeoutSecs));
 
-    #if ENABLE_WELCOME_MESSAGE
-        std::string enableWelcomeMessage = "true";
-        std::string autoShowWelcome = "true";
-        if (config.getBool("home_mode.enable", false))
-        {
-            autoShowWelcome = stringifyBoolFromConfig(config, "welcome.enable", false);
-        }
-        Poco::replaceInPlace(preprocess, std::string("%PRODUCT_BRANDING_NAME%"), std::string());
-        Poco::replaceInPlace(preprocess, std::string("%PRODUCT_BRANDING_URL%"), std::string());
-        Poco::replaceInPlace(preprocess, std::string("%LOGO_URL%"), std::string());
-    #else // configurable
-        std::string enableWelcomeMessage = stringifyBoolFromConfig(config, "welcome.enable", false);
-        std::string autoShowWelcome = stringifyBoolFromConfig(config, "welcome.enable", false);
-
-        std::string brandProductURL = ConfigUtil::getConfigValue<std::string>(config, "user_interface.brandProductURL", "");
-        std::string brandProductName = ConfigUtil::getConfigValue<std::string>(config, "user_interface.brandProductName", "");
-        std::string logoUrl = ConfigUtil::getConfigValue<std::string>(config, "user_interface.logoURL", "");
-        Poco::replaceInPlace(preprocess, std::string("%PRODUCT_BRANDING_NAME%"), brandProductName);
-        Poco::replaceInPlace(preprocess, std::string("%PRODUCT_BRANDING_URL%"), brandProductURL);
-        Poco::replaceInPlace(preprocess, std::string("%LOGO_URL%"), logoUrl);
-    #endif
-
-    Poco::replaceInPlace(preprocess, std::string("%ENABLE_WELCOME_MSG%"), enableWelcomeMessage);
-    Poco::replaceInPlace(preprocess, std::string("%AUTO_SHOW_WELCOME%"), autoShowWelcome);
+    // Vulcan Office: the welcome screen is removed at source; only the
+    // integrator branding overrides remain configurable.
+    std::string brandProductURL = ConfigUtil::getConfigValue<std::string>(config, "user_interface.brandProductURL", "");
+    std::string brandProductName = ConfigUtil::getConfigValue<std::string>(config, "user_interface.brandProductName", "");
+    std::string logoUrl = ConfigUtil::getConfigValue<std::string>(config, "user_interface.logoURL", "");
+    Poco::replaceInPlace(preprocess, std::string("%PRODUCT_BRANDING_NAME%"), brandProductName);
+    Poco::replaceInPlace(preprocess, std::string("%PRODUCT_BRANDING_URL%"), brandProductURL);
+    Poco::replaceInPlace(preprocess, std::string("%LOGO_URL%"), logoUrl);
 
     std::string enableAccessibility = stringifyBoolFromConfig(config, "accessibility.enable", Util::isMobileApp());
     Poco::replaceInPlace(preprocess, std::string("%ENABLE_ACCESSIBILITY%"), enableAccessibility);
@@ -1605,20 +1604,8 @@ FileServerRequestHandler::ResourceAccessDetails FileServerRequestHandler::prepro
     Poco::replaceInPlace(preprocess, std::string("%ENABLE_MACROS_EXECUTION%"), enableMacrosExecution);
 
 
-    if (config.getBool("home_mode.enable", false))
-    {
-        Poco::replaceInPlace(preprocess, std::string("%AUTO_SHOW_FEEDBACK%"), (std::string)"false");
-    }
-    else
-    {
-        Poco::replaceInPlace(preprocess, std::string("%AUTO_SHOW_FEEDBACK%"), (std::string)"true");
-    }
-
-    bool allowUpdateNotification = config.getBool("allow_update_popup", true);
+    bool allowUpdateNotification = config.getBool("allow_update_popup", false);
     Poco::replaceInPlace(preprocess, std::string("%ENABLE_UPDATE_NOTIFICATION%"), boolToString(allowUpdateNotification));
-
-    Poco::replaceInPlace(preprocess, std::string("%FEEDBACK_URL%"), std::string(FEEDBACK_URL));
-    Poco::replaceInPlace(preprocess, std::string("%WELCOME_URL%"), std::string(WELCOME_URL));
 
     Poco::replaceInPlace(preprocess, BUYPRODUCT_URL, urv[BUYPRODUCT_URL]);
 
@@ -1653,8 +1640,6 @@ FileServerRequestHandler::ResourceAccessDetails FileServerRequestHandler::prepro
     ContentSecurityPolicy csp;
     csp.appendDirective("default-src", "'none'");
     csp.appendDirective("frame-src", "'self'");
-    csp.appendDirectiveUrl("frame-src", WELCOME_URL);
-    csp.appendDirectiveUrl("frame-src", FEEDBACK_URL);
     csp.appendDirectiveUrl("frame-src", Uri::decode(urv[BUYPRODUCT_URL]));
     csp.appendDirective("frame-src", "blob:"); // Equivalent to unsafe-eval!
     csp.appendDirective("connect-src", "'self'");
@@ -1673,7 +1658,13 @@ FileServerRequestHandler::ResourceAccessDetails FileServerRequestHandler::prepro
     csp.appendDirectiveUrl("media-src", cnxDetails.getWebServerUrl());
     csp.appendDirective("img-src", "'self'");
     csp.appendDirective("img-src", "data:"); // Equivalent to unsafe-inline!
-    csp.appendDirectiveUrl("img-src", "https://www.collaboraoffice.com/");
+    // With default-src 'none' and no worker-src, workers fall back to
+    // script-src, which admits neither blob: nor data: — so the session-replay
+    // canvas encoder (VulcanReplay's rrweb recorder spawns its webp worker
+    // from a blob URL) dies silently in cross-origin embeddings while DOM
+    // forwarding keeps working. Same allowance the other asset endpoint below
+    // already grants.
+    csp.appendDirective("worker-src", "'self' blob:");
 
     // When comment_avatar points at an http(s) image, the browser still needs
     // an img-src entry for that origin or the iframe CSP refuses to load it.
@@ -1723,6 +1714,17 @@ FileServerRequestHandler::ResourceAccessDetails FileServerRequestHandler::prepro
 
             const Poco::URI uriWopiFrameAncestor(Uri::decode(param.second));
             wopiSrc = uriWopiFrameAncestor.toString();
+
+            // Vulcan PDF canvas: the client calls host routes (object model,
+            // edit snapshots, live model) on the WOPISrc origin. The editor is
+            // served from the request host, which differs from the canonical
+            // WOPI host on customer subdomains, so admit the verified WOPISrc
+            // scheme+authority (trimURI drops path, query and user info) for
+            // fetch. Missing fonts are served same-origin by the host, so no
+            // third-party fetch host is allowed here.
+            const std::string& wopiScheme = uriWopiFrameAncestor.getScheme();
+            if (wopiScheme == "https" || wopiScheme == "http")
+                csp.appendDirectiveUrl("connect-src", wopiSrc);
 
             // Remove parameters from URL
             const std::string& wopiFrameAncestor = uriWopiFrameAncestor.getHost();
@@ -1871,33 +1873,6 @@ FileServerRequestHandler::ResourceAccessDetails FileServerRequestHandler::prepro
     return ResourceAccessDetails(std::move(wopiSrc), urv[ACCESS_TOKEN], urv[NO_AUTH_HEADER], urv[PERMISSION], urv[DEBUG_WOPI_CONFIG_ID], std::move(userId));
 }
 
-void FileServerRequestHandler::preprocessWelcomeFile(const HTTPRequest& request,
-                                                     http::Response& httpResponse,
-                                                     const RequestDetails& requestDetails,
-                                                     std::istream& message,
-                                                     const std::shared_ptr<StreamSocket>& socket)
-{
-    const std::string relPath = getRequestPathname(request, requestDetails);
-    LOG_DBG("Preprocessing file: " << relPath);
-    std::string templateWelcome = *getUncompressedFile(relPath);
-
-    HTMLForm form(request, message);
-    std::string uiTheme = form.get("ui_theme", "");
-    uiTheme = (uiTheme == "dark") ? "dark" : "light";
-    Poco::replaceInPlace(templateWelcome, std::string("%UI_THEME%"), uiTheme);
-
-    // Ask UAs to block if they detect any XSS attempt
-    httpResponse.add("X-XSS-Protection", "1; mode=block");
-    // No referrer-policy
-    httpResponse.add("Referrer-Policy", "no-referrer");
-    httpResponse.add("X-Content-Type-Options", "nosniff");
-
-    httpResponse.setBody(std::move(templateWelcome));
-    socket->send(httpResponse);
-
-    LOG_TRC("Sent file: " << relPath);
-}
-
 void FilePartHandler::handlePart(const Poco::Net::MessageHeader& header, std::istream& stream)
 {
     if (header.has("Content-Disposition"))
@@ -1956,7 +1931,9 @@ void FileServerRequestHandler::fetchWopiSettingConfigs(const Poco::Net::HTTPRequ
 
     Poco::URI sharedUri(sharedConfigUrl);
 
-    if (!isAllowedWopiHost(sharedUri))
+    const bool serverToServer =
+        ClientRequestDispatcher::isServerToServer(socket->clientAddress(), request);
+    if (!isAllowedWopiHost(sharedUri, serverToServer))
     {
         LOG_WRN("Rejected settings config request to untrusted host ["
                 << Anonymizer::anonymizeUrl(sharedConfigUrl) << ']');
@@ -2148,7 +2125,9 @@ void FileServerRequestHandler::fetchSettingFile(const Poco::Net::HTTPRequest& re
 
     Poco::URI dicUrl(fileUrl);
 
-    if (!isAllowedWopiHost(dicUrl))
+    const bool serverToServer =
+        ClientRequestDispatcher::isServerToServer(socket->clientAddress(), request);
+    if (!isAllowedWopiHost(dicUrl, serverToServer))
     {
         LOG_WRN("Rejected setting file request to untrusted host ["
                 << Anonymizer::anonymizeUrl(fileUrl) << ']');
@@ -2293,6 +2272,25 @@ void FileServerRequestHandler::fetchModels(const Poco::Net::HTTPRequest& request
         return;
     }
 
+    // This endpoint has no authentication and hands the upstream body back to the
+    // caller, while the KIT allowlist admits every private range by default
+    // (net.lok_allow, net.post_allow). So a custom host inside the network coolwsd
+    // runs in is fetched for a server-to-server request alone
+    // (ClientRequestDispatcher::isServerToServer()); any other caller may only name
+    // a host whose every resolved address is public.
+    if (!AIUtil::isPreCannedAIProviderHost(uri.getHost()) &&
+        !ClientRequestDispatcher::isServerToServer(socket->clientAddress(), request) &&
+        !resolvesToPublicAddressesOnly(uri.getHost()))
+    {
+        LOG_WRN("Rejected fetch-models request from a public caller to a non-public host ["
+                << Anonymizer::anonymizeUrl(baseUrl) << ']');
+        // The same 421 as the allowlist refusal above, which the browser already
+        // explains as a host the server does not permit.
+        sendError(http::StatusCode::MisdirectedRequest, getRequestPath(request), socket,
+                  shortMessage, "Target host is not a public address");
+        return;
+    }
+
     const std::string& uriAnonym = Anonymizer::anonymizeUrl(uri.toString());
 
     // With an empty key, mark the token as header-less so no Authorization
@@ -2362,7 +2360,9 @@ void FileServerRequestHandler::deleteWopiSettingConfigs(const Poco::Net::HTTPReq
 
     Poco::URI sharedUri(sharedConfigUrl);
 
-    if (!isAllowedWopiHost(sharedUri))
+    const bool serverToServer =
+        ClientRequestDispatcher::isServerToServer(socket->clientAddress(), request);
+    if (!isAllowedWopiHost(sharedUri, serverToServer))
     {
         LOG_WRN("Rejected settings delete request to untrusted host ["
                 << Anonymizer::anonymizeUrl(sharedConfigUrl) << ']');
@@ -2469,7 +2469,9 @@ void FileServerRequestHandler::uploadFileToIntegrator(const Poco::Net::HTTPReque
 
     Poco::URI wopiUri(wopiSettingBaseUrl + "/upload");
 
-    if (!isAllowedWopiHost(wopiUri))
+    const bool serverToServer =
+        ClientRequestDispatcher::isServerToServer(socket->clientAddress(), request);
+    if (!isAllowedWopiHost(wopiUri, serverToServer))
     {
         LOG_WRN("Rejected upload request to untrusted host ["
                 << Anonymizer::anonymizeUrl(wopiSettingBaseUrl) << ']');
@@ -2488,7 +2490,8 @@ void FileServerRequestHandler::uploadFileToIntegrator(const Poco::Net::HTTPReque
         // to keep from the stored file, then write the merged file back.
         handleViewSettingUpload(wopiSettingBaseUrl, fileId, token,
                                 form.get("currentFileUrl", std::string()), uploadedFilePath,
-                                std::move(uploadedFileOwnership), getRequestPath(request), socket);
+                                std::move(uploadedFileOwnership), getRequestPath(request), socket,
+                                serverToServer);
         return;
     }
 
@@ -2546,7 +2549,7 @@ void FileServerRequestHandler::handleViewSettingUpload(
     const std::string& wopiSettingBaseUrl, const std::string& fileId, const std::string& accessToken,
     const std::string& currentFileUrl, const std::string& uploadedFilePath,
     std::shared_ptr<FileUtil::OwnedFile> uploadedFileOwnership, const std::string& requestPath,
-    const std::shared_ptr<StreamSocket>& socket)
+    const std::shared_ptr<StreamSocket>& socket, const bool serverToServer)
 {
     const std::string shortMessage = "Failed to upload preset file.";
 
@@ -2563,7 +2566,7 @@ void FileServerRequestHandler::handleViewSettingUpload(
     uploadedFileOwnership.reset();
 
     Poco::URI wopiUri(wopiSettingBaseUrl + "/upload");
-    if (!isAllowedWopiHost(wopiUri))
+    if (!isAllowedWopiHost(wopiUri, serverToServer))
     {
         LOG_WRN("Rejected upload request to untrusted host ["
                 << Anonymizer::anonymizeUrl(wopiSettingBaseUrl) << ']');
@@ -2638,7 +2641,7 @@ void FileServerRequestHandler::handleViewSettingUpload(
     }
 
     Poco::URI storedUri(currentFileUrl);
-    if (!isAllowedWopiHost(storedUri))
+    if (!isAllowedWopiHost(storedUri, serverToServer))
     {
         LOG_WRN("Rejected stored-settings read from untrusted host ["
                 << Anonymizer::anonymizeUrl(currentFileUrl) << ']');

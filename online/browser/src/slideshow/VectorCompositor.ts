@@ -63,6 +63,11 @@ class VectorCompositor extends SlideCompositor {
 	}
 
 	public onUpdatePresentationInfo(): void {
+		// The presenter keeps ONE compositor across presentations and
+		// deleteResources() marks it disposed on close. Re-arm here or
+		// every re-present composes null bitmaps (drawImage TypeError,
+		// black screen) from the first frame on.
+		this.disposed = false;
 		[this.canvasWidth, this.canvasHeight] = this._computeCanvasSize();
 		this.offscreenCanvas = new OffscreenCanvas(
 			this.canvasWidth,

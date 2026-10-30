@@ -5112,7 +5112,7 @@ msgid ""
 "Unlinking citations will prevent Collabora Online from updating citations "
 "and bibliography in this document."
 msgstr ""
-"نەقىل ئېلىنغان نەقىللەر Collabora Online نىڭ بۇ ھۆججەتتىكى نەقىل ۋە "
+"نەقىل ئېلىنغان نەقىللەر Vulcan Office نىڭ بۇ ھۆججەتتىكى نەقىل ۋە "
 "بىبلىئوگرافىيەنى يېڭىلىشىنىڭ ئالدىنى ئالىدۇ."
 
 #: src/control/HRuler.ts:321
@@ -7055,7 +7055,7 @@ msgstr ""
 
 #, fuzzy
 #~ msgid "Oops, there is a problem connecting the document"
-#~ msgstr "ئاپلا، توردىكى LibreOffice قا ئۇلىنىشتا مەسىلە كۆرۈلدى: "
+#~ msgstr "ئاپلا، توردىكى Vulcan Office قا ئۇلىنىشتا مەسىلە كۆرۈلدى: "
 
 #~ msgid "Server is down, restarting automatically. Please wait."
 #~ msgstr "مۇلازىمېتىر توختاپ قالدى ، ئاپتوماتىك قايتا قوزغىتىلدى. ساقلاپ تۇرۇڭ."

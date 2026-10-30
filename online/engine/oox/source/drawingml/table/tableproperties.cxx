@@ -124,6 +124,11 @@ const TableStyle& TableProperties::getUsedTableStyle( const ::oox::core::XmlFilt
     return *pTableStyle;
 }
 
+bool TableProperties::isPredefinedStyleId(const OUString& rStyleId)
+{
+    return mStyleIdMap.find(rStyleId) != mStyleIdMap.end();
+}
+
 void TableProperties::pushToPropSet(const ::oox::core::XmlFilterBase& rFilterBase,
                                     const Reference<XPropertySet>& xPropSet,
                                     const TextListStylePtr& pMasterTextListStyle)

@@ -22,11 +22,15 @@ interface LogMsg {
 
 class Logger {
 	private _logs: LogMsg[];
+	// Ring write index: once _logs is at capacity, new entries overwrite the
+	// oldest slot instead of shift()ing the whole array per entry.
+	private _ringIndex: number;
 	private startTime: number;
 	private _cypressTest: boolean;
 
 	constructor() {
 		this._logs = [];
+		this._ringIndex = 0;
 		this.startTime = null;
 		this._cypressTest =
 			typeof navigator !== 'undefined' &&
@@ -42,18 +46,37 @@ class Logger {
 		if ((window as any).enableDebug || this._cypressTest) maxEntries = 1000;
 
 		if (time - this.startTime < 60 * 1000 /* ms */) maxEntries = 500; // enough to capture early start.
-		while (this._logs.length > maxEntries) this._logs.shift();
 
 		// Limit memory usage of log by limiting length of message
 		const maxMsgLen = this._cypressTest ? 1024 : 128;
 		if (msg.length > maxMsgLen) msg = msg.substring(0, maxMsgLen);
-		msg = msg.replace(/(\r\n|\n|\r)/gm, ' ');
-		this._logs.push({
+		if (msg.indexOf('\n') !== -1 || msg.indexOf('\r') !== -1)
+			msg = msg.replace(/(\r\n|\n|\r)/gm, ' ');
+		const entry: LogMsg = {
 			msg: msg,
 			direction: direction,
 			status: status,
 			time: time,
-		});
+		};
+		// The shift() loop this replaces settled at maxEntries + 1 entries;
+		// keep that exact capacity so retention is byte-identical.
+		const capacity = maxEntries + 1;
+		if (this._logs.length < capacity) {
+			this._logs.push(entry);
+			this._ringIndex = 0; // a chronological array's oldest slot is 0
+			return;
+		}
+		if (this._logs.length > capacity) {
+			// The cap just shrank (the 60 s startup window ended). The array
+			// may be a rotated ring, so unrotate before keeping the newest.
+			const chrono = this._logs
+				.slice(this._ringIndex)
+				.concat(this._logs.slice(0, this._ringIndex));
+			this._logs = chrono.slice(chrono.length - capacity);
+			this._ringIndex = 0;
+		}
+		this._logs[this._ringIndex] = entry;
+		this._ringIndex = (this._ringIndex + 1) % capacity;
 	}
 
 	private _getEntries(): string {
@@ -115,6 +138,7 @@ class Logger {
 
 	public clear(): void {
 		this._logs = [];
+		this._ringIndex = 0;
 	}
 }
 

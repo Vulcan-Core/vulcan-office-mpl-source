@@ -220,20 +220,9 @@ class Util {
 	}
 
 	public static getProduct(): string {
-		let brandFAQURL =
-			typeof brandProductFAQURL !== 'undefined'
-				? brandProductFAQURL
-				: 'https://www.collaboraoffice.org/post/faq/';
-		const customWindow = window as any;
-		if (customWindow.feedbackUrl && customWindow.buyProductUrl) {
-			const integratorUrl = encodeURIComponent(customWindow.buyProductUrl);
-			brandFAQURL = customWindow.feedbackUrl;
-			brandFAQURL =
-				brandFAQURL.substring(0, brandFAQURL.lastIndexOf('/')) +
-				'/product.html?integrator=' +
-				integratorUrl;
-		}
-		return brandFAQURL;
+		// Vulcan Office: no default product/FAQ URL. Only an explicitly
+		// configured branding URL is ever returned; empty means "no link".
+		return typeof brandProductFAQURL !== 'undefined' ? brandProductFAQURL : '';
 	}
 
 	public static replaceCtrlAltInMac(msg: string): string {

@@ -407,7 +407,17 @@ void DocumentBroker::pollThread()
     while (!_stop && _poll->continuePolling() && !SigUtil::getTerminationFlag())
     {
         // Poll more frequently while unloading to cleanup sooner.
-        _poll->poll(isUnloading() ? SocketPoll::DefaultPollTimeoutMicroS / 16 : defaultPollTimeout);
+        std::chrono::microseconds pollTimeout =
+            isUnloading() ? SocketPoll::DefaultPollTimeoutMicroS / 16 : defaultPollTimeout;
+
+        // Vulcan: never sleep past a roster/cursor update we are holding back for
+        // coalescing, or the last cursor position of a burst could sit here until
+        // the next unrelated event. No-op unless coalescing is switched on.
+        if (hasPendingViewUpdates())
+            pollTimeout = std::min<std::chrono::microseconds>(
+                pollTimeout, ClientSession::viewUpdateCoalesceInterval());
+
+        _poll->poll(pollTimeout);
 
         // Consolidate updates across multiple processed events.
         processBatchUpdates();
@@ -429,7 +439,7 @@ void DocumentBroker::pollThread()
         // a tile's data is ~8k, a 4k screen is ~256 256x256 tiles -
         // so double that - 4Mb per view.
         if (_tileCache)
-            _tileCache->setMaxCacheSize(8 * 1024 * 256 * 2 * _sessions.size());
+            _tileCache->setMaxCacheSize(8 * 1024 * 256 * 2 * tileCacheViewCount());
 #endif
 #if !MOBILEAPP
         // The stale-render sweep runs every COMMAND_TIMEOUT_MS. It always drops
@@ -557,10 +567,32 @@ void DocumentBroker::pollThread()
                     {
                         LOG_WRN("Token refresh timed out for session ["
                                 << session->getId() << "] on docKey [" << _docKey << ']');
-                        session->sendTextFrameAndLogError(
-                            "error: cmd=storage kind=saveunauthorized");
-                        session->invalidateAuthorizationToken();
-                        broadcastSaveResult(false, "Invalid or expired access token");
+                        if (session->hasTokenRefreshCause(ClientSession::TokenRefreshCause::Lock))
+                        {
+                            // The lock lane asked and the host never answered: this is
+                            // where the demotion deferred in handleLockResult finally
+                            // lands. Deliberately the SAME wording as that branch, so
+                            // existing log-based counts keep meaning what they meant —
+                            // what changed is that reaching it now takes a whole
+                            // refresh timeout rather than a single 401. A save
+                            // failure is reported below only if an upload also
+                            // joined this wait.
+                            LOG_ERR("Failed to LOCK docKey ["
+                                    << _docKey
+                                    << "]. Invalid or expired access token. Notifying client and "
+                                       "invalidating the authorization token of session ["
+                                    << session->getId()
+                                    << "]. This session will now be read-only");
+                            session->invalidateAuthorizationToken();
+                            session->setLockFailed("Expired authorization token");
+                        }
+                        if (session->hasTokenRefreshCause(ClientSession::TokenRefreshCause::Upload))
+                        {
+                            session->sendTextFrameAndLogError(
+                                "error: cmd=storage kind=saveunauthorized");
+                            session->invalidateAuthorizationToken();
+                            broadcastSaveResult(false, "Invalid or expired access token");
+                        }
                         break; // Only one refresh at a time.
                     }
                 }
@@ -623,10 +655,14 @@ void DocumentBroker::pollThread()
                 else if (_docState.isUnloadRequested() || SigUtil::getShutdownRequestFlag() ||
                          _docState.isCloseRequested())
                 {
+                    // Vulcan: not before the save that closes a
+                    // dialog locking the refused view was tried once
+                    // (vulcanGiveUpWaitsForDialogClose).
                     if (limStoreFailures > 0 && (_saveManager.saveFailureCount() >=
                                                      static_cast<std::size_t>(limStoreFailures) ||
                                                  _storageManager.uploadFailureCount() >=
-                                                     static_cast<std::size_t>(limStoreFailures)))
+                                                     static_cast<std::size_t>(limStoreFailures)) &&
+                        !vulcanGiveUpWaitsForDialogClose(static_cast<std::size_t>(limStoreFailures)))
                     {
                         LOG_ERR(
                             "Failed to store the document and reached maximum retry count of "
@@ -1053,9 +1089,12 @@ bool DocumentBroker::download(
 
         try
         {
+            // The loading session's own trust: an internal alias group's host
+            // stays reserved to the server-to-server request that named it.
+            const bool serverToServer = session && session->isServerToServer();
             _storage = StorageBase::create(uriPublic, jailRoot, jailPath.toString(),
                                            /*takeOwnership=*/isConvertTo(),
-                                           additionalFileUrisPublic);
+                                           additionalFileUrisPublic, serverToServer);
         }
         catch (...)
         {
@@ -1098,7 +1137,9 @@ bool DocumentBroker::download(
             {
                 auto poller = std::make_shared<TerminatingPoll>("CFISynReqPoll");
                 poller->runOnClientThread();
-                auto checkFileInfo = std::make_shared<CheckFileInfo>(poller, session->getPublicUri(), [](CheckFileInfo&) {});
+                auto checkFileInfo = std::make_shared<CheckFileInfo>(
+                    poller, session->getPublicUri(), session->isServerToServer(),
+                    [](CheckFileInfo&) {});
                 checkFileInfo->checkFileInfoSync(HTTP_REDIRECTION_LIMIT);
                 wopiFileInfo = checkFileInfo->wopiFileInfo(session->getPublicUri());
             }
@@ -1199,6 +1240,66 @@ bool DocumentBroker::download(
         // Check if document has been modified by some external action,
         // but only if *we* aren't uploading. Otherwise, it might be us.
         LOG_TRC("Document modified time: " << fileInfo.getLastModifiedServerTimeString());
+
+        // Vulcan handshake: a host that advertises the storage
+        // head's content timestamp also parks conflicted saves, so conflicts
+        // can resolve by reload instead of a user dialog. While an editing
+        // session is live, such a host pins LastModifiedTime to that
+        // session's content — an external write then does NOT move
+        // LastModifiedTime, and only the advertised head exposes it.
+        const std::string& vulcanContentHead = fileInfo.getVulcanContentHead();
+        const bool hostParksConflicts = !vulcanContentHead.empty();
+        const bool sessionBehindHead =
+            hostParksConflicts && !fileInfo.getLastModifiedServerTimeString().empty() &&
+            vulcanContentHead != fileInfo.getLastModifiedServerTimeString();
+
+        // Vulcan: the CheckFileInfo this join just made also
+        // refreshed our upload echo (handleWOPIFileInfo -> setFileInfo) to
+        // whatever storage reported. When that is not a timestamp this
+        // instance downloaded or uploaded, keeping it would let our next save
+        // present a sync marker NEWER than the content we hold, and the WOPI
+        // host would accept a stale buffer as current (rolled a
+        // commit back exactly so). Put back the last timestamp we synced to:
+        // our next save then conflicts, and the host rejects (and parks) it.
+        // This can only ever make a save conflict, so it holds with any WOPI
+        // host, handshake or not. A successful upload re-syncs the echo from
+        // its own response, as always. Checked by
+        // scripts/vulcan-office/test-join-echo.py.
+        const auto restoreOurEcho = [&]()
+        { _storage->setLastModifiedTime(_storageManager.getLastModifiedServerTimeString()); };
+
+        // A confirmed external write: with the handshake, rescue any unsaved
+        // changes through the host's park lane and reload; without it, keep
+        // the upstream conflict broadcast. Either way the echo is ours again
+        // first.
+        const auto onModifiedBehindOurBack = [&](std::string details)
+        {
+            restoreOurEcho();
+
+            if (!hostParksConflicts)
+            {
+                handleDocumentConflict(std::move(details), /*reloadResolved=*/false);
+                return;
+            }
+
+            if (isPossiblyModified())
+            {
+                // Unsaved changes: save now. The upload presents the stale
+                // echo, the host 409s and parks the bytes as a conflicted
+                // copy, and the upload-conflict handler completes the reload.
+                // If nothing ends up uploadable, the next CheckFileInfo
+                // re-detects this same state and retries — self-healing.
+                LOG_INF("Document [" << _docKey
+                                     << "] changed in storage with unsaved changes; saving so the "
+                                        "WOPI host can park the bytes before reloading");
+                autoSave(/*force=*/true, /*dontSaveIfUnmodified=*/true);
+            }
+            else
+            {
+                handleDocumentConflict(std::move(details), /*reloadResolved=*/true);
+            }
+        };
+
         if (!_storageManager.getLastModifiedServerTimeString().empty() &&
             !fileInfo.getLastModifiedServerTimeString().empty() &&
             _storageManager.getLastModifiedServerTimeString() !=
@@ -1215,6 +1316,12 @@ bool DocumentBroker::download(
                            "so ignoring inconsistent timestamp. Expected: "
                         << _storageManager.getLastModifiedServerTimeString()
                         << ", Actual: " << fileInfo.getLastModifiedServerTimeString());
+
+                // Ignored as a conflict, but not adopted as our echo:
+                // if the timestamp is our own upload landing, that upload's
+                // response sets the echo when it arrives; if it is someone
+                // else's write, a save that presents it would pass as current.
+                restoreOurEcho();
             }
             else if (_storageManager.isEarlierModifiedServerTimeString(
                          fileInfo.getLastModifiedServerTimeString()))
@@ -1244,16 +1351,33 @@ bool DocumentBroker::download(
             else
             {
                 LOG_WRN("Document [" << _docKey << "] has been modified behind our back. "
-                                     << "Informing all clients. Expected: "
+                                     << (hostParksConflicts ? "Reloading" : "Informing")
+                                     << " all clients. Expected: "
                                      << _storageManager.getLastModifiedServerTimeString()
                                      << ", Actual: " << fileInfo.getLastModifiedServerTimeString());
 
-                handleDocumentConflict("Document changed in storage (timestamp mismatch).\nLast "
-                                       "known timestamp: " +
-                                       _storageManager.getLastModifiedServerTimeString() +
-                                       "\nTimestamp in storage: " +
-                                       fileInfo.getLastModifiedServerTimeString());
+                onModifiedBehindOurBack("Document changed in storage (timestamp mismatch).\nLast "
+                                        "known timestamp: " +
+                                        _storageManager.getLastModifiedServerTimeString() +
+                                        "\nTimestamp in storage: " +
+                                        fileInfo.getLastModifiedServerTimeString());
             }
+        }
+        else if (sessionBehindHead && !_uploadRequest
+#if !MOBILEAPP
+                 && !findCollabBroker(_docKey)
+#endif
+        )
+        {
+            LOG_WRN("Document [" << _docKey << "] live session content ["
+                                 << fileInfo.getLastModifiedServerTimeString()
+                                 << "] is behind the storage head [" << vulcanContentHead
+                                 << "] (external write under a pinned session). Reloading.");
+
+            onModifiedBehindOurBack("Document changed in storage (content behind head).\nSession "
+                                    "content timestamp: " +
+                                    fileInfo.getLastModifiedServerTimeString() +
+                                    "\nStorage head timestamp: " + vulcanContentHead);
         }
     }
 
@@ -1444,6 +1568,27 @@ bool DocumentBroker::doDownloadDocument(const Authorization& auth,
 }
 
 #if !MOBILEAPP
+/// Vulcan: true only when CheckFileInfo's UserExtraInfo says
+/// "vulcan_agent": true, marking a headless agent view. A missing field, a
+/// non-boolean value, or JSON we cannot parse all mean "an ordinary user view",
+/// i.e. upstream behaviour.
+static bool isVulcanAgentExtraInfo(const std::string& userExtraInfo)
+{
+    // Cheap reject: no mention of the key, nothing to parse.
+    if (userExtraInfo.find("vulcan_agent") == std::string::npos)
+        return false;
+
+    Poco::JSON::Object::Ptr object;
+    if (!JsonUtil::parseJSON(userExtraInfo, object))
+        return false;
+
+    bool isAgent = false;
+    if (!JsonUtil::findJSONValue(object, "vulcan_agent", isAgent))
+        return false;
+
+    return isAgent;
+}
+
 std::string
 DocumentBroker::updateSessionWithWopiInfo(const std::shared_ptr<ClientSession>& session,
                                           WopiStorage* wopiStorage,
@@ -1692,6 +1837,7 @@ DocumentBroker::updateSessionWithWopiInfo(const std::shared_ptr<ClientSession>& 
     session->setUserId(userId);
     session->setUserName(username);
     session->setUserExtraInfo(userExtraInfo);
+    session->setVulcanAgentView(isVulcanAgentExtraInfo(userExtraInfo));
     session->setIsAdminUser(isAdminUser);
     session->setUserPrivateInfo(userPrivateInfo);
     session->setServerPrivateInfo(serverPrivateInfo);
@@ -2765,9 +2911,12 @@ bool DocumentBroker::updateStorageLockState(ClientSession& session, StorageBase:
         return false;
     }
 
-    if (lock == StorageBase::LockState::LOCK && session.isReadOnly())
+    // Readonly sessions cannot lock, only editors can. Vulcan: except a session
+    // that is read-only only BECAUSE its lock failed, retrying through
+    // attemptlock: without this the retry was refused here every time
+    // ("Readonly session") and never reached the host.
+    if (lock == StorageBase::LockState::LOCK && session.isReadOnly() && !session.isLockFailed())
     {
-        // Readonly sessions cannot lock, only editors can.
         error = "Readonly session";
         return false;
     }
@@ -2847,6 +2996,45 @@ bool DocumentBroker::updateStorageLockStateAsync(const std::shared_ptr<ClientSes
     return true;
 }
 
+namespace
+{
+/// Bound on consecutive token-refresh requests for one session.
+///
+/// A successful resetaccesstoken flips the authorization back to Token, so
+/// isRefreshingToken() alone cannot gate further attempts. The counter is per
+/// session and is reset only by a successful upload, so it is shared by both
+/// lanes that can ask — keep this the one statement of the cap.
+constexpr int MaxTokenRefreshAttempts = 3;
+
+/// Ask the host for a replacement access token, and wait for it.
+///
+/// Joins an existing wait without restarting its deadline. Returns false only
+/// when out of attempts, which is the caller's signal to fail in its own lane.
+/// The upload lane keeps its own call site (its log line names the
+/// storage URI, which is worth more there than sharing three lines of code).
+bool requestTokenRefresh(ClientSession& session, ClientSession::TokenRefreshCause cause,
+                         const char* what, const std::string& docKey)
+{
+    if (session.isRefreshingToken())
+    {
+        session.addTokenRefreshCause(cause);
+        return true;
+    }
+    if (session.tokenRefreshAttempts() >= MaxTokenRefreshAttempts)
+        return false;
+
+    LOG_WRN("Requesting token refresh from session ["
+            << session.getId() << "] on docKey [" << docKey << "] for " << what << " (attempt "
+            << (session.tokenRefreshAttempts() + 1) << " of " << MaxTokenRefreshAttempts << ')');
+    session.sendTextFrame("tokenexpired");
+
+    CONFIG_STATIC const auto refreshTimeout = ConfigUtil::getConfigValue<std::chrono::seconds>(
+        "storage.wopi.access_token.refresh_timeout_secs", 60);
+    session.startTokenRefresh(refreshTimeout, cause);
+    return true;
+}
+} // namespace
+
 bool DocumentBroker::handleLockResult(ClientSession& session,
                                       const StorageBase::LockUpdateResult& result)
 {
@@ -2870,6 +3058,39 @@ bool DocumentBroker::handleLockResult(ClientSession& session,
 
         case StorageBase::LockUpdateResult::Status::UNAUTHORIZED:
         {
+            // A 401 here is an EXPIRED TOKEN on the 60s lock-refresh tick, and it is
+            // RECOVERABLE: the host re-authorizes every callback and mints a
+            // replacement on request. Demoting on the spot — what this did until now
+            // — threw the session's own authorization away FIRST, which is why the
+            // client's "try again" was then refused locally before any HTTP went out
+            // ("Expired authorization token") and nothing ever lifted the read-only.
+            // Measured at 108-193 live sessions per day in production from 2026-09-14.
+            //
+            // Not every UNAUTHORIZED is that, though: coolwsd maps 401, 403 AND 404
+            // onto this branch, and the host application deliberately answers 404 for
+            // "no access right now" and for a caller who is read-only right now,
+            // precisely to keep us off the refresh path. So only a true 401 asks for
+            // a token; anything else demotes exactly as before, or a revoked user
+            // would keep an editable toolbar for the length of the refresh timeout.
+            // The tracked TTL can expire during the HTTP request, and an upload
+            // may already be refreshing it. Neither is an explicit invalidation.
+            const bool expiredToken = requestedLock == StorageBase::LockState::LOCK &&
+                                      result.httpStatus() == 401u &&
+                                      (session.getAuthorization().isValid() ||
+                                       session.getAuthorization().needTokenRefresh());
+            if (expiredToken && requestTokenRefresh(session, ClientSession::TokenRefreshCause::Lock,
+                                                    "a lock refresh", _docKey))
+            {
+                // The lock is not at risk while we wait: the host's lock TTL (180s)
+                // outlives both the refresh timeout (60s) and the refresh cadence
+                // (60s), so one deferred cycle cannot drop it. Bump the timer so the
+                // next poll tick does not re-enter refreshLock underneath the request
+                // in flight; if the host never answers, the demotion lands in the
+                // poll-tick timeout handler instead of here.
+                _lockCtx->bumpTimer();
+                return false;
+            }
+
             LOG_ERR("Failed to " << StorageBase::nameShort(requestedLock) << " docKey [" << _docKey
                                  << "]. Invalid or expired access token. Notifying client and "
                                     "invalidating the authorization token of session ["
@@ -2885,6 +3106,29 @@ bool DocumentBroker::handleLockResult(ClientSession& session,
 
         case StorageBase::LockUpdateResult::Status::FAILED:
         {
+            // Vulcan: a refresh of the lock this document already holds that the host
+            // never answered (0: a timeout or a dropped connection) or answered with a
+            // 5xx is not a refusal. Demoting on it was permanent: the session asked
+            // for read-only on its next reconnect, so only reopening the document
+            // recovered (2026-10-01: 97 HTTP-0 and 17 HTTP-502 refreshes, 112
+            // documents, median 14 minutes stuck). Do not demote; retry next refresh
+            // period (60 s), which lands inside the host's lock TTL (180 s). Past the
+            // TTL the same LOCK re-takes the lapsed lock, and only a refusal demotes.
+            // A LOCK that TAKES the lock still fails below.
+            const unsigned httpStatus = result.httpStatus();
+            if (requestedLock == StorageBase::LockState::LOCK && _lockCtx->isLocked() &&
+                (httpStatus == 0 || httpStatus >= 500))
+            {
+                LOG_WRN("Lock refresh of docKey [" << _docKey << "] by session ["
+                                                   << session.getId() << "] got HTTP "
+                                                   << httpStatus << " [" << reason
+                                                   << "]. Not demoting: the lock stays held and "
+                                                      "is retried next refresh period");
+                // Without it needsRefresh() stays true and the poll re-sends at once.
+                _lockCtx->bumpTimer();
+                return false;
+            }
+
             LOG_ERR("Failed to " << StorageBase::nameShort(requestedLock) << " docKey [" << _docKey
                                  << "] with reason [" << reason
                                  << "]. Notifying client and making session [" << session.getId()
@@ -3013,6 +3257,31 @@ void DocumentBroker::handleSaveResponse(const std::shared_ptr<ClientSession>& se
             result = resultObj->get("value").toString();
     }
 
+    // Vulcan: the first save answered after autoSaveAndStop committed the
+    // views' in-progress cells (vulcanCommitInProgressInput): the save it owes,
+    // or another that got there first (the last editor's exit save). It was
+    // requested after the commit, because the commit is only sent while no
+    // save is in flight. The claim is pending only when the document was
+    // clean at the commit and a person sent modifying input in this broker's
+    // life, so when such a save writes something, what it writes is that
+    // person's committed cell: the periodic save after the typing cleared the
+    // sticky bit while it held the cell open, and the host declines a save
+    // that claims no user edit. A document that was already dirty (engine
+    // dirt after its last upload) is not claimed, so its going-away save is
+    // declined as before. "unmodified" means the commit changed
+    // nothing; a failed save leaves the claim to the save that retries it.
+    if (_vulcanCommitClaimPending)
+    {
+        if (success)
+        {
+            _vulcanCommitClaimPending = false;
+            _userEditedSinceUpload = true;
+            _nextStorageAttrs.setUserModified(true);
+        }
+        else if (result == "unmodified")
+            _vulcanCommitClaimPending = false;
+    }
+
     // wasModified is only set when LOKit saves the document.
     // If the document was modified before saving, it would
     // be true. Otherwise, it's false. Meaningful when forced
@@ -3026,7 +3295,14 @@ void DocumentBroker::handleSaveResponse(const std::shared_ptr<ClientSession>& se
         const bool wasModified = (json->get("wasModified").toString() == "true");
         LOG_DBG("Core reported that the file was " << (wasModified ? "" : "not ")
                                                    << "modified before saving");
-        _nextStorageAttrs.setUserModified(wasModified);
+        // Vulcan: do NOT overwrite IsModifiedByUser with
+        // the engine's answer — wasModified is the same layout-dirtied flag the
+        // sticky bit replaces, and it also cannot see human work stranded by a
+        // failed upload. Refresh from the bit instead: strictly later than the
+        // sendUnoSave capture, so it also picks up an edit that landed while
+        // the save was running.
+        _nextStorageAttrs.setUserModified(userEditedSinceUpload());
+        _nextStorageAttrs.setDeletingInput(deletingInputSinceUpload());
     }
 
     // Update the storage attributes to capture what's
@@ -3038,6 +3314,25 @@ void DocumentBroker::handleSaveResponse(const std::shared_ptr<ClientSession>& se
 
     // Record that we got a response to avoid timing out on saving.
     _saveManager.setLastSaveResult(success || result == "unmodified", /*newVersion=*/success);
+
+    // Vulcan: core refused the save through a spreadsheet view with a
+    // modeless dialog open (a Calc reference dialog locking it refuses every
+    // .uno:Save): the next automatic save goes through another view, or waits
+    // (autoSave). A refusal with no such dialog open (the kit failed the save
+    // for another reason, or a text document, which tracks none) is no lock
+    // wsd can see, and the next save stays with upstream's pick, so a person's
+    // typing is not saved through another view (an agent's) and booked to it.
+    _vulcanKitRefusedSaveSessionId =
+        (!success && result != "unmodified" && session->vulcanSaveBlockedByDialog())
+            ? session->getId()
+            : std::string();
+
+    // Vulcan: the file this save wrote holds every edit sent before the save
+    // was requested. The upload that carries it records this time, so its
+    // landing clears the sticky user-edit bit only when nothing was edited
+    // after it (handleUploadToStorageResponse).
+    if (success)
+        _uploadingFileSaveRequestTime = _saveManager.lastSaveRequestTime();
 
     if (success)
         LOG_DBG("Save result from Core: saved (during " << DocumentState::name(_docState.activity())
@@ -3099,6 +3394,26 @@ void DocumentBroker::onTokenRefreshed(const std::shared_ptr<ClientSession>& sess
 {
     ASSERT_CORRECT_THREAD();
     assert(session && "Expected a valid session for onTokenRefreshed");
+
+    const bool retryLock = session->hasTokenRefreshCause(ClientSession::TokenRefreshCause::Lock);
+    session->clearTokenRefreshCauses();
+    if (retryLock)
+    {
+        // The refresh was asked for by a lock refresh that 401ed, so the thing to
+        // retry is the LOCK. Without this the session recovers its token and then
+        // sits on it: the lock timer was bumped when the refresh was requested, so
+        // nothing would re-announce the lock for another full refresh period, and
+        // the host's record of it would age out while the user typed.
+        if (_storage && _lockCtx->supportsLocks() && _lockCtx->isLocked() &&
+            !_lockStateUpdateRequest)
+        {
+            LOG_INF("Token refreshed for session [" << session->getId() << "] on docKey ["
+                                                    << _docKey << "]. Retrying the lock refresh");
+            refreshLock();
+        }
+        // Falls through: an upload may ALSO have been waiting on this token, and the
+        // check below is the one that knows whether it was.
+    }
 
     if (!_storageManager.lastUploadSuccessful())
     {
@@ -3229,8 +3544,10 @@ void DocumentBroker::uploadToStorage(const std::shared_ptr<ClientSession>& sessi
     LOG_TRC("uploadToStorage [" << session->getId() << "]: " << (force ? "" : "not") << " forced");
 
     // Upload immediately if forced or had no failures. Otherwise, throttle (on failure).
+    // Vulcan: while a retry is in flight, uploadToStorageInternal defers this
+    // upload until the retry lands rather than the throttle dropping it.
     if (force || _storageManager.lastUploadSuccessful() ||
-        _storageManager.canUploadNow(isUnloading()))
+        _storageManager.canUploadNow(isUnloading()) || isUploadInFlight())
     {
         constexpr bool isRename = false;
         constexpr bool isExport = false;
@@ -3297,6 +3614,45 @@ void DocumentBroker::uploadToStorageInternal(const std::shared_ptr<ClientSession
         return;
     }
 
+    // Vulcan: one upload at a time. WopiStorage drops a second upload as
+    // "already in progress", so starting one now would replace the in-flight
+    // _uploadRequest and storage attributes with a request that is never sent,
+    // and the in-flight upload's answer would be booked against it.
+    const bool isPlainUpload = saveAsPath.empty() && !isRename;
+    if (isUploadInFlight())
+    {
+        if (isPlainUpload)
+        {
+            // The attributes of the saves since then stay in _currentStorageAttrs
+            // for the deferred upload, which also carries the newest file.
+            LOG_DBG("Deferring the upload of docKey [" << _docKey << "] for session ["
+                                                       << sessionId
+                                                       << "] until the upload in flight lands");
+            _uploadDeferred = true;
+            _deferredUploadSession = session;
+            if (force)
+                _currentStorageAttrs.setForced(true);
+            return;
+        }
+
+        // Save-as, export and rename fail the way they do when they produce no
+        // file, and the client can retry. Not broadcastSaveResult: a host
+        // waiting on a save's upload would read it as that save's.
+        LOG_WRN("Cannot " << (isRename ? "rename" : (isExport ? "export" : "save-as"))
+                          << " docKey [" << _docKey
+                          << "] while an upload is in flight. Notifying session [" << sessionId
+                          << ']');
+        if (isRename)
+        {
+            endRenameFileCommand();
+            session->sendTextFrameAndLogError("error: cmd=renamefile kind=failed");
+        }
+        else
+            session->sendTextFrameAndLogError("error: cmd=storage kind=savefailed");
+
+        return;
+    }
+
     LOG_DBG("Uploading to storage docKey [" << _docKey << "] for session [" << sessionId
                                             << "]. Force: " << force);
 
@@ -3349,7 +3705,15 @@ void DocumentBroker::uploadToStorageInternal(const std::shared_ptr<ClientSession
 
     LOG_DBG("Uploading [" << _docKey << "] after saving to URI [" << uriAnonym << ']');
 
-    _uploadRequest = std::make_unique<UploadRequest>(uriAnonym, newFileModifiedTime, session,
+    if (isPlainUpload)
+    {
+        // This upload carries the newest file, so nothing is deferred any more.
+        _uploadDeferred = false;
+        _deferredUploadSession.reset();
+    }
+
+    _uploadRequest = std::make_unique<UploadRequest>(uriAnonym, newFileModifiedTime,
+                                                     _uploadingFileSaveRequestTime, session,
                                                      isSaveAs, isExport, isRename);
 
     StorageBase::AsyncUploadCallback asyncUploadCallback =
@@ -3415,9 +3779,23 @@ void DocumentBroker::uploadToStorageInternal(const std::shared_ptr<ClientSession
 #endif // !MOBILEAPP && !WASMAPP
 
             default:
-                reportUploadToStorageFailed();
+                // Vulcan: the upload never reached the host (wsd could
+                // not connect, or the TLS handshake failed). On a host with the
+                // handshake the poll loop's retry of a failed upload sends it
+                // again, as it does one the host never answered: upstream's
+                // "check your permissions" is false here too.
+                if (isVulcanRetriedSave())
+                    reportUploadUnanswered(asyncUp.result().getReason());
+                else
+                    reportUploadToStorageFailed();
             break;
         }
+
+        // Vulcan: as in handleUploadToStorageFailed, the retry must carry the
+        // failed upload's attributes (IsModifiedByUser, the editors). Without
+        // this a connection failure lost them, and the retry declared no edit.
+        _currentStorageAttrs.merge(_lastStorageAttrs);
+        _lastStorageAttrs.reset();
     };
 
     _lastStorageAttrs = _currentStorageAttrs;
@@ -3433,7 +3811,9 @@ void DocumentBroker::uploadToStorageInternal(const std::shared_ptr<ClientSession
         _lastStorageAttrs.setForced(true);
     }
 
-    _nextStorageAttrs.reset();
+    // Vulcan: keep any editor recorded while we were saving - those edits will
+    // ride the *next* upload and must still be attributed there.
+    _nextStorageAttrs.resetKeepingEditors();
 
     _storageManager.markLastUploadRequestTime();
     const std::size_t size = _storage->uploadLocalFileToStorageAsync(
@@ -3473,6 +3853,7 @@ void DocumentBroker::handleUploadToStorageSuccessful(const StorageBase::UploadRe
 
         // After a successful save, we are sure that document in the storage is same as ours
         _documentChangedInStorage = false;
+        _vulcanRefusedSaveUnkept = false;
 
         // Reset the storage attributes; They've been used and we can discard them.
         _lastStorageAttrs.reset();
@@ -3483,6 +3864,13 @@ void DocumentBroker::handleUploadToStorageSuccessful(const StorageBase::UploadRe
                 << _storageManager.getLastModifiedServerTimeString()
                 << ", newFileModifiedTime: " << _uploadRequest->newFileModifiedLocalTime()
                 << ". Current Activity: " << DocumentState::name(_docState.activity()));
+
+        // Vulcan: a save answered while this upload was in flight, and its upload
+        // was deferred. It goes first, ahead of a rename or a switch to offline,
+        // and its own landing does what follows here, including the
+        // lastmodtime: a host reads as that save's upload.
+        if (startDeferredUpload())
+            return;
 
         // Handle activity-specific logic.
         switch (_docState.activity())
@@ -3592,6 +3980,10 @@ void DocumentBroker::handleUploadToStorageSuccessful(const StorageBase::UploadRe
         }
     }
 
+    // Vulcan: the same after a rename, save-as or export landed.
+    if (startDeferredUpload())
+        return;
+
     broadcastLastModificationTime();
 
     if (_docState.isUnloadRequested())
@@ -3633,6 +4025,27 @@ void DocumentBroker::handleUploadToStorageResponse(const StorageBase::UploadResu
                                      << ", previousUploadSuccessful: " << previousUploadSuccessful);
     _storageManager.setLastUploadResult(lastUploadSuccessful);
 
+    // Vulcan: the sticky user-edit bit means "there is human work here that
+    // storage does not have yet". A successful upload is exactly the event that
+    // stops being true. A FAILED upload deliberately leaves it set, so the
+    // retry still declares the edit.
+    //
+    // Race guard: an edit can arrive between the save snapshot that fed this
+    // upload and this response. Clearing unconditionally would wipe that edit's
+    // claim, so the next (e.g. exit) save would report userModified=false and
+    // the host would decline it. If modify activity happened after the request
+    // of the save this upload carries, the uploaded bytes predate it — leave the
+    // bit set. That is the save's own request time, recorded in the upload: a
+    // later save may have been requested, or answered and deferred, while this
+    // upload was in flight. A save-as, export or rename carries no save of the
+    // document, so it leaves the bit alone.
+    if (lastUploadSuccessful && !_uploadRequest->isSaveAs() && !_uploadRequest->isRename() &&
+        !(_uploadRequest->saveRequestTime() < _lastModifyActivityTime))
+    {
+        _userEditedSinceUpload = false;
+        _deletingInputSinceUpload = false;
+    }
+
     UNITWSD_CALL_INSTANCE(_unitWsd, onDocumentUploaded(lastUploadSuccessful));
 
 #if !MOBILEAPP
@@ -3671,6 +4084,39 @@ void DocumentBroker::reportUploadToStorageFailed(std::string_view reason)
         LOG_ERR("Failed to upload docKey [" << _docKey << "] to URI [" << _uploadRequest->uriAnonym()
                                             << "]. The client session is closed.");
     }
+}
+
+bool DocumentBroker::isVulcanRetriedSave() const
+{
+    // Vulcan: a plain save (not a save-as, export or rename) on a host
+    // that advertises the handshake (VulcanContentHead). Such a host
+    // judges a save sent again, so a failed upload of it is retried, and the
+    // host's own answer decides it.
+    return _uploadRequest && !_uploadRequest->isSaveAs() && !_uploadRequest->isRename() &&
+           _storage && !_storage->getFileInfo().getVulcanContentHead().empty();
+}
+
+void DocumentBroker::reportUploadUnanswered(std::string_view reason)
+{
+    // Vulcan: the host never answered this save, and it advertises
+    // the handshake, so the failed-upload retry sends the save again
+    // and the host judges it (see the SyncFileTimestamp continuation in
+    // checkFileInfo). Upstream's "please check your permissions" is false
+    // here. The frame is the upstream one plus a token the fork's browser
+    // reads to say so without a modal; a browser that predates the token
+    // ignores it and shows its modal, as before.
+    const auto session = _uploadRequest->session();
+    if (!session)
+    {
+        reportUploadToStorageFailed(reason);
+        return;
+    }
+
+    LOG_ERR("Failed to upload docKey [" << _docKey << "] to URI [" << _uploadRequest->uriAnonym()
+                                        << "]. Notifying client. No response: the upload "
+                                           "will be retried");
+    session->sendTextFrame(COOLProtocol::buildErrorFrame("storage", "savefailed", reason) +
+                           " vulcanunanswered=1");
 }
 
 void DocumentBroker::handleUploadToStorageFailed(const StorageBase::UploadResult& uploadResult)
@@ -3742,10 +4188,16 @@ void DocumentBroker::handleUploadToStorageFailed(const StorageBase::UploadResult
         const auto session = _uploadRequest->session();
 
         // Bound the refresh-on-unauthorized retry loop: a successful resetaccesstoken
-        // flips state back to Token, so isRefreshingToken() alone can't gate further attempts.
-        constexpr int MaxTokenRefreshAttempts = 3;
-        if (session && !session->isRefreshingToken() &&
-            session->tokenRefreshAttempts() < MaxTokenRefreshAttempts)
+        // flips state back to Token, so isRefreshingToken() alone can't gate further
+        // attempts. The cap is stated once, above requestTokenRefresh, because the
+        // attempt counter behind it is shared with the lock lane.
+        if (session && session->isRefreshingToken())
+        {
+            // A LOCK and upload can both be in flight when the token expires.
+            // Preserve the existing wait, including its deadline and lock cause.
+            session->addTokenRefreshCause(ClientSession::TokenRefreshCause::Upload);
+        }
+        else if (session && session->tokenRefreshAttempts() < MaxTokenRefreshAttempts)
         {
             // Ask the host for a fresh token before giving up.
             LOG_WRN("Cannot upload docKey ["
@@ -3763,8 +4215,7 @@ void DocumentBroker::handleUploadToStorageFailed(const StorageBase::UploadResult
         }
         else
         {
-            // No session, mid-refresh (refresh arrived but upload failed again),
-            // or hit the retry cap.
+            // No session, or hit the retry cap.
             if (session)
             {
                 LOG_ERR("Cannot upload docKey ["
@@ -3801,7 +4252,12 @@ void DocumentBroker::handleUploadToStorageFailed(const StorageBase::UploadResult
         endActivity(); // Probably in Activity::Upload.
         startActivity(DocumentState::Activity::SyncFileTimestamp);
 
-        reportUploadToStorageFailed(uploadResult.getReason());
+        // Vulcan: a save the host never answered, on a host that
+        // advertises the handshake, is sent again (reportUploadUnanswered).
+        if (uploadResult.isVulcanNoResponse() && isVulcanRetriedSave())
+            reportUploadUnanswered(uploadResult.getReason());
+        else
+            reportUploadToStorageFailed(uploadResult.getReason());
 
         // Notify all.
         broadcastSaveResult(false, "Save failed", uploadResult.getReason());
@@ -3814,10 +4270,21 @@ void DocumentBroker::handleUploadToStorageFailed(const StorageBase::UploadResult
                 << _storageManager.getSizeAsUploaded() << " bytes because it's changed in storage");
         broadcastSaveResult(false, "Conflict: Document changed in storage",
                             uploadResult.getReason());
+        // Vulcan handshake: reload-resolve only when the host
+        // confirmed the rejected bytes are safe — parked as a conflicted copy
+        // or byte-identical to existing revision history. "failed" or a
+        // pre-handshake host keeps the upstream dialog.
+        const std::string& resolution = uploadResult.getVulcanConflictResolution();
+        const bool reloadResolved = (resolution == "parked" || resolution == "duplicate");
+        // Vulcan: refused and not kept, so the dialog this raises
+        // must not promise that saving keeps the edits (vulcanConflictDialogFrame).
+        if (!reloadResolved)
+            _vulcanRefusedSaveUnkept = true;
         handleDocumentConflict("Document changed in storage during upload.\nLast known timestamp: " +
                                _storageManager.getLastModifiedServerTimeString() +
                                "\nStorage response: " +
-                               getAbbreviatedMessage(uploadResult.getReason()));
+                               getAbbreviatedMessage(uploadResult.getReason()),
+                               reloadResolved);
     }
 
     // We failed to upload, merge the last attributes into the current one.
@@ -3825,18 +4292,46 @@ void DocumentBroker::handleUploadToStorageFailed(const StorageBase::UploadResult
     _lastStorageAttrs.reset();
 }
 
-void DocumentBroker::handleDocumentConflict(std::string details)
+void DocumentBroker::handleDocumentConflict(std::string details, bool reloadResolved)
 {
     _documentChangedInStorage = true;
 
-    // Do not reload the document ("close: documentconflict") if there are
-    // any changes in the loaded document, either saved or unsaved. Only the
-    // dialog (error:) path forwards the technical details; the silent reload
-    // (close:) path has no use for them.
+    if (reloadResolved)
+    {
+        // Vulcan: storage is authoritative — the agent lane
+        // (files.overwrite) legitimately rewrites documents while panels are
+        // open, so "changed in storage" is a routine event, not a user
+        // decision. The WOPI host confirmed any bytes headed to storage are
+        // safe (parked as a conflicted copy, or byte-identical to existing
+        // history), so the upstream Cancel/Discard/Overwrite dialog — whose
+        // every button loses someone's work under concurrent agent editing —
+        // is not needed: tell every client to reload (Socket.ts auto-reloads
+        // on this close frame; the rejoin re-downloads from storage) and tear
+        // this broker down so its stale buffer can never be uploaded.
+        LOG_WRN("Document conflict on [" << _docKey << "]; reloading all clients. " << details
+#if !MOBILEAPP
+                                         << (_storage && _quarantine && _quarantine->isEnabled()
+                                                 ? " (last saved copy quarantined)"
+                                                 : " (Quarantine disabled)")
+#endif // !MOBILEAPP
+        );
+
+        const std::size_t reloadingClients = broadcastMessage("close: documentconflict");
+        LOG_TRC("There are " << reloadingClients
+                             << " active clients after broadcasting documentconflict");
+        closeDocument("documentconflict");
+        return;
+    }
+
+    // Upstream path — a pre-handshake WOPI host, or bytes that were not
+    // rescued: do not reload the document ("close: documentconflict") if
+    // there are any changes in the loaded document, either saved or unsaved.
+    // Only the dialog (error:) path forwards the technical details; the
+    // silent reload (close:) path has no use for them.
     const std::string message =
         (_lastStorageAttrs.isUserModified() || _currentStorageAttrs.isUserModified() ||
          isPossiblyModified())
-            ? COOLProtocol::buildErrorFrame("storage", "documentconflict", details)
+            ? vulcanConflictDialogFrame(details)
             : "close: documentconflict";
 
     const std::size_t activeClients = broadcastMessage(message);
@@ -3860,6 +4355,24 @@ void DocumentBroker::handleDocumentConflict(std::string details)
         // Nothing more to do.
         stop("conflict");
     }
+}
+
+std::string DocumentBroker::vulcanConflictDialogFrame(const std::string& details) const
+{
+    // Vulcan: the dialog's first choice saves the edits. A host with
+    // the handshake refuses that save on the moved head, keeps it as a
+    // version, and the upload-conflict path reloads, so the frame says so
+    // (vulcankeepssave=1) and the browser tells the person where the edits go.
+    // Not while the host's last answer was a refusal it did not keep (`failed`,
+    // or a 409 with no resolution, such as a lock mismatch) and no save has
+    // landed since: the same save could well get the same answer. Nor
+    // without the handshake. The browser then promises nothing and keeps a way
+    // to go on editing. A browser that predates the token ignores it.
+    std::string frame = COOLProtocol::buildErrorFrame("storage", "documentconflict", details);
+    if (!_vulcanRefusedSaveUnkept && _storage &&
+        !_storage->getFileInfo().getVulcanContentHead().empty())
+        frame += " vulcankeepssave=1";
+    return frame;
 }
 
 void DocumentBroker::broadcastSaveResult(bool success, const std::string_view result,
@@ -3962,22 +4475,102 @@ std::shared_ptr<ClientSession> DocumentBroker::getWriteableSession() const
         // Save the document using a session that is loaded, editable, and
         // with a valid authorization token, or the first.
         // Note that isViewLoaded() precludes inWaitDisconnected().
-        if (!savingSession || (session->isViewLoaded() && session->isEditable() &&
-                               session->getAuthorization().isValid()))
+        const bool canWrite = session->isViewLoaded() && session->isEditable() &&
+                              session->getAuthorization().isValid();
+        if (!savingSession || canWrite)
         {
             savingSession = session;
         }
 
-        // or if any of the sessions is document owner, use that.
-        //FIXME: can the owner be read-only?
-        if (session->isDocumentOwner())
+        // or if any of the sessions is document owner, use that. Vulcan: only
+        // an owner that can write. The owner used to win regardless, so an
+        // owner's viewer tab, lock-failed tab or expired token was handed to
+        // refreshLock, which could only log and re-arm while the host lock
+        // lapsed under another session that was really editing.
+        if (canWrite && session->isDocumentOwner())
         {
-            savingSession = session;
             break;
         }
     }
 
     return savingSession;
+}
+
+std::shared_ptr<ClientSession> DocumentBroker::vulcanSavingSession() const
+{
+    ASSERT_CORRECT_THREAD();
+
+    // A view that can save: loaded, editable, no modeless dialog open in a
+    // spreadsheet, and not the view core refused the last save in.
+    const auto usable = [this](const std::shared_ptr<ClientSession>& session)
+    {
+        return session->isViewLoaded() && session->isEditable() &&
+               !session->vulcanSaveBlockedByDialog() &&
+               session->getId() != _vulcanKitRefusedSaveSessionId;
+    };
+
+    // 1. Upstream's pick, the last editor, when it can save.
+    const auto itLastEditingSession = _sessions.find(_lastEditingSessionId);
+    if (itLastEditingSession != _sessions.end() && usable(itLastEditingSession->second))
+        return itLastEditingSession->second;
+
+    // 2. getWriteableSession's rule over the views that can save.
+    std::shared_ptr<ClientSession> savingSession;
+    for (const auto& sessionIt : _sessions)
+    {
+        const auto& session = sessionIt.second;
+        if (usable(session) && session->getAuthorization().isValid())
+        {
+            savingSession = session;
+            if (session->isDocumentOwner())
+                break;
+        }
+    }
+
+    if (savingSession)
+    {
+        if (itLastEditingSession != _sessions.end() &&
+            itLastEditingSession->second != savingSession)
+            LOG_DBG("Saving through session [" << savingSession->getId()
+                                               << "] instead of the last editor ["
+                                               << _lastEditingSessionId
+                                               << "], which cannot save now");
+        return savingSession;
+    }
+
+    // 3. No view can save: upstream's pick, unchanged.
+    return (itLastEditingSession != _sessions.end() &&
+            itLastEditingSession->second->isEditable() &&
+            itLastEditingSession->second->isViewLoaded())
+               ? itLastEditingSession->second
+               : getWriteableSession();
+}
+
+bool DocumentBroker::vulcanGiveUpWaitsForDialogClose(const std::size_t limStoreFailures)
+{
+    ASSERT_CORRECT_THREAD();
+
+    // The host's failures: no close changes its answers.
+    if (_storageManager.uploadFailureCount() >= limStoreFailures)
+        return false;
+
+    // Core's last refusal came through a view that still has a dialog open
+    // that may lock it.
+    const auto it = _sessions.find(_vulcanKitRefusedSaveSessionId);
+    if (it == _sessions.end() || !it->second->vulcanSaveBlockedByDialog())
+        return false;
+
+    // One save: the wait ends once a save sent after it began fails too.
+    const std::size_t failures = _saveManager.saveFailureCount();
+    if (_vulcanGiveUpHeldAtFailures == 0)
+    {
+        _vulcanGiveUpHeldAtFailures = failures;
+        LOG_WRN("Save failure limit reached for docKey ["
+                << _docKey << "] after " << failures << " failures, the last in session ["
+                << it->first << "], which has a dialog open: trying the save that closes it "
+                << "before giving up");
+    }
+    return failures <= _vulcanGiveUpHeldAtFailures;
 }
 
 void DocumentBroker::refreshLock()
@@ -4005,6 +4598,18 @@ void DocumentBroker::refreshLock()
         {
             LOG_ERR("Failed to refresh lock of docKey [" << _docKey << "] with session ["
                                                          << savingSessionId << "]: " << error);
+            // Re-arm exactly as the two branches above do. Without it
+            // _lastLockTime never moves, needsRefresh() stays true, and the
+            // poll re-enters here on EVERY iteration: a document whose chosen
+            // session is read-only (getWriteableSession() then preferred the
+            // owner even when it could not write; it still falls back to the
+            // first session when none can, and updateStorageLockStateAsync
+            // refuses a read-only session BEFORE it arms
+            // _lockStateUpdateRequest, so nothing else gates re-entry) logged
+            // this line 25,000 times in one production hour on 2026-09-17,
+            // from three documents. One retry per refresh period is the
+            // intended cadence.
+            _lockCtx->bumpTimer();
         }
     }
 }
@@ -4042,14 +4647,18 @@ DocumentBroker::NeedToSave DocumentBroker::needToSaveToDisk() const
 
 bool DocumentBroker::manualSave(const std::shared_ptr<ClientSession>& session,
                                 bool dontTerminateEdit, bool dontSaveIfUnmodified,
-                                const std::string& extendedData)
+                                const std::string& extendedData, bool beforeClose)
 {
     // If we aren't saving already.
     if (_docState.activity() != DocumentState::Activity::Save)
     {
-        LOG_DBG("Manual save by " << session->getName() << " on docKey [" << _docKey << ']');
+        LOG_DBG("Manual save by " << session->getName() << " on docKey [" << _docKey << ']'
+                                  << (beforeClose ? " before the host closes the view" : ""));
+        // Vulcan: as the final write, a save before the host's close
+        // first closes the view's modeless dialogs, which would make core
+        // refuse it ("cannot be saved" with the Function Wizard open).
         return sendUnoSave(session, dontTerminateEdit, dontSaveIfUnmodified,
-                           /*isAutosave=*/false, /*finalWrite=*/false, extendedData);
+                           /*isAutosave=*/false, /*finalWrite=*/beforeClose, extendedData);
     }
 
     LOG_DBG("Document [" << _docKey << "] is currently saving and cannot issue another save");
@@ -4099,16 +4708,30 @@ bool DocumentBroker::autoSave(const bool force, const bool dontSaveIfUnmodified,
     // Which session to use when auto saving ?
     // Prefer the last editing view, if still valid, otherwise, find the first writable sessionId.
     // Note: a loaded view cannot be disconnecting.
-    const auto itLastEditingSession = _sessions.find(_lastEditingSessionId);
-    const std::shared_ptr<ClientSession> savingSession =
-        (itLastEditingSession != _sessions.end() && itLastEditingSession->second->isEditable() &&
-         itLastEditingSession->second->isViewLoaded())
-            ? itLastEditingSession->second
-            : getWriteableSession();
+    // Vulcan: a view that can save comes first (vulcanSavingSession).
+    const std::shared_ptr<ClientSession> savingSession = vulcanSavingSession();
 
     if (!savingSession)
     {
         LOG_ERR("No session to use for saving");
+        return false;
+    }
+
+    // Vulcan: core refused the last save through this view, and a
+    // modeless dialog is still open in it (a Calc reference dialog locks the
+    // view), and no other view can save. Another periodic save would be
+    // refused too, and each refusal alerts every person and counts toward the
+    // give-up before the shutdown save (per_document.limit_store_failures). It
+    // waits until the dialog closes. A final write closes the dialog instead
+    // (sendUnoSave). A forced save (the park save when storage changed under
+    // unsaved edits, the admin's save before a migration or under memory
+    // pressure) is sent: its caller asked for it now.
+    if (!force && !finalWrite && savingSession->getId() == _vulcanKitRefusedSaveSessionId &&
+        savingSession->vulcanSaveBlockedByDialog())
+    {
+        LOG_DBG("autoSave: session [" << savingSession->getId() << "] refused the last save and has "
+                                      << savingSession->vulcanModelessDialogs().size()
+                                      << " modeless dialog(s) open; waiting for them to close");
         return false;
     }
 
@@ -4126,10 +4749,22 @@ bool DocumentBroker::autoSave(const bool force, const bool dontSaveIfUnmodified,
         // potentially optimize it away. This is as good as user-issued save, since this is
         // triggered when the document is closed. In the case of network disconnection or browser crash
         // most users would want to have had the chance to hit save before the document unloaded.
-        sent = sendUnoSave(savingSession, /*dontTerminateEdit=*/true, dontSaveIfUnmodified,
+        // Vulcan: except the final write. Nobody keeps typing in a broker that
+        // is going away, and terminating the saving view's edit puts what it
+        // was typing into this save (Calc's cell, Impress's text box). The
+        // other views' cells were committed before it (autoSaveAndStop).
+        sent = sendUnoSave(savingSession, /*dontTerminateEdit=*/!finalWrite, dontSaveIfUnmodified,
                            /*isAutosave=*/false, finalWrite);
     }
-    else if (isModified())
+    // Vulcan: the TIMED/IDLE branch additionally requires that a
+    // human actually edited something. This is the branch that fires on a
+    // viewer: for a session with no modifying client messages
+    // _lastModifyActivityTime never advances past broker construction, so
+    // inactivityTime is always large and the idle save fires as soon as
+    // timeSinceLastSave >= idlesave_duration_secs (30 by default). The forced
+    // and exit paths above are deliberately NOT gated — the WOPI host is the
+    // enforcement point, so a mistake here can never lose a real edit.
+    else if (isModified() && userEditedSinceUpload())
     {
         const std::chrono::steady_clock::time_point now = std::chrono::steady_clock::now();
         const std::chrono::milliseconds inactivityTime
@@ -4162,7 +4797,9 @@ bool DocumentBroker::autoSave(const bool force, const bool dontSaveIfUnmodified,
         if (save)
         {
             LOG_TRC("Sending timed save command for [" << _docKey << ']');
-            sent = sendUnoSave(savingSession, /*dontTerminateEdit=*/true,
+            // Vulcan: the periodic save keeps the edit open (a person typing
+            // stays in the cell); a final write ends it, as above.
+            sent = sendUnoSave(savingSession, /*dontTerminateEdit=*/!finalWrite,
                                /*dontSaveIfUnmodified=*/true, /*isAutosave=*/true,
                                finalWrite);
         }
@@ -4179,6 +4816,72 @@ void DocumentBroker::autoSaveAndStop(const std::string_view reason)
                 << reason << "] skipped for docKey [" << getDocKey() << "] because an async "
                 << (_saveManager.isSaving() ? "saving" : "uploading") << " is in progress");
         return;
+    }
+
+    // Vulcan: the broker is going away (recycling on SIGTERM, which is how a
+    // roll stops a task; idle; unload; close) with its views still attached.
+    // A Calc cell typed into without Enter is in no save until it is
+    // committed: every periodic save, and upstream's shutdown save, keeps
+    // DontTerminateEdit so a person typing stays in the cell, and only the
+    // saving view could be committed by the save anyway. Once the last
+    // periodic save cleared the modified flag, the broker would even stop
+    // with no save at all. So, once per episode, every spreadsheet view
+    // commits its cell first, and the broker owes one save after that even
+    // when it sees nothing to save. That save keeps DontSaveIfUnmodified: when
+    // nothing was being typed, the kit answers "unmodified" and an untouched
+    // document is not saved again.
+    //
+    // A person who sent modifying input after the last commit may be typing
+    // into a cell again (the broker lived on through an idle episode, whose
+    // views still pass keys), so the episode commits again.
+    if (_vulcanInputCommitSent && _vulcanInputCommitTime < _lastModifyActivityTime)
+        _vulcanInputCommitSent = false;
+
+    if (!_vulcanInputCommitSent)
+    {
+        // Read before the commit: a document the last periodic save left
+        // clean, which a person typed into, is one whose next written save
+        // holds their committed cell (handleSaveResponse claims it). Engine
+        // dirt on a document already dirty is not claimed.
+        const bool cleanBeforeCommit = !isModified();
+        const std::chrono::steady_clock::time_point commitTime = std::chrono::steady_clock::now();
+        if (vulcanCommitInProgressInput(reason) > 0)
+        {
+            _vulcanInputCommitSent = true;
+            _vulcanInputCommitTime = commitTime;
+            _vulcanFinalSaveOwed = true;
+            // A claim an earlier commit left pending stays: no save after
+            // that commit has written anything yet.
+            _vulcanCommitClaimPending = _vulcanCommitClaimPending ||
+                                        (cleanBeforeCommit && _createTime < _lastModifyActivityTime);
+        }
+    }
+
+    if (_vulcanFinalSaveOwed)
+    {
+        if (canSaveToDisk() != CanSave::Yes)
+        {
+            // Nothing can save it; the checks below report what that loses.
+            _vulcanFinalSaveOwed = false;
+        }
+        else if (!_saveManager.canSaveNow(isUnloading()))
+        {
+            LOG_TRC("autoSaveAndStop [" << reason << "] for docKey [" << getDocKey()
+                                        << "]: the save after the commit waits "
+                                        << _saveManager.timeToNextSave(isUnloading()));
+            return;
+        }
+        else
+        {
+            _vulcanFinalSaveOwed = false;
+            LOG_INF("Saving " << reason << " DocumentBroker for docKey [" << getDocKey()
+                              << "] after committing in-progress input");
+            // DontSaveIfUnmodified: when nothing was being typed the kit
+            // answers "unmodified", and an untouched document is not
+            // re-serialised on every roll.
+            if (autoSave(/*force=*/true, /*dontSaveIfUnmodified=*/true, /*finalWrite=*/true))
+                return; // Its response brings the poll back here.
+        }
     }
 
     const NeedToSave needToSave = needToSaveToDisk();
@@ -4328,6 +5031,44 @@ void DocumentBroker::autoSaveAndStop(const std::string_view reason)
     }
 }
 
+std::size_t DocumentBroker::vulcanCommitInProgressInput(const std::string_view reason)
+{
+    ASSERT_CORRECT_THREAD();
+
+    if (isConvertTo() || _docState.isKitDisconnected())
+        return 0;
+
+    std::size_t asked = 0;
+    for (const auto& it : _sessions)
+    {
+        const std::shared_ptr<ClientSession>& session = it.second;
+        if (!session->isViewLoaded() || !session->isEditable() ||
+            !session->isSpreadsheetDocument())
+            continue;
+
+        // The command the browser sends to commit a cell before a drain move
+        // (Toolbar.js, VulcanEditState.ts): Enter's commit in that view, a
+        // no-op when it is not editing a cell. notify=1 makes the kit dispatch
+        // it synchronously (a result listener forces SfxCallMode::SYNCHRON;
+        // the slot is Asynchron otherwise), so the commit has run when the
+        // save queued behind it on the same kit socket checks whether the
+        // document is modified. key and textinput frames are dropped once the
+        // broker is unloading (forwardToChild); uno frames still pass. The
+        // session swallows the result, which the client never asked for.
+        if (forwardToChild(session, "uno .uno:AcceptFormula notify=1"))
+        {
+            session->vulcanExpectCommitResult();
+            ++asked;
+        }
+    }
+
+    if (asked > 0)
+        LOG_INF("Committing in-progress input in " << asked << " spreadsheet view(s) before the "
+                                                   << reason << " save of docKey [" << _docKey
+                                                   << ']');
+    return asked;
+}
+
 bool DocumentBroker::sendUnoSave(const std::shared_ptr<ClientSession>& session,
                                  bool dontTerminateEdit, bool dontSaveIfUnmodified,
                                  bool isAutosave, bool finalWrite,
@@ -4355,6 +5096,19 @@ bool DocumentBroker::sendUnoSave(const std::shared_ptr<ClientSession>& session,
     // arguments init
     oss << '{';
 
+    // Vulcan: a final write closes the saving view's modeless
+    // dialogs right before its save (vulcanCloseBlockingDialogs, below). When
+    // one of them committed the view's cell as it opened (the Function Wizard,
+    // a Calc reference dialog), the save keeps the edit open. The close only
+    // posts the wizard's Cancel, so a save that ended the edit would run first
+    // and store the text the wizard left in the view's input line into the
+    // cell under it: over a saved value, or as a phantom copy in an empty cell.
+    // Under any other dialog the save ends the edit as before, committing a
+    // half-typed cell (a removeSession, rename or offline save sends no
+    // AcceptFormula commit first).
+    if (finalWrite && session->vulcanInputCommittedByDialog())
+        dontTerminateEdit = true;
+
     // We do not want save to terminate editing mode if we are in edit mode now.
     // We want to terminate if forced by the user, otherwise autosave doesn't terminate.
     // Note: We always force terminating edit when saving in the background.
@@ -4371,9 +5125,17 @@ bool DocumentBroker::sendUnoSave(const std::shared_ptr<ClientSession>& session,
     // arguments end
     oss << '}';
 
-    // At this point, if we have any potential modifications, we need to capture the fact.
-    // If Core does report something different after saving, we'll update this flag.
-    _nextStorageAttrs.setUserModified(isModified() || haveModifyActivityAfterSaveRequest());
+    // Vulcan: X-COOL-WOPI-IsModifiedByUser is now sourced
+    // from the broker's sticky human-input bit, not the engine's dirty flag.
+    // The engine flag lies for this purpose — importing or laying out a
+    // document dirties it with nobody involved (a NUMPAGES refresh during a
+    // viewer's layout goes through DocumentStateManager::SetModified) — so the
+    // header now reports the broker's OBSERVED human input since the last
+    // successful upload: set only by a document-modifying client message,
+    // cleared only by a successful upload. The save-result handler refreshes
+    // it from the same bit, so an edit landing mid-save is still declared.
+    _nextStorageAttrs.setUserModified(userEditedSinceUpload());
+    _nextStorageAttrs.setDeletingInput(deletingInputSinceUpload());
 
     if (finalWrite)
         LOG_TRC("suspected final save: don't do background write");
@@ -4382,6 +5144,14 @@ bool DocumentBroker::sendUnoSave(const std::shared_ptr<ClientSession>& session,
     _nextStorageAttrs.setExtendedData(extendedData);
 
     const std::string saveArgs = oss.str();
+
+    // Vulcan: a final write is the last save these views get (the
+    // broker is going away, the last editor left, or the host closes the
+    // saving view once this save lands). A Calc reference dialog
+    // open in the saving view would make core refuse it, so it is closed
+    // first, on the same kit socket, right before the save.
+    if (finalWrite)
+        vulcanCloseBlockingDialogs(session);
 
     // re-written to .uno:Save in the Kit.
     const auto command = std::string("save background=") + (background ? "true " : " ") + saveArgs;
@@ -4404,6 +5174,33 @@ bool DocumentBroker::sendUnoSave(const std::shared_ptr<ClientSession>& session,
             << _docKey << "]: Failed to forward .uno:Save command to session [" << sessionId
             << ']');
     return false;
+}
+
+void DocumentBroker::vulcanCloseBlockingDialogs(const std::shared_ptr<ClientSession>& session)
+{
+    ASSERT_CORRECT_THREAD();
+
+    if (!session->vulcanSaveBlockedByDialog())
+        return;
+
+    // The browser's own X (Control.JSDialog.js close -> JSDialogBuilder's
+    // dialogevent): core answers the dialog with Cancel, which for a Calc
+    // reference dialog unlocks the view at once (ScFormulaReferenceHelper::
+    // DoClose), so the save queued behind it is dispatched unlocked. Nothing
+    // the person typed into the dialog is applied: wsd does not press OK for
+    // anyone. The ids stay until the kit's close frame removes them; sent
+    // again (a retry) to a window that is gone, the close does nothing.
+    for (const auto& dialog : session->vulcanModelessDialogs())
+    {
+        const std::uint64_t id = dialog.first;
+        LOG_INF("Closing modeless dialog " << id << " [" << dialog.second << "] in session ["
+                                           << session->getId()
+                                           << "] before the final save of docKey [" << _docKey
+                                           << "]");
+        forwardToChild(session, "dialogevent " + std::to_string(id) +
+                                    " {\"id\":\"__DIALOG__\", \"cmd\": \"close\", \"data\": "
+                                    "\"null\", \"type\": \"dialog\"}");
+    }
 }
 
 std::string DocumentBroker::getJailRoot() const
@@ -4544,7 +5341,8 @@ std::size_t DocumentBroker::removeSession(const std::shared_ptr<ClientSession>& 
     {
         LOG_WRN("Session [" << session->getId() << "] removed while waiting for token refresh");
         session->invalidateAuthorizationToken();
-        broadcastSaveResult(false, "Session closed during token refresh");
+        if (session->hasTokenRefreshCause(ClientSession::TokenRefreshCause::Upload))
+            broadcastSaveResult(false, "Session closed during token refresh");
     }
 
     const std::string id = session->getId();
@@ -4621,10 +5419,36 @@ std::size_t DocumentBroker::removeSession(const std::shared_ptr<ClientSession>& 
         // If last editable, save (if not saving already) and
         // don't remove until after uploading to storage.
         // If always_save_on_exit=true, issue a save to guarantee uploading if necessary.
+        // Vulcan: and don't remove it while an upload is deferred behind the one
+        // in flight (uploadToStorageInternal). That upload needs an editable
+        // session when the one in flight lands, and disconnecting would unlock
+        // the document before it is sent. The landing disconnects this closed
+        // session once the deferred upload has landed. The save on exit still
+        // goes first: its upload is deferred the same way.
+        // Vulcan: and when the last save failed, as autoSaveAndStop
+        // forces it. Calc's Function Wizard turns the kit's ModifiedStatus
+        // false as it opens, while core still holds the cell entered before
+        // it, and core refuses a save through the view it locks. After such a
+        // refusal no input follows the last save request, so isPossiblyModified
+        // was false: the view was let go with no exit save, and the broker then
+        // stopped with nothing that could save ("May have data loss"). Forced,
+        // the exit save is a final write, so it closes the wizard first.
+        // Vulcan: and while storage lacks the saved version (its
+        // upload failed, or is still in flight). A save core finished clears
+        // the modified state, so the view was let go with that upload owed,
+        // and the broker stopped with no session that could send it ("no
+        // writable sessions"). Forced, the kit answers "unmodified" and the
+        // owed upload goes from this view, with its retries. Not when that
+        // upload is deferred: the deferral already holds this view, and the
+        // deferred upload (or, after a failure, the poll's) sends the newest
+        // file without a save through the kit.
         if (!lastEditableSession ||
             (!_saveManager.isSaving() &&
-             !autoSave(/*force=*/_alwaysSaveOnExit || isPossiblyModified(),
-                       dontSaveIfUnmodified, /*finalWrite=*/true)))
+             !autoSave(/*force=*/_alwaysSaveOnExit || isPossiblyModified() ||
+                           !_saveManager.lastSaveSuccessful() ||
+                           (!_uploadDeferred && needToUploadToStorage() != NeedToUpload::No),
+                       dontSaveIfUnmodified, /*finalWrite=*/true) &&
+             !_uploadDeferred))
         {
             disconnectSessionInternal(session);
         }
@@ -4632,7 +5456,7 @@ std::size_t DocumentBroker::removeSession(const std::shared_ptr<ClientSession>& 
         // Last view going away; can destroy?
         if (activeSessionCount <= 1)
         {
-            if (_saveManager.isSaving() || isAsyncUploading())
+            if (_saveManager.isSaving() || isAsyncUploading() || _uploadDeferred)
             {
                 // Don't destroy just yet, wait until save and upload are done.
                 // Notice that the save and/or upload could have been triggered
@@ -4909,6 +5733,13 @@ std::shared_ptr<ClientSession> DocumentBroker::createNewClientSession(
             LOG_DBG(
                 "Unload was requested after uploading, but new clients have joined. Recovering");
             _docState.resetUnloadRequested();
+            // Vulcan: the broker lives on, so its next going-away episode
+            // commits in-progress input again (autoSaveAndStop), and its
+            // give-up waits again for one save that closes a dialog
+            // (vulcanGiveUpWaitsForDialogClose).
+            _vulcanInputCommitSent = false;
+            _vulcanFinalSaveOwed = false;
+            _vulcanGiveUpHeldAtFailures = 0;
         }
 
         return session;
@@ -6203,6 +7034,59 @@ void DocumentBroker::processBatchUpdates()
         _lastNotifiedActivityTime = _lastActivityTime;
     }
 #endif
+
+    // Vulcan: send out the roster/cursor updates whose coalescing window closed.
+    // Skipped entirely - as is every other part of coalescing - unless an
+    // operator switched it on.
+    if (ClientSession::viewUpdateCoalesceInterval() > std::chrono::milliseconds::zero())
+    {
+        for (const auto& sessionIt : _sessions)
+            sessionIt.second->flushCoalescedViewUpdatesIfDue();
+    }
+}
+
+bool DocumentBroker::hasPendingViewUpdates() const
+{
+    if (ClientSession::viewUpdateCoalesceInterval() <= std::chrono::milliseconds::zero())
+        return false;
+
+    for (const auto& sessionIt : _sessions)
+    {
+        if (sessionIt.second->hasPendingViewUpdates())
+            return true;
+    }
+
+    return false;
+}
+
+std::size_t DocumentBroker::tileCacheViewCount() const
+{
+    ASSERT_CORRECT_THREAD();
+
+    std::size_t count = 0;
+    for (const auto& sessionIt : _sessions)
+    {
+        // Vulcan: agent views drive the document headlessly - they never ask for
+        // tiles - so budgeting 4MB of tile cache for each of them only wastes
+        // memory (and, on a capped task, gets us OOM-killed). Human views are
+        // counted exactly as upstream does.
+        if (!sessionIt.second->isVulcanAgentView())
+            ++count;
+    }
+
+    // Never shrink the budget to nothing: a document with agent views only still
+    // needs somewhere to put the tiles it may be asked to render.
+    if (count == 0 && !_sessions.empty())
+        count = 1;
+
+    return count;
+}
+
+void DocumentBroker::recordModifyingSession(const std::string& wopiUserId)
+{
+    ASSERT_CORRECT_THREAD();
+
+    _nextStorageAttrs.addEditor(wopiUserId);
 }
 
 void DocumentBroker::getIOStats(uint64_t &sent, uint64_t &recv)
@@ -6279,13 +7163,48 @@ void DocumentBroker::checkFileInfo(const std::shared_ptr<ClientSession>& session
             }
             else
             {
-                LOG_WRN("After failing to upload, the document size neither matches the original, "
-                        "nor our last uploaded. The document is in conflict.");
+                // Vulcan: a host that advertises the 
+                // handshake (VulcanContentHead) re-imports the saves it stores,
+                // so the Size it reports never equals the bytes we sent, even
+                // when the upload that timed out did commit. Every PutFile
+                // timeout became the stock conflict dialog. That host judges a
+                // save itself: it accepts our next upload, or refuses it, keeps
+                // the bytes and the upload-conflict path reloads. So this is not
+                // a conflict there. The echo stays the timestamp we last synced
+                // (adopting this CheckFileInfo's could launder someone else's
+                // write), the document stays out of conflict, and the
+                // poll loop's retry of the failed upload sends the save again.
+                // Nothing reloads here either: the failed upload's bytes reached
+                // the jail's disk but no storage (finding 2). Checked by
+                // scripts/vulcan-office/test-upload-race.py.
+                std::string vulcanContentHead;
+                JsonUtil::findJSONValue(object, "VulcanContentHead", vulcanContentHead);
+                if (!vulcanContentHead.empty())
+                {
+                    LOG_WRN("After failing to upload ["
+                            << _docKey << "], the size on the WOPI host (" << size
+                            << " bytes) is not our last upload's ("
+                            << _storageManager.getSizeAsUploaded()
+                            << " bytes), but the host advertises VulcanContentHead, so it "
+                               "re-imports what it stores and judges conflicts itself. Not a "
+                               "conflict: keeping our timestamp ["
+                            << _storageManager.getLastModifiedServerTimeString()
+                            << "] (storage reports [" << lastModifiedTime
+                            << "]) and retrying the upload");
+                }
+                else
+                {
+                    LOG_WRN("After failing to upload, the document size neither matches the "
+                            "original, nor our last uploaded. The document is in conflict.");
 
-                handleDocumentConflict("Document changed in storage (size mismatch after a failed "
-                                       "upload).\nLast known timestamp: " +
-                                       _storageManager.getLastModifiedServerTimeString() +
-                                       "\nTimestamp in storage: " + lastModifiedTime);
+                    // Nothing was rescued on this path (the upload itself failed),
+                    // so never reload-resolve: keep the upstream dialog.
+                    handleDocumentConflict("Document changed in storage (size mismatch after a "
+                                           "failed upload).\nLast known timestamp: " +
+                                           _storageManager.getLastModifiedServerTimeString() +
+                                           "\nTimestamp in storage: " + lastModifiedTime,
+                                           /*reloadResolved=*/false);
+                }
             }
         }
         else
@@ -6323,8 +7242,9 @@ void DocumentBroker::checkFileInfo(const std::shared_ptr<ClientSession>& session
 
     // CheckFileInfo asynchronously.
     assert(!_checkFileInfo && "Unexpected CheckFileInfo in progress");
-    _checkFileInfo =
-        std::make_shared<CheckFileInfo>(_poll, session->getPublicUri(), std::move(cfiContinuation));
+    _checkFileInfo = std::make_shared<CheckFileInfo>(_poll, session->getPublicUri(),
+                                                     session->isServerToServer(),
+                                                     std::move(cfiContinuation));
     if (!_checkFileInfo->checkFileInfo(redirectLimit))
     {
         LOG_INF("Resetting async CheckFileInfo as it failed to start");
@@ -6379,6 +7299,7 @@ void DocumentBroker::dumpState(std::ostream& os)
     os << "\n  canUpload: " << name(canUploadToStorage());
     os << "\n  isStorageOutdated: " << isStorageOutdated();
     os << "\n  needToUpload: " << name(needToUploadToStorage());
+    os << "\n  uploadDeferred: " << _uploadDeferred;
     os << "\n  lastActivityTime: " << Util::getTimeForLog(now, _lastActivityTime);
     os << "\n  haveActivityAfterSaveRequest: " << haveActivityAfterSaveRequest();
     os << "\n  lastModifyActivityTime: " << Util::getTimeForLog(now, _lastModifyActivityTime);
@@ -6475,6 +7396,52 @@ bool DocumentBroker::isAsyncUploading() const
     StorageBase::AsyncUpload::State state = _storage->queryLocalFileToStorageAsyncUploadState().state();
 
     return state == StorageBase::AsyncUpload::State::Running;
+}
+
+bool DocumentBroker::isUploadInFlight() const
+{
+    return isAsyncUploading() || (_uploadRequest && !_uploadRequest->isComplete());
+}
+
+bool DocumentBroker::startDeferredUpload()
+{
+    if (!_uploadDeferred)
+        return false;
+
+    // The session that asked, while it is still open and editable; otherwise
+    // any editable one.
+    std::shared_ptr<ClientSession> session = _deferredUploadSession.lock();
+    if (!session || !session->isEditable() || _sessions.find(session->getId()) == _sessions.end())
+        session = getWriteableSession();
+
+    // getWriteableSession falls back to a read-only session, which cannot
+    // upload. The upload stays deferred: removeSession holds the last editable
+    // session while it is, and the next plain upload carries the file.
+    if (!session || !session->isEditable())
+    {
+        LOG_WRN("No editable session to start the upload of docKey ["
+                << _docKey << "] deferred while an earlier upload was in flight. It stays deferred");
+        return false;
+    }
+
+    // A deferred forced upload (savetostorage) goes even when storage looks current.
+    const bool force = _currentStorageAttrs.isForced();
+    if (!force && needToUploadToStorage() == NeedToUpload::No)
+    {
+        LOG_DBG("No upload of docKey [" << _docKey
+                                        << "] to start after the one in flight landed: storage is "
+                                           "up to date");
+        _uploadDeferred = false;
+        _deferredUploadSession.reset();
+        return false;
+    }
+
+    LOG_DBG("Starting the upload of docKey ["
+            << _docKey << "] deferred while an earlier upload was in flight, for session ["
+            << session->getId() << ']');
+    // uploadToStorageInternal clears _uploadDeferred when the upload starts.
+    uploadToStorage(session, force);
+    return isUploadInFlight();
 }
 
 void DocumentBroker::addEmbeddedMedia(const std::string& id, const std::string& json)

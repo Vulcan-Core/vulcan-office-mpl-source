@@ -1,5 +1,5 @@
 [Unit]
-Description=Collabora Online WebSocket Daemon
+Description=Vulcan Office WebSocket Daemon
 After=network.target
 
 [Service]

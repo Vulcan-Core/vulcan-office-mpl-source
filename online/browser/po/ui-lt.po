@@ -5135,7 +5135,7 @@ msgid ""
 "Unlinking citations will prevent Collabora Online from updating citations "
 "and bibliography in this document."
 msgstr ""
-"Atsiejus citatas, „Collabora Online“ negalės atnaujinti citatų ir "
+"Atsiejus citatas, „Vulcan Office“ negalės atnaujinti citatų ir "
 "bibliografijos šiame dokumente."
 
 #: src/control/HRuler.ts:321
@@ -6701,7 +6701,7 @@ msgstr "Atnaujinti skaidres"
 
 #: src/map/handler/Map.VersionBar.js:50
 msgid "Your Collabora Online server needs updating. Version {0} is available."
-msgstr "Jūsų „Collabora Online“ serverį reikia atnaujinti. Yra {0} versija."
+msgstr "Jūsų „Vulcan Office“ serverį reikia atnaujinti. Yra {0} versija."
 
 #: src/map/handler/Map.WOPI.js:194
 msgid "Creating new file from template..."
@@ -6986,7 +6986,7 @@ msgstr "Geltona idėja"
 
 #: welcome/welcome.html%2Bhtml.head.title:9-3
 msgid "Collabora Online Welcome"
-msgstr "„Collabora Online“ sveiki atvykę"
+msgstr "„Vulcan Office“ sveiki atvykę"
 
 #: welcome/welcome.html%2Bhtml.body.div.div.div.div.h1:26-7
 msgid "Explore The New {coolversion}"
@@ -6995,7 +6995,7 @@ msgstr "Naršykite naują {coolversion} versiją"
 #: welcome/welcome.html%2Bhtml.body.div.div.div.div.h2:27-7
 #: welcome/welcome.html%2Bhtml.body.div.div.div.div.h2:38-7
 msgid "Collabora Online Development Edition"
-msgstr "„Collabora Online“ kūrėjams"
+msgstr "„Vulcan Office“ kūrėjams"
 
 #: welcome/welcome.html%2Bhtml.body.div.div.div.div.p:28-7
 msgid ""
@@ -7024,7 +7024,7 @@ msgid ""
 msgstr ""
 "Peržiūrėkite <a target=\"_blank\" rel=\"noopener\" href=\"https://www."
 "collaboraonline.com/code-26-04-release-notes/\">išleidimo pastabas</a> ir "
-"sužinokite viską apie naujausią „Collabora Online Development Edition“, "
+"sužinokite viską apie naujausią „Vulcan Office Development Edition“, "
 "skirtą namų vartotojams ir mažoms komandoms."
 
 #: welcome/welcome.html%2Bhtml.body.div.div.div.div.h1:48-7

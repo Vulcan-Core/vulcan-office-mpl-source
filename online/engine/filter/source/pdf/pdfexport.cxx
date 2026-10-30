@@ -92,6 +92,7 @@ PDFExport::PDFExport( const Reference< XComponent >& rxSrcDoc,
     mxIH                        ( rxIH ),
     mbUseLosslessCompression    ( false ),
     mbReduceImageResolution     ( true ),
+    mbExportInvisibleText       ( false ),
     mbSkipEmptyPages            ( true ),
     mnMaxImageResolution        ( DefaultPDFImageDPI ),
     mnQuality                   ( DefaultPDFJPEGQuality ),
@@ -551,6 +552,8 @@ bool PDFExport::Export( const OUString& rFile, const Sequence< PropertyValue >& 
                     rProp.Value >>= mnQuality;
                 else if ( rProp.Name == "ReduceImageResolution" )
                     rProp.Value >>= mbReduceImageResolution;
+                else if ( rProp.Name == "ExportInvisibleText" )
+                    rProp.Value >>= mbExportInvisibleText;
                 else if ( rProp.Name == "IsSkipEmptyPages" )
                     rProp.Value >>= mbSkipEmptyPages;
                 else if ( rProp.Name == "MaxImageResolution" )
@@ -1062,6 +1065,7 @@ bool PDFExport::Export( const OUString& rFile, const Sequence< PropertyValue >& 
                 aPDFExtOutDevData.SetIsLosslessCompression( mbUseLosslessCompression );
                 aPDFExtOutDevData.SetCompressionQuality( mnQuality );
                 aPDFExtOutDevData.SetIsReduceImageResolution( mbReduceImageResolution );
+                aPDFExtOutDevData.SetIsExportInvisibleText( mbExportInvisibleText );
                 aPDFExtOutDevData.SetIsExportNamedDestinations( bExportBmkToDest );
 
                 std::vector<PropertyValue> aRenderOptionsVector{

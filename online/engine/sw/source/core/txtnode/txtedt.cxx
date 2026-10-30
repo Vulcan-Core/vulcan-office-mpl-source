@@ -495,7 +495,11 @@ void SwTextNode::RstTextAttr(
             bSkipAttr = RES_TXTATR_REFMARK   == pHt->Which()
                      || RES_TXTATR_TOXMARK   == pHt->Which()
                      || RES_TXTATR_META      == pHt->Which()
-                     || RES_TXTATR_METAFIELD == pHt->Which();
+                     || RES_TXTATR_METAFIELD == pHt->Which()
+                     // A content control has dummy characters too, and must not be split: a
+                     // range inside it would cut it into two controls (case 4 below), e.g. when
+                     // a tracked replace resets the replacement's attributes.
+                     || RES_TXTATR_CONTENTCONTROL == pHt->Which();
         }
 
         if ( bSkipAttr )

@@ -91,6 +91,7 @@ class CanvasSectionObject {
 	onMultiTouchStart(e: TouchEvent): void { return; }
 	onMultiTouchMove(point: cool.SimplePoint, dragDistance: number, e: TouchEvent): void { return; }
 	onMultiTouchEnd(e: TouchEvent): void { return; }
+	onMultiTouchCancel(e: TouchEvent): void { return; }
 	onDrop(point: cool.SimplePoint, e: DragEvent): void { return; }
 	onResize(): void { return; }
 	onDraw(frameCount?: number, elapsedTime?: number): void { return; }

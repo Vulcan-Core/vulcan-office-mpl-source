@@ -23,6 +23,15 @@ class RenderManager {
 		);
 	}
 
+	/// Callbacks registered through the facade. Kept here — not only on
+	/// the instance — because makeInstance can REPLACE the instance (the
+	/// provisional BitmapTileManager gives way to a VectorManager once
+	/// the document type is known), and listeners registered on the old
+	/// instance would silently die with it.
+	private static _vectorChangeListeners: ((
+		update?: VectorPartUpdate,
+	) => void)[] = [];
+
 	/// Pick the manager for the document type, replacing the instance when
 	/// an earlier one is of the wrong kind.
 	private static makeInstance(docType?: string): RenderManagerBase {
@@ -32,6 +41,8 @@ class RenderManager {
 			RenderManager._instance = wantVector
 				? new VectorManager()
 				: new BitmapTileManager();
+			for (const listener of RenderManager._vectorChangeListeners)
+				RenderManager._instance.onVectorChanged(listener);
 		}
 		return RenderManager._instance;
 	}
@@ -147,6 +158,11 @@ class RenderManager {
 		RenderManager.ensureInstance().update(center, zoom);
 	}
 
+	// R6-7 lever L3: speculative settle prefetch — see BitmapTileManager.
+	static prefetchZoomStop(targetZoom: number, centerCorePx: any): void {
+		RenderManager.ensureInstance().prefetchZoomStop(targetZoom, centerCorePx);
+	}
+
 	static onWorkerEndTransaction(e: any): void {
 		RenderManager.ensureInstance().onWorkerEndTransaction(e);
 	}
@@ -221,15 +237,189 @@ class RenderManager {
 		return RenderManager.ensureInstance().requestPart(part);
 	}
 
+	/// The most recent tree for a part, cached or last seen — never cold
+	/// between a mutating input and the engine's answer (see
+	/// VectorManager.peekPart). For readers at a gesture's release.
+	static peekPart(part: number): cool.VectorPrimitivesData | undefined {
+		return RenderManager.ensureInstance().peekPart(part);
+	}
+
+	static hitTestPoint(
+		part: number,
+		xTwips: number,
+		yTwips: number,
+		toleranceTwips: number,
+	): { ordNum: number; bounds: number[]; isGroup: boolean } | null {
+		return RenderManager.ensureInstance().hitTestPoint(
+			part,
+			xTwips,
+			yTwips,
+			toleranceTwips,
+		);
+	}
+
+	static hitTestChildren(
+		part: number,
+		groupOrdNum: number,
+		xTwips: number,
+		yTwips: number,
+		toleranceTwips: number,
+	): { ordNum: number; bounds: number[]; isGroup: boolean } | null {
+		return RenderManager.ensureInstance().hitTestChildren(
+			part,
+			groupOrdNum,
+			xTwips,
+			yTwips,
+			toleranceTwips,
+		);
+	}
+
+	static isTextBearing(
+		part: number,
+		ordNum: number,
+		childOrdNum?: number,
+	): boolean {
+		return RenderManager.ensureInstance().isTextBearing(
+			part,
+			ordNum,
+			childOrdNum,
+		);
+	}
+
+	static isEmptyPlaceholder(
+		part: number,
+		ordNum: number,
+		childOrdNum?: number,
+	): boolean {
+		return RenderManager.ensureInstance().isEmptyPlaceholder(
+			part,
+			ordNum,
+			childOrdNum,
+		);
+	}
+
+	static isMoveProtected(part: number, ordNum: number): boolean {
+		return RenderManager.ensureInstance().isMoveProtected(part, ordNum);
+	}
+
+	static hitTestInk(
+		part: number,
+		ordNum: number,
+		xTwips: number,
+		yTwips: number,
+		toleranceTwips: number,
+		childOrdNum?: number,
+	): boolean {
+		return RenderManager.ensureInstance().hitTestInk(
+			part,
+			ordNum,
+			xTwips,
+			yTwips,
+			toleranceTwips,
+			childOrdNum,
+		);
+	}
+
+	static hitTestRect(
+		part: number,
+		xTwips: number,
+		yTwips: number,
+		widthTwips: number,
+		heightTwips: number,
+	): { ordNum: number; bounds: number[] }[] {
+		return RenderManager.ensureInstance().hitTestRect(
+			part,
+			xTwips,
+			yTwips,
+			widthTwips,
+			heightTwips,
+		);
+	}
+
+	static hitTestPointFast(
+		part: number,
+		xTwips: number,
+		yTwips: number,
+		toleranceTwips: number,
+	): { ordNum: number; bounds: number[] } | null {
+		return RenderManager.ensureInstance().hitTestPointFast(
+			part,
+			xTwips,
+			yTwips,
+			toleranceTwips,
+		);
+	}
+
+	static findTopLevelObject(
+		part: number,
+		ordNum: number,
+	): cool.SlideObject | null {
+		return RenderManager.ensureInstance().findTopLevelObject(part, ordNum);
+	}
+
+	static classifySelection(
+		part: number,
+		rect: number[],
+		selectionOrdNum: number | null,
+	): { kind: 'top' } | { kind: 'child'; groupOrdNum: number } | null {
+		return RenderManager.ensureInstance().classifySelection(
+			part,
+			rect,
+			selectionOrdNum,
+		);
+	}
+
+	/// Before each editor frame; liveZoom while the zoom animates. A no-op
+	/// on the bitmap path.
+	static beginEditorFrame(liveZoom: boolean): void {
+		RenderManager.ensureInstance().beginEditorFrame(liveZoom);
+	}
+
 	static renderInto(
 		context: CanvasRenderingContext2D,
 		data: cool.VectorPrimitivesData,
+		override?: cool.VectorRenderOverride,
+		editView?: boolean,
 	): void {
-		RenderManager.ensureInstance().renderInto(context, data);
+		RenderManager.ensureInstance().renderInto(
+			context,
+			data,
+			override,
+			editView,
+		);
 	}
 
-	static onVectorChanged(callback: () => void): void {
+	static onVectorChanged(callback: (update?: VectorPartUpdate) => void): void {
+		RenderManager._vectorChangeListeners.push(callback);
 		RenderManager.ensureInstance().onVectorChanged(callback);
+	}
+
+	/// Count a mutating input message at send time (textinput /
+	/// removetextcontext / key). A no-op on the bitmap path.
+	static noteMutatingInputSent(): void {
+		RenderManager.ensureInstance().noteMutatingInputSent();
+	}
+
+	static noteWebFontsChanged(): void {
+		RenderManager.ensureInstance().noteWebFontsChanged();
+	}
+
+	static getLastInputSeq(): number {
+		return RenderManager.ensureInstance().getLastInputSeq();
+	}
+
+	/// Ask for a minimum interval between primitives fetches per part.
+	/// Owner-keyed: the text echo and the nudge echo each hold their own
+	/// window (the effective interval is the max of the active ones), so
+	/// one controller tearing down cannot zero the window out from under
+	/// the other mid-burst. A no-op on the bitmap path.
+	static requestFetchCoalesce(owner: string, ms: number): void {
+		RenderManager.ensureInstance().requestFetchCoalesce(owner, ms);
+	}
+
+	/// Drop one owner's coalescing window (see requestFetchCoalesce).
+	static releaseFetchCoalesce(owner: string): void {
+		RenderManager.ensureInstance().releaseFetchCoalesce(owner);
 	}
 
 	static handleVectorPrimitivesResponse(
@@ -252,6 +442,10 @@ class RenderManager {
 
 	static clearAllParts(): void {
 		RenderManager.ensureInstance().clearAllParts();
+	}
+
+	static noteHistoryCommandSent(): void {
+		RenderManager.ensureInstance().noteHistoryCommandSent();
 	}
 }
 

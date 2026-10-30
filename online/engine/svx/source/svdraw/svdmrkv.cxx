@@ -1022,6 +1022,23 @@ void SdrMarkView::SetMarkHandlesForKit(tools::Rectangle const & rRect, const Sfx
                 + ",\"OrdNum\":" + OString::number(pO->GetOrdNum())
                 );
 
+            // Every member of the selection, so the client can exclude the
+            // whole multi-selection from snap targets (OrdNum alone only
+            // names the first object).
+            aExtraInfo.append(",\"selectedOrdNums\":[");
+            bool bFirstOrdNum = true;
+            for (size_t nMark = 0; nMark < rMarkList.GetMarkCount(); ++nMark)
+            {
+                const SdrObject* pMarked = rMarkList.GetMark(nMark)->GetMarkedSdrObj();
+                if (!pMarked)
+                    continue;
+                if (!bFirstOrdNum)
+                    aExtraInfo.append(",");
+                bFirstOrdNum = false;
+                aExtraInfo.append(OString::number(pMarked->GetOrdNum()));
+            }
+            aExtraInfo.append("]");
+
             aExtraInfo.append(", \"isMathObject\": " + OString::boolean(lcl_isStarMath(pO)));
             aExtraInfo.append(", \"isDiagram\": " + OString::boolean(pO->isDiagram()));
 
@@ -2473,9 +2490,15 @@ void SdrMarkView::MarkObj(const tools::Rectangle& rRect, bool bUnmark)
     {
         pObjList=pPV->GetObjList();
         tools::Rectangle aFrm1(aR);
+        // Under kit the rubber band marks every object it TOUCHES rather
+        // than only fully enclosed ones: browser clients cannot see the
+        // band grow (core's overlay never reaches them), so sweeping
+        // "across" a slide is the gesture users make, and requiring full
+        // enclosure silently drops the partially covered objects.
+        const bool bTouchMarks = comphelper::COKit::isActive();
         for (const rtl::Reference<SdrObject>& pObj : *pObjList) {
             tools::Rectangle aRect(pObj->GetCurrentBoundRect());
-            if (aFrm1.Contains(aRect)) {
+            if (bTouchMarks ? aFrm1.Overlaps(aRect) : aFrm1.Contains(aRect)) {
                 if (!bUnmark) {
                     if (IsObjMarkable(pObj.get(),pPV))
                     {

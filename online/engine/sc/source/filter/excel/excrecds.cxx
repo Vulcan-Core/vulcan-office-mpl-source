@@ -21,6 +21,7 @@
 #include <export/ExportTools.hxx>
 
 #include <map>
+#include <utility>
 #include <filter/msfilter/countryid.hxx>
 
 #include <svl/numformat.hxx>
@@ -361,8 +362,8 @@ XclExpWsbool::XclExpWsbool( bool bFitToPages )
         SetValue( GetValue() | EXC_WSBOOL_FITTOPAGE );
 }
 
-XclExpXmlSheetPr::XclExpXmlSheetPr( bool bFitToPages, SCTAB nScTab, const Color& rTabColor, bool bSummaryBelow, XclExpFilterManager* pManager ) :
-    mnScTab(nScTab), mpManager(pManager), mbFitToPage(bFitToPages), maTabColor(rTabColor), mbSummaryBelow(bSummaryBelow) {}
+XclExpXmlSheetPr::XclExpXmlSheetPr( bool bFitToPages, SCTAB nScTab, const Color& rTabColor, bool bSummaryBelow, XclExpFilterManager* pManager, OUString aCodeName ) :
+    mnScTab(nScTab), mpManager(pManager), mbFitToPage(bFitToPages), maTabColor(rTabColor), mbSummaryBelow(bSummaryBelow), maCodeName(std::move(aCodeName)) {}
 
 void XclExpXmlSheetPr::SaveXml( XclExpXmlStream& rStrm )
 {
@@ -374,7 +375,7 @@ void XclExpXmlSheetPr::SaveXml( XclExpXmlStream& rStrm )
             // OOXTODO: XML_transitionEvaluation,
             // OOXTODO: XML_transitionEntry,
             // OOXTODO: XML_published,
-            // OOXTODO: XML_codeName,
+            XML_codeName, sax_fastparser::UseIf(maCodeName, !maCodeName.isEmpty()),
             XML_filterMode, mpManager ? ToPsz(mpManager->HasFilterMode(mnScTab)) : nullptr
             // OOXTODO: XML_enableFormatConditionsCalculation
     );

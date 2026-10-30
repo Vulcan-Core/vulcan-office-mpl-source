@@ -4,6 +4,14 @@ var helper = require('../../common/helper');
 var mobileHelper = require('../../common/mobile_helper');
 var impressHelper = require('../../common/impress_helper');
 
+// STALE: clickOnTableOperation() below opens the hamburger and clicks
+// `.menu-entry-icon.tablemenu`, but the phone kebab no longer HAS a Table
+// drill-in -- it was cut because it rendered twelve always-enabled rows even
+// with no table selected (see mobilepresentation in Control.Menubar.ts). Google
+// Slides surfaces these operations contextually on the selected table, so this
+// coverage should move to the selection pill; tracked as
+// impress-selection-pill-no-overflow. Left in place, still skipped, so the
+// assertions are not lost when that lands.
 describe.skip(['tagmobile', 'tagnextcloud', 'tagproxy'], 'Table Operation', function() {
 
 	beforeEach(function() {

@@ -17,7 +17,7 @@
  * text area itself.
  */
 
-/* global app _ */
+/* global app _ VulcanImpressTextDock */
 
 window.L.A11yTextInput = window.L.TextInput.extend({
 	initialize: function() {
@@ -123,6 +123,33 @@ window.L.A11yTextInput = window.L.TextInput.extend({
 			this._textArea.isSelectionNull = !flag;
 	},
 
+	// R6-1: the phone Impress long-text dock mirrors the focused paragraph
+	// this class already receives — same stream, one more sink. The dock
+	// gates itself (phone chrome, presentation/drawing, editable), so every
+	// entry point below forwards unconditionally. A dock fault must never
+	// break typing: the notify is fenced.
+	//
+	// VulcanImpressTextDock.sink is the BUNDLE-SCOPE class binding (the
+	// Permission.js -> VulcanImpressTextEntry precedent), not a window
+	// property. Build #9 shipped this method reading a dock property off
+	// window that nothing in the served bundle ever assigned — the dock's
+	// file was missing from COOL_JS_LST and the
+	// null-guard read the build defect as a feature toggle, silently. The
+	// bare binding lives inside the fence, so if the dock ever leaves the
+	// bundle again the ReferenceError lands in the warn below on every
+	// a11y event (typing survives, the console does not stay quiet), and
+	// the fork-gates BUNDLE layer goes red before an image is even built.
+	_vulcanDockNotify: function(method, a, b, c, d) {
+		try {
+			var dock = VulcanImpressTextDock.sink;
+			if (!dock || typeof dock[method] !== 'function')
+				return;
+			dock[method](this, a, b, c, d);
+		} catch (err) {
+			window.app.console.warn('long-text dock ' + method + ' failed: ' + err);
+		}
+	},
+
 	_setFocusedParagraph: function(content, pos, start, end) {
 		window.app.console.log('_setFocusedParagraph:'
 			+ '\n    content "' + content + '"'
@@ -135,6 +162,45 @@ window.L.A11yTextInput = window.L.TextInput.extend({
 			this.setHTML(content);
 			this.updateLastContent();
 			this._updateSelection(pos, start, end, true);
+			// The paragraph just applied carries content, caret and selection,
+			// and every park came from an earlier message on the same ordered
+			// socket. Left in place, the park is replayed over this paragraph at
+			// the next beforeinput (A:402): measured on the Android Impress title
+			// double tap, it wiped "[Program Name]" mid-keystroke and every
+			// letter was dropped. Client state only; nothing is sent.
+			this._dropParkedParagraph();
+		}
+	},
+
+	_dropParkedParagraph: function() {
+		this._remoteContent = undefined;
+		this._remotePosition = undefined;
+		this._remoteSelectionStart = undefined;
+		this._remoteSelectionEnd = undefined;
+	},
+
+	// A caret or selection applied directly is newer than any parked caret or
+	// selection, which would otherwise be replayed over it at the next
+	// beforeinput (a parked caret of 2 under a live caret of 11 turns one 'x'
+	// into "delete 9 after, type 'xllo world'"). A parked paragraph is older
+	// than this update too, but its CONTENT is still the latest the editable
+	// has been told, so it is applied first and this update lands on top.
+	// So is a parked caret with no parked selection, or with only a parked
+	// selection clear: a clear (-1, -1) carries no caret and falls back to
+	// the last one applied, so dropping the park would leave the editable's
+	// caret behind core's.
+	_flushParkedParagraph: function() {
+		if (this._remoteContent !== undefined)
+			this._updateFocusedParagraph();
+		else {
+			if ((this._remoteSelectionEnd === undefined || (this._remoteSelectionStart === -1 && this._remoteSelectionEnd === -1)) && this._remotePosition !== undefined)
+				this._updateCursorPosition(this._remotePosition);
+			// The dropped park set _hasSelection; left set, the next backspace
+			// sends a fake Delete first. Only a NON-EMPTY parked selection: an
+			// empty one is core's own empty-selection state, which keeps it.
+			else if (this._remoteSelectionEnd !== undefined && this._remoteSelectionStart !== this._remoteSelectionEnd)
+				this._setSelectionFlag(false);
+			this._dropParkedParagraph();
 		}
 	},
 
@@ -155,6 +221,7 @@ window.L.A11yTextInput = window.L.TextInput.extend({
 	},
 
 	onAccessibilityFocusChanged: function(content, pos, start, end, listPrefixLength, force) {
+		this._vulcanDockNotify('onFocusedParagraph', content, pos, start, end);
 		this._listPrefixLength = listPrefixLength;
 		if (!this.hasFocus() || (this._isComposing && !force)) {
 			this._log('onAccessibilityFocusChanged: skipped updating: '
@@ -171,10 +238,25 @@ window.L.A11yTextInput = window.L.TextInput.extend({
 	},
 
 	setA11yFocusedParagraph: function(content, pos, start, end) {
+		this._vulcanDockNotify('onFocusedParagraph', content, pos, start, end);
+		// The reply to geta11yfocusedparagraph is not held back the way
+		// onAccessibilityFocusChanged is: _setFocusedParagraph would rewrite
+		// the element and end the composition, so a reply landing in the
+		// middle of a Gboard word wipes it. Park it instead; compositionend
+		// (_updateFocusedParagraph) applies it. _abortComposition clears
+		// _isComposing before it requests, so its own reply is never parked.
+		if (this._isComposing) {
+			this._remoteContent = content;
+			this._remotePosition = pos;
+			this._remoteSelectionStart = start;
+			this._remoteSelectionEnd = end;
+			return;
+		}
 		this._setFocusedParagraph(content, pos, start, end);
 	},
 
 	onAccessibilityCaretChanged: function(nPos) {
+		this._vulcanDockNotify('onCaretChanged', nPos);
 		this._log('onAccessibilityCaretChanged: \n' +
 			'    position: ' + nPos + '\n' +
 			'    _isComposing: ' + this._isComposing);
@@ -183,6 +265,7 @@ window.L.A11yTextInput = window.L.TextInput.extend({
 			this._remotePosition = nPos;
 		}
 		else if (!this._hasFormulaBarFocus()) {
+			this._flushParkedParagraph();
 			this._updateCursorPosition(nPos);
 		}
 	},
@@ -194,6 +277,7 @@ window.L.A11yTextInput = window.L.TextInput.extend({
 	},
 
 	onAccessibilityTextSelectionChanged: function(start, end) {
+		this._vulcanDockNotify('onSelectionChanged', start, end);
 		if (this._isLeftRightArrow || !this.hasFocus() || this._isComposing) {
 			this._remoteSelectionStart = start;
 			this._remoteSelectionEnd = end;
@@ -204,6 +288,7 @@ window.L.A11yTextInput = window.L.TextInput.extend({
 			}
 			this._statusLog('onAccessibilityTextSelectionChanged: skip updating');
 		} else {
+			this._flushParkedParagraph();
 			this._updateSelection(this._lastCursorPosition, start, end);
 		}
 	},
@@ -219,8 +304,11 @@ window.L.A11yTextInput = window.L.TextInput.extend({
 			var sinceFocus = Date.now() - (this._a11yFocusTime || 0);
 			if (text && sinceFocus < this.A11Y_FOCUS_ANNOUNCEMENT_MS)
 				return;
+		}
 
-			// required on macOS as VoiceOver is not triggered by description change only
+		if (window.L.Browser.mac || window.vulcanPhoneChrome) {
+			// VoiceOver is not triggered by description changes alone. Forced
+			// phone accessibility uses the same real sink for Android/TalkBack.
 			var region = this._a11yLiveRegion;
 			if (region) {
 				region.textContent = '';
@@ -310,6 +398,7 @@ window.L.A11yTextInput = window.L.TextInput.extend({
 	},
 
 	onAccessibilitySelectionChanged: function(cell, action, name, textContent) {
+		this._vulcanDockNotify('onShapeSelectionChanged');
 		this._log('onAccessibilitySelectionChanged: cell: ' + cell + ', action: ' + action + ', name: ' + name);
 		if (this._timeoutForA11yDescription)
 			clearTimeout(this._timeoutForA11yDescription);
@@ -379,6 +468,10 @@ window.L.A11yTextInput = window.L.TextInput.extend({
 			this._removeEmptySelectionIfAny();
 			this._removeTextContent(0, 1);
 		}
+		// Last: the repairs above can rewrite this element, and the snapshot
+		// taken here has to be the text the browser is about to mutate.
+		// TextInput._captureReplacementRange owns the reasoning.
+		this._captureReplacementRange(ev);
 		this._statusLog('_onBeforeInput ]');
 	},
 
@@ -425,6 +518,23 @@ window.L.A11yTextInput = window.L.TextInput.extend({
 
 		if (this._ignoreInputCount > 0) {
 			window.app.console.log('ignoring synthetic input ' + this._ignoreInputCount);
+			return;
+		}
+
+		// Real input after a commit-Return starts the next entry (as in
+		// TextInput._onInput, which this override replaces on the phone), so
+		// the commit is no longer what core's next same-cell answer means.
+		if (window.VulcanCalcReturnKey)
+			window.VulcanCalcReturnKey.noteTyping();
+
+		// A phone autocorrect rewrite arrives as insertReplacementText over a
+		// range the differ below cannot see. Handled from the range captured
+		// in _onBeforeInput, and handled here -- before _newlineHint, which
+		// would otherwise swallow the correction that commits on <enter>.
+		// This is the live phone path: Map.initTextInput builds an
+		// A11yTextInput for every phone-chrome text/Calc/Impress session.
+		if (this._applyReplacementRange(ev)) {
+			this._statusLog('_onInput ]');
 			return;
 		}
 
@@ -476,6 +586,16 @@ window.L.A11yTextInput = window.L.TextInput.extend({
 		var cursorPosition = this._getSelectionEnd();
 		var lastCursorPosition = this._getLastCursorPosition();
 		var value = this.getValue();
+
+		// Without both carets the differ below computes NaN windows, finds "no
+		// new content" and returns without a word: measured on Android with the
+		// browser's caret on the element (_getSelection -> undefined), 5 of 5
+		// letters lost. Never drop a key silently.
+		if (!this._isFiniteOffset(cursorPosition) || !this._isFiniteOffset(lastCursorPosition)) {
+			this._onInputWithUnknownCaret(ev, value);
+			this._statusLog('_onInput ]');
+			return;
+		}
 
 		// In the android keyboard when you try to erase the pre-space
 		// and then enter some character,
@@ -600,6 +720,144 @@ window.L.A11yTextInput = window.L.TextInput.extend({
 			this._map.mention.handleMentionInput(ev);
 
 		this._statusLog('_onInput ]');
+	},
+
+	_isFiniteOffset: function(n) {
+		return typeof n === 'number' && isFinite(n);
+	},
+
+	// The editable changed, but the caret (or core's caret) cannot be read,
+	// so "what is right of the caret is unchanged" cannot be assumed. Only an
+	// edit that is a pure insertion can be forwarded without it: 'textinput'
+	// carries no position, so core inserts at its own caret, and this path
+	// never sends a removal, so it cannot delete. It sends only the characters
+	// missing from _lastContent and folds them in, so it cannot duplicate
+	// either. Core echoes the paragraph after every textinput, which resyncs
+	// the element; no request is sent here, because the reply to one is not
+	// held back and would wipe the next Gboard word. Anything else (a
+	// backspace, typing over a selection, a correction away from the caret) is
+	// refused, and that key is lost: this says so, and asks core for the
+	// paragraph to resync.
+	_onInputWithUnknownCaret: function(ev, value) {
+		var old = this.codePointsToString(this._lastContent);
+		if (value === old)
+			return; // nothing new: the genuine case of the "no new content" return
+		if (this._isComposing) {
+			// compositionend runs _onInput again with composing off.
+			window.app.console.warn('A11yTextInput: caret unknown while composing: waiting for compositionend');
+			return;
+		}
+		// Core holds a selection, and the browser replaced it with what was
+		// typed: "the" -> "there" diffs as "re" inserted, and core types that
+		// over its whole selection ("a the b" -> "a re b"). Refused.
+		if (this._hasSelection && !this._isLastSelectionEmpty()) {
+			this._loseUnknownCaretKey('core holds a selection');
+			return;
+		}
+		var corePos = this._getLastCursorPosition();
+		var span = null;
+		var why;
+		if (this._isFiniteOffset(corePos)) {
+			// Core's caret is known and textinput lands there, so only an edit
+			// that is exactly an insertion at it goes through. A leftmost diff
+			// reads "wow" typed before "world" as "wwo", and a skin tone added
+			// to a thumbs-up as the tone plus a second thumbs-up.
+			span = this._insertedSpanAt(old, value, corePos);
+			why = 'the edit is not an insertion at core\'s caret';
+		} else if (ev && ev.inputType === 'insertReplacementText') {
+			// A correction rewrites a range away from the caret ("dont" ->
+			// "don't" inserts at 5 with the caret at 6); without core's caret
+			// there is no telling where textinput would put it.
+			why = 'a correction cannot be placed without core\'s caret';
+		} else {
+			span = this._insertedSpan(old, value);
+			why = 'the edit is not a pure insertion';
+		}
+		if (!span) {
+			this._loseUnknownCaretKey(why);
+			return;
+		}
+		window.app.console.warn('A11yTextInput: caret unknown: insert-only resync');
+		var inserted = this.getValueAsCodePoints(value.slice(span.start, span.end));
+		this._lastContent = this.getValueAsCodePoints(value);
+		this._setLastCursorPosition(span.end);
+		this._sendNewText(ev, this._lastContent, inserted);
+		if (!this._isWrappedBySpan())
+			this._restoreSpanWrapper();
+		this._setCursorPosition(span.end);
+		// The follow-ups the normal path runs after a send: a newline typed in
+		// the formula bar accepts the formula, and an '@' opens the mention list.
+		this._finishFormulabarEditing(this._lastContent, span.start);
+		if (this._map.getDocType() === 'text')
+			this._map.mention.handleMentionInput(ev);
+	},
+
+	// Says the key is lost and asks core for the paragraph to resync.
+	_loseUnknownCaretKey: function(why) {
+		window.app.console.warn('A11yTextInput: caret unknown and ' + why + ': ' +
+			'this key is lost; asking core for the paragraph');
+		this._requestFocusedParagraph();
+	},
+
+	// [L, L + k) when `value` is `old` with exactly k units inserted at core's
+	// caret L, so core typing them at its caret reads `value`; else null.
+	_insertedSpanAt: function(old, value, L) {
+		var k = value.length - old.length;
+		if (k <= 0 || L < 0 || L > old.length)
+			return null;
+		if (value.slice(0, L) !== old.slice(0, L) || value.slice(L + k) !== old.slice(L))
+			return null;
+		return { start: L, end: L + k };
+	},
+
+	// With core's caret unknown: [start, end) of what a pure insertion into
+	// `old` added to `value` (leftmost), in UTF-16 units, or null when the
+	// change is anything else. Never splits a surrogate pair: U+1F603 typed in
+	// front of U+1F600 shares its high surrogate with it, and a naive common
+	// prefix would send two lone halves.
+	_insertedSpan: function(old, value) {
+		if (value.length <= old.length)
+			return null;
+		var p = 0;
+		while (p < old.length && old.charCodeAt(p) === value.charCodeAt(p))
+			p++;
+		if (p > 0 && this._isHighSurrogate(value.charCodeAt(p - 1)))
+			p--;
+		var s = 0;
+		var maxSuffix = old.length - p;
+		while (s < maxSuffix &&
+			old.charCodeAt(old.length - 1 - s) === value.charCodeAt(value.length - 1 - s))
+			s++;
+		if (s > 0 && this._isLowSurrogate(value.charCodeAt(value.length - s)))
+			s--;
+		if (p + s !== old.length)
+			return null;
+		// Core types at a caret this path cannot see, and the insertion may
+		// sit at any start from the rightmost (where the full common suffix
+		// begins) to the leftmost: "wow" typed before "world" reads "wwo"
+		// leftmost and "wow" rightmost. Refuse unless every start that is a
+		// caret position (not inside a surrogate pair) inserts the same text.
+		var k = value.length - old.length;
+		var q = 0;
+		while (q < old.length &&
+			old.charCodeAt(old.length - 1 - q) === value.charCodeAt(value.length - 1 - q))
+			q++;
+		var inserted = value.slice(p, p + k);
+		for (var i = old.length - q; i < p; i++) {
+			if (i > 0 && this._isHighSurrogate(old.charCodeAt(i - 1)) && this._isLowSurrogate(old.charCodeAt(i)))
+				continue;
+			if (value.slice(i, i + k) !== inserted)
+				return null;
+		}
+		return { start: p, end: value.length - s };
+	},
+
+	_isHighSurrogate: function(code) {
+		return code >= 0xd800 && code <= 0xdbff;
+	},
+
+	_isLowSurrogate: function(code) {
+		return code >= 0xdc00 && code <= 0xdfff;
 	},
 
 	_removeEmptySelectionIfAny: function() {

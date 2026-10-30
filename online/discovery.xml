@@ -188,7 +188,11 @@
             <action name="view" ext="tiff"/>
             <action name="view" ext="jpg"/>
             <action name="view" ext="jpeg"/>
-            <action name="view_comment" ext="pdf"/>
+            <!-- PDF: an edit session opens the pages for editing (the live
+                 canvas decomposes each page's graphic into objects); a
+                 read-only session stays the stacked page view. -->
+            <action name="edit" default="true" ext="pdf"/>
+            <action name="view" ext="pdf"/>
         </app>
 
         <!-- Math documents -->
@@ -544,7 +548,7 @@
             <action name="view" ext=""/>
         </app>
         <app name="application/pdf">
-            <action name="view_comment" ext=""/>
+            <action name="edit" ext=""/>
         </app>
 
         <!-- End of legacy MIME-type actions -->

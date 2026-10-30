@@ -184,6 +184,9 @@ public:
     SAL_DLLPRIVATE void ExecView_Impl( SfxRequest &rReq );
     SAL_DLLPRIVATE void StateView_Impl( SfxItemSet &rSet );
     SAL_DLLPRIVATE void ExecHistory_Impl( SfxRequest &rReq );
+    /// Vulcan fork: a refused per-view undo still reaches ExecHistory_Impl (see
+    /// SfxShell::IsKitPerViewUndoRedo).
+    virtual bool IsConditionalFastCall( const SfxRequest &rReq ) override;
     SAL_DLLPRIVATE void StateHistory_Impl( SfxItemSet &rSet );
     SAL_DLLPRIVATE void ForceOuterResize_Impl();
     SAL_DLLPRIVATE void UpdateDocument_Impl();

@@ -295,7 +295,7 @@ public:
     static void AssertPageFlys( SwPageFrame * );
 
     /// Invalidate all Content, Size or PrtArea
-    void InvalidateAllContent( SwInvalidateFlags nInvalidate );
+    SW_DLLPUBLIC void InvalidateAllContent( SwInvalidateFlags nInvalidate );
 
     /**
      * Invalidate/re-calculate the position of all floating

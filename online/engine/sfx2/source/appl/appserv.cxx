@@ -606,10 +606,8 @@ void SfxApplication::MiscExec_Impl( SfxRequest& rReq )
 
         case SID_SEND_FEEDBACK:
         {
-            OUString module = SfxHelp::GetCurrentModuleIdentifier();
-            OUString sURL("mailto:hello@collaboraoffice.com?Subject=Version:%20" + utl::ConfigManager::getAboutBoxProductVersion() +
-                ",%20Locale:%20" + utl::ConfigManager::getUILocale() + ",%20Module:%20" + module.subView(module.lastIndexOf('.') + 1 )  );
-            sfx2::openUriExternally(sURL, false, rReq.GetFrameWeld());
+            // Vulcan Office: there is no feedback mail target; the slot is a
+            // deliberate no-op so no external address is baked into the build.
             break;
         }
 

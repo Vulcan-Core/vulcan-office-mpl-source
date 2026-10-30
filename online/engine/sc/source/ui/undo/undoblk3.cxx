@@ -77,6 +77,13 @@ ScUndoDeleteContents::ScUndoDeleteContents(
     SetChangeTrack();
 }
 
+std::optional<ScRange> ScUndoDeleteContents::getAffectedRange() const
+{
+    if (pDrawUndo)
+        return std::nullopt;
+    return aRange;
+}
+
 ScUndoDeleteContents::~ScUndoDeleteContents()
 {
     pUndoDoc.reset();
@@ -375,6 +382,13 @@ ScUndoSelectionAttr::ScUndoSelectionAttr( ScDocShell& rNewDocShell,
         maLineInner(*rDocShell.GetDocument().GetPool(), pNewInner)
 {
     aRangeCover = pRangeCover ? *pRangeCover : aRange;
+}
+
+std::optional<ScRange> ScUndoSelectionAttr::getAffectedRange() const
+{
+    ScRange aRet(aRange);
+    aRet.ExtendTo(aRangeCover);
+    return aRet;
 }
 
 ScUndoSelectionAttr::~ScUndoSelectionAttr()

@@ -528,6 +528,8 @@ shared_headers = \
                  common/Uri.hpp \
                  common/Util.hpp \
                  common/ViewSettings.hpp \
+                 common/VulcanLogScrub.hpp \
+                 common/VulcanUndoNotice.hpp \
                  common/Watchdog.hpp \
                  common/base64.hpp \
                  common/security.h \

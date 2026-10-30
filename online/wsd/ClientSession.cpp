@@ -58,6 +58,7 @@
 
 #include <limits>
 
+#include <algorithm>
 #include <cctype>
 #include <chrono>
 #include <cstdint>
@@ -98,6 +99,72 @@ void logSyntaxErrorDetails(const StringVector& tokens, const std::string& firstL
 {
     LOG_WRN("Invalid syntax for '" << tokens[0] << "' message: [" << firstLine << ']');
 }
+
+/// Vulcan PDF canvas: is this client transform one of the canvas's own
+/// open-time batches, which no human asked for? The canvas posts
+/// DecomposePdfPages and BuildPdfPageModel (behind a JumpToSlide + UnmarkAll
+/// prefix) and AddWebFont by itself when a PDF opens or a page is first shown.
+/// The engine restores its modified flag after them; they must not set the
+/// sticky human-edit bit either, or every later save of the session reports
+/// IsModifiedByUser: true for a PDF that was only opened.
+///
+/// True only when the payload parses and every SlideCommand key is on the
+/// list; anything else (a parse failure, another Transforms key, any other
+/// command) counts as an edit. A client that spoofs the exemption only
+/// withholds the edit bit from its own saves.
+bool isNonModifyingCanvasTransform(const std::string& transformToken)
+{
+    std::string encoded;
+    if (!getTokenString(transformToken, "transform", encoded) || encoded.empty())
+        return false;
+
+    try
+    {
+        Poco::JSON::Parser parser;
+        const Poco::Dynamic::Var result = parser.parse(Uri::decode(encoded));
+        const auto& root = result.extract<Poco::JSON::Object::Ptr>();
+        if (!root)
+            return false;
+
+        Poco::JSON::Object::Ptr transforms = root->getObject("Transforms");
+        if (!transforms)
+            return false;
+        for (const auto& key : transforms->getNames())
+        {
+            if (key != "SlideCommands")
+                return false;
+        }
+
+        Poco::JSON::Array::Ptr cmds = transforms->getArray("SlideCommands");
+        if (!cmds || cmds->size() == 0)
+            return false;
+
+        bool hasCanvasVerb = false;
+        for (unsigned i = 0; i < cmds->size(); ++i)
+        {
+            Poco::JSON::Object::Ptr cmd = cmds->getObject(i);
+            if (!cmd)
+                return false;
+            for (const auto& key : cmd->getNames())
+            {
+                if (key == "DecomposePdfPages" || key == "BuildPdfPageModel"
+                    || key == "AddWebFont")
+                    hasCanvasVerb = true;
+                else if (key != "JumpToSlide" && key != "UnmarkAll")
+                    return false;
+            }
+        }
+        return hasCanvasVerb;
+    }
+    catch (const std::exception& exc)
+    {
+        // Not ours to reject (the kit reports the parse error); it just does
+        // not qualify for the exemption.
+        LOG_DBG("transformdocumentstructure: counting unparsable transform as an edit: "
+                << exc.what());
+    }
+    return false;
+}
 }
 
 ClientSession::ClientSession(const std::shared_ptr<ProtocolHandlerInterface>& ws,
@@ -110,6 +177,7 @@ ClientSession::ClientSession(const std::shared_ptr<ProtocolHandlerInterface>& ws
     , _uriPublic(uriPublic)
     , _additionalFileUrisPublic(additionalFileUrisPublic)
     , _serverURL(requestDetails)
+    , _isServerToServer(requestDetails.isServerToServer())
     , _auth(Authorization::create(uriPublic))
     , _tokenRefreshAttempts(0)
     , _docBroker(docBroker)
@@ -174,6 +242,12 @@ ClientSession::~ClientSession()
 
     std::unique_lock<std::mutex> lock(GlobalSessionMapMutex);
     GlobalSessionMap.erase(getId());
+}
+
+bool ClientSession::canUseAccessibility() const
+{
+    return ConfigUtil::getConfigValue<bool>("accessibility.enable", Util::isMobileApp())
+           || isVulcanPhoneChrome();
 }
 
 void ClientSession::setState(SessionState newState)
@@ -1015,10 +1089,12 @@ bool ClientSession::_handleInput(const char *buffer, int length)
             // Don't save unmodified docs by default.
             int dontSaveIfUnmodified = 1;
             int dontTerminateEdit = 1;
+            // Vulcan: the host closes this view once the save lands.
+            int beforeClose = 0;
             std::string extendedData;
 
-            // We expect at most 3 arguments.
-            for (int i = 0; i < 3; ++i)
+            // We expect at most 4 arguments.
+            for (int i = 0; i < 4; ++i)
             {
                 // +1 to skip the command token.
                 const StringVector attr = StringVector::tokenize(tokens[i + 1], '=');
@@ -1028,6 +1104,8 @@ bool ClientSession::_handleInput(const char *buffer, int length)
                         COOLProtocol::stringToInteger(attr[1], dontTerminateEdit);
                     else if (attr[0] == "dontSaveIfUnmodified")
                         COOLProtocol::stringToInteger(attr[1], dontSaveIfUnmodified);
+                    else if (attr[0] == "beforeClose")
+                        COOLProtocol::stringToInteger(attr[1], beforeClose);
                     else if (attr[0] == "extendedData")
                     {
                         extendedData = Uri::decode(attr[1]);
@@ -1036,7 +1114,7 @@ bool ClientSession::_handleInput(const char *buffer, int length)
             }
 
             docBroker->manualSave(client_from_this(), dontTerminateEdit != 0,
-                                  dontSaveIfUnmodified != 0, extendedData);
+                                  dontSaveIfUnmodified != 0, extendedData, beforeClose != 0);
         }
     }
     else if (tokens.equals(0, "savetostorage"))
@@ -1263,6 +1341,23 @@ bool ClientSession::_handleInput(const char *buffer, int length)
         // only if the session has WOPI write permission
         if (!isWritable())
             return false;
+
+        // Vulcan (FB 9/29): turning the view EDITABLE also needs the session
+        // to be an editor right now. A read-only session can still be
+        // writable (comment-only, redline-only, or one whose lock refresh
+        // failed), and only wsd lifts a read-only view: a lock-failed session
+        // gets its editable view back by winning attemptlock. Going read-only
+        // is always allowed. The kit reads anything but value=true as
+        // editable, so match that here.
+        std::string value;
+        const bool toReadOnly =
+            tokens.size() > 1 && getTokenString(tokens[1], "value", value) && value == "true";
+        if (isReadOnly() && !toReadOnly)
+        {
+            LOG_WRN("Session [" << getId()
+                                << "] is read-only; refusing to make its view editable");
+            return false;
+        }
         return forwardToChild(firstLine, docBroker);
     }
     else if (tokens.equals(0, "allowlinkupdate"))
@@ -1371,7 +1466,7 @@ bool ClientSession::_handleInput(const char *buffer, int length)
     }
     else if (tokens.equals(0, "a11ystate"))
     {
-        if (ConfigUtil::getConfigValue<bool>("accessibility.enable", Util::isMobileApp()))
+        if (canUseAccessibility())
         {
             return forwardToChild(std::string(buffer, length), docBroker);
         }
@@ -1491,7 +1586,9 @@ bool ClientSession::_handleInput(const char *buffer, int length)
             }
         }
 
-        if (isEditable() && COOLProtocol::tokenIndicatesDocumentModification(tokens))
+        const bool modifyingInput =
+            isEditable() && COOLProtocol::tokenIndicatesDocumentModification(tokens);
+        if (modifyingInput)
         {
             docBroker->updateLastModifyingActivityTime();
         }
@@ -1501,6 +1598,21 @@ bool ClientSession::_handleInput(const char *buffer, int length)
             const std::string dummyFrame = "dummymsg";
             return forwardToChild(dummyFrame, docBroker);
         }
+
+        // Vulcan: remember which sessions were editing during the interval the
+        // next upload will cover, so the host can attribute the version
+        // (X-Vulcan-Editors). Recorded here rather than above, because a message
+        // the session filter drops never reaches the document at all. The
+        // predicate is upstream's "assume modification unless we are sure"
+        // heuristic (COOLProtocol::tokenIndicatesDocumentModification), so this
+        // is presence-while-editing and deliberately over-inclusive: a bare
+        // 'key type=up' or a 'uno .uno:Navigator' from an edit-permitted session
+        // counts. There is no per-session dirty signal to narrow it with - Core's
+        // modified flag is document-wide.
+        if (modifyingInput)
+            docBroker->recordModifyingSession(getUserId());
+        if (modifyingInput && COOLProtocol::tokenIndicatesDeletingInput(tokens))
+            docBroker->recordDeletingInput();
 
         if (tokens.equals(0, "slideshowfollow"))
         {
@@ -1543,6 +1655,59 @@ bool ClientSession::_handleInput(const char *buffer, int length)
     {
         return handleGetSlideRequest(tokens, docBroker);
     }
+    else if (tokens.equals(0, "transformdocumentstructure"))
+    {
+        // VULCAN (R6-10): the browser-side Impress agent bridge
+        // (impress_bridge_v1, VulcanImpressBridge.slideTransform) sends its
+        // FillApi writes on the CLIENT socket as
+        //   transformdocumentstructure url=interactive transform=<json>
+        // and waits for the kit's unocommandresult. Upstream only ever
+        // reached ChildSession's handler from wsd-internal senders
+        // (AIChatSession::forwardToChild, SpecialBrokers), so this token was
+        // missing here and every browser transform died in the terminal
+        // `else` as `error: kind=unknown` — surfaced to the user as a parse-
+        // error toast while the bridge burned its 10s commandresult wait.
+        //
+        // A view-only session must not reach this write primitive: the
+        // FillApi mutates the document model directly (no undo group), so it
+        // cannot rely on core's readonly dispatch refusing the slot the way
+        // ordinary `uno` writes can. Refuse here, attributably — the browser
+        // routes cmd=transformdocumentstructure error frames to the pending
+        // transform ack instead of a modal (Socket.ts / VulcanImpressBridge).
+        if (isReadOnly())
+        {
+            sendTextFrameAndLogError("error: cmd=transformdocumentstructure kind=readonly");
+            return false;
+        }
+
+        // A live-bridge slide write is modifying activity: hold the document
+        // out of idle unload the same way `uno` mutations do (an AI editing
+        // session can be long while the user only watches). The PDF canvas's
+        // own open-time batches are not edits: they only count as activity,
+        // so they neither set the sticky human-edit bit nor arm the
+        // modifying-activity save timer.
+        if (tokens.size() >= 3 && isNonModifyingCanvasTransform(tokens[2]))
+            docBroker->updateLastActivityTime();
+        else
+            docBroker->updateLastModifyingActivityTime();
+
+        // Stamp the frame as client-originated (R6-10 residual, measured on
+        // build #9): AIChatSession rides the SAME ChildSession via
+        // DocumentBroker::forwardToChild with a byte-identical
+        // `url=interactive` frame, so the kit cannot tell the two apart by
+        // session or shape. Unmarked, the kit enrolls a broker
+        // responseChannel and answers with the legacy
+        // `transformeddocumentstructure:` frame — which the kit-to-client
+        // handler below consumes server-side (AIChat tryConsume, else the
+        // convert-to path), so the browser bridge's 10s 'commandresult' wait
+        // can never be satisfied. The marker makes the kit fall through to
+        // the standard `unocommandresult:` envelope instead. Appended
+        // server-side after the readonly gate — a client cannot spoof its
+        // way INTO the broker route, because the kit honours the appended
+        // marker wherever it appears; internal senders never pass through
+        // this branch, so their broker frames stay byte-identical.
+        return forwardToChild(std::string(buffer, length) + " origin=client", docBroker);
+    }
     else if (tokens.equals(0, "updateviewsettings") && tokens.size() >= 2)
     {
         // Applies the AI/Zotero/signature credentials to this session (WOPI-free).
@@ -1583,6 +1748,30 @@ bool ClientSession::_handleInput(const char *buffer, int length)
     else if (tokens.equals(0, "executescript") ||
              tokens.equals(0, "proxyreturn"))
     {
+        return forwardToChild(std::string(buffer, length), docBroker);
+    }
+    else if (tokens.equals(0, "transformdocumentstructure") && tokens.size() >= 3)
+    {
+        // Browser dispatch of the FillApi transform pipeline (the Impress and
+        // Writer agent bridges ride it for their SlideCommand batches). Only
+        // the interactive form may come from a client: the url= variant
+        // instructs the kit to load and transform ANOTHER document and
+        // belongs to the server-internal senders (special brokers, AI
+        // sessions) alone. Mutation rights are enforced by core on the
+        // session's own view, like any forwarded uno mutation.
+        std::string url;
+        getTokenString(tokens[1], "url", url);
+        if (url != "interactive")
+        {
+            LOG_ERR("Session [" << getId()
+                                << "] rejected transformdocumentstructure with non-interactive url");
+            sendTextFrameAndLogError("error: cmd=transformdocumentstructure kind=denied");
+            return false;
+        }
+
+        if (isEditable())
+            docBroker->updateLastModifyingActivityTime();
+
         return forwardToChild(std::string(buffer, length), docBroker);
     }
     else
@@ -2348,7 +2537,7 @@ bool ClientSession::loadDocument(const char* /*buffer*/, int /*length*/,
             oss << " originaldocumenturl=" << getOriginalDocUrl();
         }
 
-        if (ConfigUtil::getConfigValue<bool>("accessibility.enable", Util::isMobileApp()))
+        if (canUseAccessibility())
         {
             oss << " accessibilityState=" << getAccessibilityState();
         }
@@ -2497,8 +2686,12 @@ bool ClientSession::sendCombinedTiles(const char* /*buffer*/, int /*length*/, co
         tileCombined.setCanonicalViewId(getCanonicalViewId());
         if (tileCombined.hasDuplicates())
         {
+            // Be forgiving and log instead of alarming the user, as the parse
+            // failure below already is. A duplicate position is a client bug the
+            // user cannot act on, and the modal it used to raise was worded as a
+            // document problem. The tiles stay unfetched, so the client re-asks.
             LOG_ERR("Dangerous, tilecombine with duplicates is not acceptable");
-            return sendTextFrameAndLogError("error: cmd=tile kind=invalid");
+            return true;
         }
         docBroker->handleTileCombinedRequest(tileCombined, true, client_from_this());
     }
@@ -2615,9 +2808,39 @@ void ClientSession::setLockFailed(const std::string& reason)
 {
     // TODO: make this "read-only" a special one with a notification (infobar? balloon tip?)
     //       and a button to unlock
+    const bool demote = !isReadOnly();
     _isLockFailed = true;
     setReadOnly(true);
     sendTextFrame("lockfailed:" + reason);
+
+    // Vulcan (FB 9/29 read-only data loss): "perm: readonly" only changes what
+    // the browser draws. The Core view was created editable (the lock is taken
+    // after the view loads), so keys and pastes from this session kept
+    // modifying a document nobody could save. Make wsd and Core agree that
+    // this session cannot edit: drop its comment and redline rights too (a
+    // full editor has them, and they keep it "editable"), and push its Core
+    // view read-only. The view message is wsd-internal, so it is not subject
+    // to the client-facing setviewreadonly gate. Only for a session that WAS
+    // a full editor (a comment-only or redline session is read-only by
+    // design, and its rights and view posture were set at load). A refused
+    // lock refresh demotes the same way: the lock is gone, so nothing this
+    // session types can save, and without its rights getWriteableSession
+    // hands the next refresh to a session that can write.
+    if (demote)
+    {
+        _lockFailedDemotedEditor = true;
+        _lockFailedSavedComments = isAllowChangeComments();
+        _lockFailedSavedRedlines = isAllowManageRedlines();
+        setAllowChangeComments(false);
+        setAllowManageRedlines(false);
+    }
+
+    const std::shared_ptr<DocumentBroker> docBroker = getDocumentBroker();
+    if (docBroker && demote && isViewLoaded())
+    {
+        _lockFailedViewReadOnly = true;
+        docBroker->forwardToChild(client_from_this(), "setviewreadonly value=true");
+    }
 }
 
 bool ClientSession::attemptLock(const std::shared_ptr<DocumentBroker>& docBroker)
@@ -2631,7 +2854,28 @@ bool ClientSession::attemptLock(const std::shared_ptr<DocumentBroker>& docBroker
     std::string failReason;
     const bool result = docBroker->attemptLock(*this, failReason);
     if (result)
+    {
+        // Vulcan: undo everything the failure did, not only the read-only
+        // flag. lockIfEditing also cleared isWritable(), and without it the
+        // session could edit but never upload (uploadToStorageInternal and
+        // the setviewreadonly gate both read it), and the Core view stays
+        // read-only until told otherwise.
+        _isLockFailed = false;
+        if (getWritePermission())
+            setWritable(true);
+        if (_lockFailedDemotedEditor)
+        {
+            _lockFailedDemotedEditor = false;
+            setAllowChangeComments(_lockFailedSavedComments);
+            setAllowManageRedlines(_lockFailedSavedRedlines);
+        }
         setReadOnly(false);
+        if (_lockFailedViewReadOnly)
+        {
+            _lockFailedViewReadOnly = false;
+            forwardToChild("setviewreadonly value=false", docBroker);
+        }
+    }
     else
         sendTextFrame("lockfailed:" + failReason);
 
@@ -2885,6 +3129,17 @@ bool ClientSession::handleKitToClientMessage(const std::shared_ptr<Message>& pay
                 Poco::JSON::Parser parser;
                 const Poco::Dynamic::Var parsedJSON = parser.parse(stringJSON);
                 auto object = parsedJSON.extract<Poco::JSON::Object::Ptr>();
+                // Vulcan: the commit a going-away save asked every
+                // spreadsheet view for (DocumentBroker::vulcanCommitInProgressInput)
+                // answers here because it was dispatched with notify=1. The
+                // client never sent it, so it gets no result. Only as many as
+                // wsd sent: the client's own commits are answered after that.
+                if (object->get("commandName").toString() == ".uno:AcceptFormula" &&
+                    vulcanTakeCommitResult())
+                {
+                    return true;
+                }
+
                 if (object->get("commandName").toString() == ".uno:Save")
                 {
                     // Capture isNextSaveAutosave flag before calling handleSaveResponse as it will reset the value!
@@ -3289,6 +3544,13 @@ ClientSession::handleOpenDocKitToClientMessage(const std::shared_ptr<Message>& p
     {
         docBroker->setInteractive(true);
     }
+    else if (tokens.equals(0, "jsdialog:"))
+    {
+        // Vulcan: which modeless dialogs are open in this view, for
+        // the broker's choice of the view a save goes through. The frame is
+        // still forwarded to the client below.
+        vulcanReadDialogFrame(payload->jsonString());
+    }
     else if (tokens.equals(0, "loaded:"))
     {
         // We expect to be in the Loading state, as set in
@@ -3363,7 +3625,11 @@ ClientSession::handleOpenDocKitToClientMessage(const std::shared_ptr<Message>& p
         if (statusJsonObject->has("mode"))
             _clientSelectedMode = std::atoi(statusJsonObject->get("mode").toString().c_str());
         if (statusJsonObject->has("type"))
-            _isTextDocument = statusJsonObject->get("type").toString() == "text";
+        {
+            const std::string docType = statusJsonObject->get("type").toString();
+            _isTextDocument = docType == "text";
+            _isSpreadsheetDocument = docType == "spreadsheet";
+        }
         if (statusJsonObject->has("viewid"))
             _kitViewId = std::atoi(statusJsonObject->get("viewid").toString().c_str());
 
@@ -3568,10 +3834,20 @@ ClientSession::handleOpenDocKitToClientMessage(const std::shared_ptr<Message>& p
             return true;
 #endif
 
-        LOG_TRC("Sending transformed document structure response.");
         if (!saveAsSocket)
-            LOG_ERR("Error in transformeddocumentstructure: not in isConvertTo mode");
-        else
+        {
+            // An interactive browser dispatch (the Impress agent bridge's
+            // SlideCommand batches): the frame IS the transform's ack —
+            // forward it to the client, which awaits it as its command
+            // result. The closeDocument below belongs to the convert-to
+            // flow alone; taking it here tore down the LIVE editing
+            // session on every browser transform (forced save + reload,
+            // seconds of unresponsiveness, and a wiped undo stack).
+            LOG_TRC("Forwarding transformed document structure ack to the client.");
+            return forwardToClient(payload);
+        }
+
+        LOG_TRC("Sending transformed document structure response.");
         {
             http::Response httpResponse(http::StatusCode::OK);
             FileServerRequestHandler::hstsHeaders(httpResponse);
@@ -3581,7 +3857,7 @@ ClientSession::handleOpenDocKitToClientMessage(const std::shared_ptr<Message>& p
             saveAsSocket->sendAndShutdown(httpResponse);
         }
 
-        // Now terminate.
+        // Now terminate (convert-to only).
         docBroker->closeDocument("transformeddocumentstructure");
         return true;
     }
@@ -3624,6 +3900,63 @@ ClientSession::handleOpenDocKitToClientMessage(const std::shared_ptr<Message>& p
 
     // Fall-through, as we couldn't handle the message.
     return std::nullopt;
+}
+
+void ClientSession::vulcanReadDialogFrame(const std::string& json)
+{
+    // Only a spreadsheet view's dialog can make core refuse a save through it
+    // (vulcanSaveBlockedByDialog). Only a frame that can change what is
+    // tracked is parsed (vulcanNoteDialog): a modeless dialog's or Data >
+    // Validity's full frame, and a close frame. The quoted literals are a
+    // cheap prefilter, and the parse decides. The wizard's update and action
+    // frames, sent as the person types into it, are not parsed; its full frame
+    // runs past 65 KB.
+    if (!isSpreadsheetDocument() || (json.find("\"modelessdialog\"") == std::string::npos &&
+                                     json.find("\"close\"") == std::string::npos &&
+                                     json.find("\"ValidationDialog\"") == std::string::npos))
+        return;
+
+    try
+    {
+        Poco::JSON::Object::Ptr object;
+        if (!JsonUtil::parseJSON(json, object) || !object)
+            return;
+
+        // A dialog's full frame is its .ui tree, whose own "id" is the .ui
+        // name, followed by core's numeric LOK window id (jsdialogsender.cxx
+        // generateFullUpdate); the parser keeps the last. Its close frame and
+        // its update and action frames carry only the number. A popup's close
+        // names its window as a string: that is not the dialog closing.
+        const Poco::Dynamic::Var idVar = object->get("id");
+        if (!idVar.isInteger())
+            return;
+        const std::uint64_t id = idVar.convert<std::uint64_t>();
+
+        const auto text = [&object](const std::string& key)
+        {
+            const Poco::Dynamic::Var var = object->get(key);
+            return var.isString() ? var.toString() : std::string();
+        };
+        const std::string jsontype = text("jsontype");
+        const std::string action = text("action");
+        const std::string type = text("type");
+        const std::string dialogId = text("dialogid");
+
+        const bool wasOpen = _vulcanModelessDialogs.count(id) > 0;
+        vulcanNoteDialog(jsontype, action, type, dialogId, id);
+        const bool isOpen = _vulcanModelessDialogs.count(id) > 0;
+        if (isOpen && !wasOpen)
+            LOG_DBG("Modeless dialog " << id << " [" << dialogId << "] opened in session ["
+                                       << getId() << "]");
+        else if (wasOpen && !isOpen)
+            LOG_DBG("Modeless dialog " << id << " closed in session [" << getId()
+                                       << "]");
+    }
+    catch (const std::exception& exc)
+    {
+        LOG_WRN("Could not read a jsdialog frame for session [" << getId()
+                                                               << "]: " << exc.what());
+    }
 }
 
 /// Map a file extension to a document type for password-protected icons.
@@ -3829,6 +4162,134 @@ bool ClientSession::handleSaveAs(const std::shared_ptr<Message>& payload,
 }
 #endif // !MOBILEAPP
 
+std::chrono::milliseconds ClientSession::viewUpdateCoalesceInterval()
+{
+    CONFIG_STATIC const std::chrono::milliseconds interval(
+        std::max(0, ConfigUtil::getConfigValue<int>("per_document.view_update_coalesce_ms", 0)));
+    return interval;
+}
+
+namespace
+{
+
+/// Vulcan: "<kind>|<viewId>" for the roster/cursor messages we are allowed to
+/// coalesce, or an empty string for everything else. These messages carry the
+/// *current* state of one view, so a newer one makes the one we hold redundant.
+/// viewinfo: is the whole roster and has no view of its own, hence the bare key.
+std::string viewUpdateCoalesceKey(const Message& payload)
+{
+    std::string_view kind;
+    if (payload.firstTokenMatches("viewinfo:"))
+        return "viewinfo:";
+    else if (payload.firstTokenMatches("cellviewcursor:"))
+        kind = "cellviewcursor:";
+    else if (payload.firstTokenMatches("textviewselection:"))
+        kind = "textviewselection:";
+    else
+        return std::string();
+
+    // Both carry a JSON body with the view they describe. Pick the id out
+    // without a full JSON parse - this is on the fan-out path - and give up
+    // (i.e. don't coalesce) on anything we don't recognise.
+    const std::string_view body(payload.data().data(), payload.size());
+    std::size_t pos = body.find("\"viewId\"");
+    if (pos == std::string_view::npos)
+        return std::string();
+
+    pos = body.find(':', pos + 8);
+    if (pos == std::string_view::npos)
+        return std::string();
+
+    ++pos;
+    while (pos < body.size() && (body[pos] == ' ' || body[pos] == '"'))
+        ++pos;
+
+    const std::size_t start = pos;
+    while (pos < body.size() && body[pos] >= '0' && body[pos] <= '9')
+        ++pos;
+
+    if (pos == start)
+        return std::string();
+
+    return std::string(kind) + '|' + std::string(body.substr(start, pos - start));
+}
+
+} // namespace
+
+bool ClientSession::coalesceViewUpdate(const std::shared_ptr<Message>& payload)
+{
+    const std::chrono::milliseconds interval = viewUpdateCoalesceInterval();
+    if (interval <= std::chrono::milliseconds::zero())
+        return false; // Disabled by default: upstream behaviour, byte for byte.
+
+    const auto now = std::chrono::steady_clock::now();
+    const std::string key = viewUpdateCoalesceKey(*payload);
+    if (key.empty())
+    {
+        // Not a roster/cursor update. Anything we are holding back is older than
+        // this message, so it has to go out first: coalescing never changes the
+        // order of the messages we forward from the kit, only their timing.
+        // (wsd's own frames - perm:, error:, a broadcast removesession - go out
+        // through sendTextFrame(), which does not pass through here and can
+        // overtake a held-back update. None of them is ordered against view
+        // state: the roster is rebuilt from whole viewinfo: snapshots.)
+        if (!_pendingViewUpdates.empty())
+            flushCoalescedViewUpdates(now);
+
+        return false;
+    }
+
+    if (_pendingViewUpdates.empty() && now - _lastViewUpdateFlush >= interval)
+    {
+        // Idle: let it through at once, so a lone update - and the roster of a
+        // freshly loaded document - is never delayed.
+        _lastViewUpdateFlush = now;
+        return false;
+    }
+
+    // Supersede the update we hold for the same kind and view *in its slot*: the
+    // newest state takes the place of the oldest update it replaces, rather than
+    // moving to the back of the buffer. All three kinds are latest-state-only
+    // (viewinfo: is the whole roster; the cursor/selection kinds are one view's
+    // current state), so refreshing in place loses nothing - and it is what keeps
+    // a roster ahead of the per-view updates buffered after it. Appending
+    // instead would flush e.g. textviewselection: for a freshly joined view
+    // before the roster that first names it, and the browser drops a selection
+    // whose viewId it does not know yet (browser CanvasTileLayer.js) - state
+    // lost, not delayed.
+    for (auto& pending : _pendingViewUpdates)
+    {
+        if (pending.first == key)
+        {
+            LOG_TRC("Coalescing [" << key << "] update for session [" << getId() << ']');
+            pending.second = payload;
+            return true;
+        }
+    }
+
+    _pendingViewUpdates.emplace_back(key, payload);
+    return true;
+}
+
+void ClientSession::flushCoalescedViewUpdates(std::chrono::steady_clock::time_point now)
+{
+    for (const auto& pending : _pendingViewUpdates)
+        enqueueSendMessage(pending.second);
+
+    _pendingViewUpdates.clear();
+    _lastViewUpdateFlush = now;
+}
+
+void ClientSession::flushCoalescedViewUpdatesIfDue()
+{
+    if (_pendingViewUpdates.empty())
+        return;
+
+    const auto now = std::chrono::steady_clock::now();
+    if (now - _lastViewUpdateFlush >= viewUpdateCoalesceInterval())
+        flushCoalescedViewUpdates(now);
+}
+
 bool ClientSession::forwardToClient(const std::shared_ptr<Message>& payload)
 {
     if (isCloseFrame())
@@ -3837,6 +4298,10 @@ bool ClientSession::forwardToClient(const std::shared_ptr<Message>& payload)
                                                                                << ']');
         return true;
     }
+
+    // Vulcan: hold back roster/cursor churn, if the operator asked us to.
+    if (coalesceViewUpdate(payload))
+        return true;
 
     enqueueSendMessage(payload);
     return true;
@@ -4040,6 +4505,7 @@ void ClientSession::dumpState(std::ostream& os)
        << "\n\t\tkit ViewId: " << _kitViewId
        << "\n\t\tour URL (un-trusted): " << _serverURL.getSubURLForEndpoint("")
        << "\n\t\tisTextDocument: " << _isTextDocument
+       << "\n\t\tisVulcanAgentView: " << _isVulcanAgentView
        << "\n\t\tclipboardKeys[0]: " << _clipboardKeys[0]
        << "\n\t\tclipboardKeys[1]: " << _clipboardKeys[1]
        << "\n\t\tclip sockets: " << _clipSockets.size()

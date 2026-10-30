@@ -864,14 +864,10 @@ void LuminanceToAlpha(cairo_surface_t* pMask)
                                      + nGArray[pMaskPixelData[SVP_CAIRO_GREEN]]
                                      + nBArray[pMaskPixelData[SVP_CAIRO_BLUE]]);
 
-                if (255 != nAlpha)
-                    // remove pre-multiplied alpha (use existing VCL tooling)
-                    nAlpha = vcl::bitmap::unpremultiply(nLum, nAlpha);
-                else
-                    // already what we need
-                    nAlpha = nLum;
-
-                pMaskPixelData[SVP_CAIRO_ALPHA] = 255 - nAlpha;
+                // The mask laid over white, as the VCL processors and SVG see
+                // it: with pre-multiplied luminance that is alpha minus luminance.
+                pMaskPixelData[SVP_CAIRO_ALPHA]
+                    = nLum < nAlpha ? static_cast<sal_uInt8>(nAlpha - nLum) : 0;
             }
 
             pMaskPixelData += 4;
@@ -4298,33 +4294,13 @@ void CairoPixelProcessor2D::processSvgRadialGradientPrimitive2D(
         rCandidate.createUnitGradientToObjectTransformation());
     aObjectToUnitGradient.invert();
 
-    // prepare empty FocalVector
-    basegfx::B2DVector aFocalVector(0.0, 0.0);
-
-    if (rCandidate.isFocalSet())
-    {
-        // FocalPoint is used, create ObjectTransform based on polygon range
-        const basegfx::B2DRange aPolyRange(rCandidate.getPolyPolygon().getB2DRange());
-        const double fPolyWidth(aPolyRange.getWidth());
-        const double fPolyHeight(aPolyRange.getHeight());
-        const basegfx::B2DHomMatrix aObjectTransform(
-            basegfx::utils::createScaleTranslateB2DHomMatrix(
-                fPolyWidth, fPolyHeight, aPolyRange.getMinX(), aPolyRange.getMinY()));
-
-        // get vector, then transform to object coordinates, then to
-        // UnitGradient coordinates to be in the needed coordinate system
-        aFocalVector = basegfx::B2DVector(rCandidate.getStart() - rCandidate.getFocal());
-        aFocalVector *= aObjectTransform;
-        aFocalVector *= aObjectToUnitGradient;
-    }
-
     // create pattern using unit coordinates. Unit coordinates here means that
     // the transformation provided by the primitive maps the radial gradient
-    // to (0,0) as center, 1.0 as radius - which is the unit circle. The
-    // FocalPoint (if used) has to be relative to that, so - since unified
-    // center is at (0, 0), handling as vector is sufficient
+    // to (0,0) as center, 1.0 as radius - which is the unit circle. As in SVG,
+    // offset 0 is the focal point and offset 1 the unit circle.
+    const basegfx::B2DPoint aFocal(rCandidate.createUnitGradientFocal());
     cairo_pattern_t* pPattern(
-        cairo_pattern_create_radial(0, 0, 0, aFocalVector.getX(), aFocalVector.getY(), 1));
+        cairo_pattern_create_radial(aFocal.getX(), aFocal.getY(), 0, 0, 0, 1));
 
     // set ObjectToUnitGradient as transformation at gradient - patterns
     // need the inverted transformation, see cairo documentation

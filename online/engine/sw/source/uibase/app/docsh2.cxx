@@ -64,6 +64,8 @@
 #include <basic/sbstar.hxx>
 #include <basic/basmgr.hxx>
 #include <comphelper/classids.hxx>
+#include <comphelper/kit.hxx>
+#include <sfx2/kit/helper.hxx>
 #include <fmtcol.hxx>
 #include <istype.hxx>
 #include <view.hxx>
@@ -161,31 +163,134 @@ void SwDocShell::ToggleLayoutMode(SwView* pView)
 
     const SwViewOption& rViewOptions = *pView->GetWrtShell().GetViewOptions();
 
-    //TODO: Should HideWhitespace flag be saved in the document settings?
-    GetDoc()->getIDocumentSettingAccess().set(DocumentSettingId::BROWSE_MODE, rViewOptions.getBrowseMode());
+    /*
+     * VULCAN (Lane W, W5): under COKit the layout mode is PRESENTATION STATE,
+     * not document content, so the persisted BROWSE_MODE document setting is
+     * left alone.
+     *
+     * The setting exists for load/save "when no SwViewShell is available"
+     * (DocumentSettingManager.cxx) -- everything the live layout decides reads
+     * the CURRENT SHELL'S VIEW OPTIONS instead (SwPageFrame::MakeAll,
+     * calcmove.cxx; pagechg.cxx passim), and those are already synced across
+     * every shell by lcl_TallyKitReflowVotes. What the setting DOES reach is
+     * the saved bytes: xmlexp.cxx writes it into ODF settings.xml, and
+     * wrtw8esh.cxx keys exported escher object geometry on it. A phone's
+     * reflow vote must never change what a colleague's save writes.
+     *
+     * Today DocumentSettingManager::set() happens to enforce this from the
+     * other side -- under COKit it pins BROWSE_MODE to false whatever value
+     * is passed ("Can't render in webview successfully.") -- which is why
+     * the wet runs always saw page-mode bytes. This site does not lean on
+     * that quirk: the contract belongs at the writer, and if that pin is
+     * ever lifted (it predates the reflow-vote lane, whose verdict is
+     * view-scoped by design) this write must still not happen. Same
+     * discipline as the wide-fly clamp: derived presentation state is
+     * view-scoped, the model stays untouched. Pinned by
+     * testKitReflowVoteLeavesModelUntouched.
+     */
+    if (!comphelper::COKit::isActive())
+        //TODO: Should HideWhitespace flag be saved in the document settings?
+        GetDoc()->getIDocumentSettingAccess().set(DocumentSettingId::BROWSE_MODE, rViewOptions.getBrowseMode());
     UpdateFontList();  // Why is this necessary here?
 
     pView->GetViewFrame().GetBindings().Invalidate(FN_SHADOWCURSOR);
     if( !GetDoc()->getIDocumentDeviceAccess().getPrinter( false ) )
         pView->SetPrinter( GetDoc()->getIDocumentDeviceAccess().getPrinter( false ), SfxPrinterChangeFlags::PRINTER | SfxPrinterChangeFlags::JOBSETUP );
     GetDoc()->CheckDefaultPageFormat();
-    SfxViewFrame *pTmpFrame = SfxViewFrame::GetFirst(this, false);
-    while (pTmpFrame)
+    /*
+     * VULCAN (Lane W, W4): this loop CLOSES EVERY OTHER VIEW ON THE DOCUMENT.
+     *
+     * On the desktop that is correct and load-bearing: switching between
+     * page and web view swaps the view shell class (SwView <-> SwWebView), and
+     * frames of the old class cannot survive the swap, so they are torn down
+     * and the user re-opens the windows they want.
+     *
+     * Under COKit every view is a different PERSON. A phone reader toggling
+     * web view would have closed every other collaborator's session on that
+     * document -- silently, from a menu row, with no confirmation and no way
+     * back. That is a far larger blast radius than the feature, and it is the
+     * first thing acceptance criterion 5 ("two views on one doc: prove the
+     * shared-layout behaviour is understood") turns up.
+     *
+     * The swap that motivates the loop does not happen here either: COOL
+     * never instantiates SwWebView -- the SID_VIEWSHELL0 dispatch above is
+     * inside the SID_BROWSER_MODE/source-view branch of SwDocShell::Execute,
+     * not on this path -- so the other views stay valid shells of a document
+     * whose layout mode changed. They reflow with it, which is the
+     * shared-layout limitation recorded on SwRootFrame::ImplCalcBrowseWidth.
+     * That limitation is now HANDLED rather than merely documented: the mode
+     * is decided for the document by tallying every view's reflow vote
+     * (lcl_TallyKitReflowVotes, sw/source/uibase/uiview/view2.cxx), and a
+     * single view voting against is an absolute veto, so this function is
+     * never reached with a mode that some attached view rejected. Reflowing
+     * someone else's view is a limitation; closing it is data loss.
+     */
+    if (!comphelper::COKit::isActive())
     {
-        if( pTmpFrame != &pView->GetViewFrame() )
+        SfxViewFrame *pTmpFrame = SfxViewFrame::GetFirst(this, false);
+        while (pTmpFrame)
         {
-            pTmpFrame->DoClose();
-            pTmpFrame = SfxViewFrame::GetFirst(this, false);
+            if( pTmpFrame != &pView->GetViewFrame() )
+            {
+                pTmpFrame->DoClose();
+                pTmpFrame = SfxViewFrame::GetFirst(this, false);
+            }
+            else
+                pTmpFrame = SfxViewFrame::GetNext(*pTmpFrame, this, false);
         }
-        else
-            pTmpFrame = SfxViewFrame::GetNext(*pTmpFrame, this, false);
     }
+
+    // VULCAN (Lane W, W1): the browse width is cached on SwRootFrame and its
+    // validity flag does not know that the layout MODE just changed. Drop it
+    // so the reflow that follows recomputes from the client's stated width
+    // (or from MIN_BROWSE_WIDTH if no client has stated one yet) instead of
+    // reusing whatever the last web-view session left behind.
+    if (SwRootFrame* pLayout = pView->GetWrtShell().GetLayout())
+        pLayout->InvalidateBrowseWidth();
 
     pView->GetWrtShell().InvalidateLayout(true);
 
     pView->RecheckBrowseMode();
 
-    pView->SetNewWindowAllowed(!rViewOptions.getBrowseMode());
+    // VULCAN (Lane W, W3): a layout-mode change is the largest layout-WIDTH
+    // change there is, and every tile the client already holds was painted
+    // against the other one. The doubled/overprinted glyphs reported in lists
+    // and tables are those tiles surviving. Invalidate every view of the
+    // document, not just this one -- the reflow is document-wide (see
+    // SwRootFrame::ImplCalcBrowseWidth), so the staleness is too.
+    if (comphelper::COKit::isActive())
+    {
+        for (SwViewShell& rRingShell : pView->GetWrtShell().GetRingContainer())
+        {
+            if (SfxViewShell* pSfxShell = rRingShell.GetSfxViewShell())
+                KitHelper::notifyInvalidation(pSfxShell, nullptr);
+        }
+    }
+
+    /*
+     * VULCAN (Lane W, W5): under COKit, "new window" is how EVERY collaborator
+     * JOINS -- KitHelper::createView fires SID_NEWWINDOW at an existing frame
+     * (sfx2/source/view/kithelper.cxx) -- so it must never be disallowed.
+     *
+     * Wet-proven defect (armonly local-rig repro, build #5): a phone's reflow
+     * vote armed browse mode, this line then set NewWindowAllowed(false) on
+     * the arming view, and the next joiner's SID_NEWWINDOW was SILENTLY
+     * refused (SfxViewFrame::ExecView_Impl returns without creating anything;
+     * the OSL_FAIL there is a no-op in production). KitHelper::createView then
+     * read SfxViewShell::Current() -- still the phone's shell -- and handed
+     * the joiner the PHONE'S view id. Two sessions drove one SfxViewShell:
+     * view id 4 issued twice, "Have 1 view" on a two-session document, no
+     * mutual visibility, the joiner's setviewreadonly stomping the phone's
+     * view. The desktop rationale for the disallow (a browse layout is sized
+     * to one window, a second desktop window of it would be wrong) is about
+     * WINDOWS of one user; under COKit the reflow tally already arbitrates
+     * the shared layout across users, and refusing a join is not a tenable
+     * answer to a layout limitation.
+     */
+    if (comphelper::COKit::isActive())
+        pView->SetNewWindowAllowed(true);
+    else
+        pView->SetNewWindowAllowed(!rViewOptions.getBrowseMode());
 }
 
 // update text fields on document properties changes

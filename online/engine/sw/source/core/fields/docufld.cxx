@@ -67,6 +67,7 @@
 #include <doc.hxx>
 #include <IDocumentFieldsAccess.hxx>
 #include <IDocumentStatistics.hxx>
+#include <DocumentStatisticsManager.hxx>
 #include <IDocumentStylePoolAccess.hxx>
 #include <IDocumentLayoutAccess.hxx>
 #include <rootfrm.hxx>
@@ -773,12 +774,22 @@ OUString SwDocStatFieldType::Expand(SwDocStatSubType nSubType,
         case SwDocStatSubType::Word: nVal = rDStat.nWord;  break;
         case SwDocStatSubType::Character: nVal = rDStat.nChar;  break;
         case SwDocStatSubType::Page:
-            if( m_rDoc.getIDocumentLayoutAccess().GetCurrentLayout() )
-                const_cast<SwDocStat &>(rDStat).nPage = m_rDoc.getIDocumentLayoutAccess().GetCurrentLayout()->GetPageNum();
+        {
+            // VULCAN: only a page layout's count may become the
+            // document statistic. Under COKit a browse (web/reflowed) layout
+            // counts the viewer's window, and this write put that number into
+            // nPage behind IncrementalDocStatCalculate's guard; the save then
+            // wrote it into docProps/app.xml <Pages> and into this field's
+            // cached NUMPAGES. Such a layout shows the count the document
+            // already holds instead.
+            const SwRootFrame* pLayout = m_rDoc.getIDocumentLayoutAccess().GetCurrentLayout();
+            if (pLayout && !sw::LayoutPageCountIsViewState(pLayout))
+                const_cast<SwDocStat &>(rDStat).nPage = pLayout->GetPageNum();
             nVal = rDStat.nPage;
             if( SVX_NUM_PAGEDESC == nFormat )
                 nFormat = m_nNumberingType;
             break;
+        }
         case SwDocStatSubType::PageRange:
             nVal = nVirtPageCount;
             if( SVX_NUM_PAGEDESC == nFormat )

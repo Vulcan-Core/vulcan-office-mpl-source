@@ -257,6 +257,7 @@ void ScFormatShell::ExecuteNumFormat( SfxRequest& rReq )
             case SID_NUMBER_PERCENT:
             case SID_NUMBER_STANDARD:
             case SID_NUMBER_FORMAT:
+            case SID_VULCAN_NUMBER_FORMAT_CODE:
             case SID_NUMBER_INCDEC:
             case SID_NUMBER_DECDEC:
             case SID_NUMBER_THOUSANDS:
@@ -478,6 +479,56 @@ void ScFormatShell::ExecuteNumFormat( SfxRequest& rReq )
                         nLeadZeroes);
                     pTabViewShell->SetNumFmtByStr(aCode);
                 }
+            }
+            break;
+
+        // VULCAN FORK -- keep across upstream rebases.
+        //
+        // .uno:Vulcan_NumberFormatCode {"FormatCode":{"type":"string","value":"0.00%"}}
+        //
+        // The agent's FormatRange NumberFormat. SID_NUMBER_FORMAT above is not a
+        // code route: its string is the sidebar's "thousand,negRed,precision,
+        // leadZeroes," tuple, and GenerateFormat rebuilds a code from the CURRENT
+        // format's category, so "0.00%" sent there sets "#". This slot takes the
+        // code itself (en-US, as xlsx stores it) and applies it to the selection
+        // (ScViewFunc::SetNumFmtByEnglishCode).
+        //
+        // The return value is the answer, so a notified dispatch acks it:
+        //  - the formatter key the cells now hold (SfxUInt32Item), success:true --
+        //    whether it was applied or the cells already held it, in which case
+        //    nothing was applied and no undo step recorded. The caller reads the
+        //    cells back (.uno:ExtractCellFormats, docuno.cxx) and compares KEYS,
+        //    because the formatter may respell the code (case, quoting, locale);
+        //  - the string "protected" (SfxStringItem), success:true: the selection is
+        //    protected, nothing was applied, and Calc's box was raised. A string,
+        //    not a failure, so a caller can tell it from a bad code without
+        //    waiting for that box;
+        //  - the string "unreadable" (SfxStringItem), success:true: the code does
+        //    not parse (or is empty); nothing was applied. A string, not a
+        //    failure, because success:false with no result is also what the
+        //    dispatch reports when this case never ran (unoctitm.cxx: a locked
+        //    dispatcher, no ScFormatShell on the stack, a read-only document) or
+        //    ran without a FormatCode (TransformParameters drops one that is not
+        //    a string), and a caller must not tell an agent that a good code is
+        //    unreadable because of that.
+        // A bare success:false therefore means the code was never tried.
+        case SID_VULCAN_NUMBER_FORMAT_CODE:
+            if (const SfxStringItem* pCode = rReq.GetArg<SfxStringItem>(FN_PARAM_1))
+            {
+                sal_uInt32 nKey = 0;
+                const ScViewFunc::EnglishNumFmtResult eResult
+                    = pCode->GetValue().isEmpty()
+                          ? ScViewFunc::EnglishNumFmtResult::Unreadable
+                          : pTabViewShell->SetNumFmtByEnglishCode(pCode->GetValue(), nKey);
+                if (eResult == ScViewFunc::EnglishNumFmtResult::Applied)
+                {
+                    rReq.SetReturnValue(SfxUInt32Item(nSlot, nKey));
+                    rReq.Done();
+                }
+                else if (eResult == ScViewFunc::EnglishNumFmtResult::Protected)
+                    rReq.SetReturnValue(SfxStringItem(nSlot, u"protected"_ustr));
+                else
+                    rReq.SetReturnValue(SfxStringItem(nSlot, u"unreadable"_ustr));
             }
             break;
 

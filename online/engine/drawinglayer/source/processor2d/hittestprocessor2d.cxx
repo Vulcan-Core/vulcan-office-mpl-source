@@ -28,6 +28,7 @@
 #include <basegfx/polygon/b2dpolygontools.hxx>
 #include <basegfx/polygon/b2dpolypolygontools.hxx>
 #include <drawinglayer/primitive2d/transparenceprimitive2d.hxx>
+#include <drawinglayer/primitive2d/unifiedtransparenceprimitive2d.hxx>
 #include <drawinglayer/primitive2d/maskprimitive2d.hxx>
 #include <drawinglayer/primitive2d/sceneprimitive2d.hxx>
 #include <drawinglayer/primitive2d/pointarrayprimitive2d.hxx>
@@ -47,7 +48,8 @@ namespace drawinglayer::processor2d
             maDiscreteHitTolerancePerAxis(rLogicHitTolerancePerAxis),
             mbCollectHitStack(false),
             mbHit(false),
-            mbHitTextOnly(bHitTextOnly)
+            mbHitTextOnly(bHitTextOnly),
+            mbHitInvisibleText(false)
         {
             // ensure input parameters for hit tolerance is >= 0.0
             if (maDiscreteHitTolerancePerAxis.getX() < 0.0)
@@ -407,6 +409,30 @@ namespace drawinglayer::processor2d
                     // the children are recursively checked for hit. This may be refined for
                     // parts where the content is completely transparent if needed.
                     process(rTransCandidate.getChildren());
+
+                    break;
+                }
+                case PRIMITIVE2D_ID_UNIFIEDTRANSPARENCEPRIMITIVE2D :
+                {
+                    if(getHitTextOnly() && getHitInvisibleText())
+                    {
+                        // Editable scanned PDFs: a hidden-ink OCR line draws its
+                        // runs with alpha-0 characters, a fully transparent
+                        // group that decomposes to nothing, and must still take
+                        // the caret. Only the caller that asked for it (the
+                        // object is an ocr: line, sdrhittesthelper.cxx) looks
+                        // inside; every other object keeps the decomposition,
+                        // so its fully transparent text stays unhittable. A
+                        // partly transparent group decomposes to a
+                        // TransparencePrimitive2D whose children are checked
+                        // anyway.
+                        const primitive2d::UnifiedTransparencePrimitive2D& rUniCandidate(static_cast< const primitive2d::UnifiedTransparencePrimitive2D& >(rCandidate));
+                        process(rUniCandidate.getChildren());
+                    }
+                    else
+                    {
+                        process(rCandidate);
+                    }
 
                     break;
                 }

@@ -47,6 +47,7 @@
 #include <sdresid.hxx>
 #include <unchss.hxx>
 #include <slideshow.hxx>
+#include <VulcanHiddenInk.hxx>
 
 #include <undo/undomanager.hxx>
 
@@ -615,6 +616,10 @@ void DrawView::DeleteMarked()
             }
         }
     }
+
+    // Editable scanned PDFs: deleting an untouched OCR line deletes the
+    // printed line - its ink leaves the scan, in this same undo list.
+    sd::hiddenink::BeforeDeleteMarked(*this);
 
     ::sd::View::DeleteMarked();
 

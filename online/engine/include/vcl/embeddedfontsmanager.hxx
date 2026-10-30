@@ -53,7 +53,8 @@ public:
       @param fontName name of the font (e.g. 'Times New Roman')
       @param extra additional text to use for name (e.g. to distinguish regular from bold, italic,...), "?" for unique
       @param key key to xor the data with, from the start until the key's length (not repeated)
-      @param eot whether the data is compressed in Embedded OpenType format
+      @param eot whether the data is compressed in Embedded OpenType format; data that starts
+             as a bare TrueType or OpenType font is read as such either way
     */
     bool addEmbeddedFont( const css::uno::Reference< css::io::XInputStream >& stream,
         const OUString& fontName, std::u16string_view extra,

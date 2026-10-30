@@ -106,13 +106,15 @@ class UIManager extends window.L.Control {
 		});
 		const mainNav = document.querySelector('.main-nav') as HTMLElement;
 		mainNav.addEventListener('wheel', function(e: WheelEvent) {
-			const el = this as HTMLElement;
+			// The desktop menus scroll in their own track (Control.Menubar).
+			const track = this.querySelector('#vulcan-menu-track') as HTMLElement | null;
+			const el = track && track.scrollWidth > track.clientWidth ? track : this as HTMLElement;
 
 			// Allow default scroll for Shift + scroll or if not horizontally scrollable
 			if (e.shiftKey || el.scrollWidth <= el.clientWidth) return;
 
 			// Scroll horizontally
-			this.scrollLeft += e.deltaY;
+			el.scrollLeft += e.deltaY;
 
 			// Prevent vertical scroll only within this element
 			e.preventDefault();
@@ -286,6 +288,8 @@ class UIManager extends window.L.Control {
 	 * Sets the document background based on the activation flag.
 	 */
 	setDarkBackground(activate: boolean): void {
+		// The page canvas keeps white paper (see isPageCanvasPaper).
+		if (this.isPageCanvasPaper()) activate = false;
 		var cmd = { 'NewTheme': { 'type': 'string', 'value': '' } };
 		activate ? cmd.NewTheme.value = 'Dark' : cmd.NewTheme.value = 'Light';
 		app.socket.sendMessage('uno .uno:InvertBackground ' + JSON.stringify(cmd));
@@ -311,7 +315,7 @@ class UIManager extends window.L.Control {
 	 */
 	applyInvert(skipCore: boolean = false): void {
 		// get the initial mode
-		var backgroundDark = this.isBackgroundDark();
+		var backgroundDark = this.isBackgroundDark() && !this.isPageCanvasPaper();
 
 		if (skipCore) {
 			this.initDarkBackgroundUI(backgroundDark);
@@ -499,8 +503,27 @@ class UIManager extends window.L.Control {
 	 */
 	activateDarkModeInCore(activate: boolean): void {
 		var cmd = { 'NewTheme': { 'type': 'string', 'value': '' } };
-		activate ? cmd.NewTheme.value = 'Dark' : cmd.NewTheme.value = 'Light';
+		activate && !this.isPageCanvasPaper() ? cmd.NewTheme.value = 'Dark' : cmd.NewTheme.value = 'Light';
 		app.socket.sendMessage('uno .uno:ChangeTheme ' + JSON.stringify(cmd));
+	}
+
+	/**
+	 * The page canvas (a drawing — how a PDF opens to edit) keeps its paper
+	 * white and its ink as the PDF drew it in every theme, like the host's
+	 * PDF viewer: a rasterised page is theme-invariant, and a dark core theme
+	 * would repaint the page dark and flip automatic text colour to white.
+	 * The chrome around it still follows the theme.
+	 *
+	 * A presentation is the same: each slide paints the background and the
+	 * text colours its author chose. A dark core theme repaints none of that
+	 * and still recolours the text for a dark ground, so white text on a dark
+	 * slide went grey, dark text in a box over a light card went pale on it,
+	 * and a chart's dark labels went pale on a white slide.
+	 */
+	isPageCanvasPaper(): boolean {
+		if (!this.map || typeof this.map.getDocType !== 'function') return false;
+		const docType = this.map.getDocType();
+		return docType === 'drawing' || docType === 'presentation';
 	}
 
 	/**
@@ -548,6 +571,17 @@ class UIManager extends window.L.Control {
 		this.permissionViewMode = new PermissionViewMode(this.map);
 		this.permissionViewMode.init();
 
+		// Vulcan: the fork chrome carries NO Share button. Three attempts at
+		// one lived here and in PermissionMode — insertVulcanClassicShareButton
+		// (which could never render: PermissionMode built a hidden #shareas
+		// first, so the pill's getElementById guard always early-returned),
+		// then PermissionMode's #shareAsContainer pill, then the notebookbar
+		// options-section twin. All are removed: sharing is the embedding
+		// host's affordance, and a second control in the document chrome was
+		// redundant. Do not add another one here. The File-tab ShareAs items,
+		// the menubar File > Share... entries and the Backstage tile remain —
+		// they dispatch 'shareas' -> UI_Share and are how the host is asked.
+
 		app.UI.compactViewAccessibility.initialize();
 	}
 
@@ -559,8 +593,34 @@ class UIManager extends window.L.Control {
 
 		this.initializeMenubarAndTopToolbar();
 
-		if (window.mode.isSmallScreenDevice()) {
+		// CS-1: under phone chrome this control is not rendered and not bound
+		// — upper-left is the HOST's back at every depth now. The stock phone
+		// chrome, tablets and desktop keep it. Bound rather than merely
+		// hidden matters: a hidden-but-bound element is still reachable by
+		// keyboard and by anything that synthesises a click.
+		if (window.mode.isSmallScreenDevice()
+			&& !document.documentElement.classList.contains('vulcan-mobile-chrome')) {
 			$('#toolbar-mobile-back').on('click', () => {
+				// One layer per tap. The phone chrome now keeps this button
+				// visible while the kebab is open (Control.Menubar), so it has to
+				// unwind the menu FIRST -- otherwise the deepest surface's exit
+				// would skip a layer and drop you out of edit mode entirely,
+				// which is worse than the hidden button it replaced.
+				//
+				// The hamburger's class is the authority rather than a global
+				// flag: it is toggled at both the open and close sites, so it
+				// cannot drift. Closing goes through the same
+				// $('#main-menu-state').click() path the wizard's own close uses,
+				// so the existing close branch does the teardown and nothing here
+				// duplicates it.
+				if ($('#toolbar-hamburger').hasClass('menuwizard-opened')) {
+					$('#main-menu-state').click();
+					return;
+				}
+				// Notes view is the next layer down, and on Impress it is the
+				// one layer with no exit of its own. See exitPhoneNotesView.
+				if (this.exitPhoneNotesView())
+					return;
 				this.enterReadonlyOrClose();
 			});
 		}
@@ -590,6 +650,13 @@ class UIManager extends window.L.Control {
 		if (window.mode.isSmallScreenDevice()) {
 			this.mobileWizard = window.L.control.mobileWizard();
 			this.map.addControl(this.mobileWizard);
+			// Start mirroring the back ladder to the host. Attaches after the
+			// wizard exists because depth() reads its window stack. Self-gated
+			// on phone chrome, so a tablet (which reaches this branch only if
+			// the host sends stock chrome and the screen is small) still
+			// publishes nothing.
+			if ((window as any).VulcanEscape)
+				(window as any).VulcanEscape.attach(this.map);
 		}
 		this.map.addControl(window.L.control.languageDialog());
 		this.map.dialog = window.L.control.lokDialog();
@@ -598,9 +665,6 @@ class UIManager extends window.L.Control {
 		this.map.userList = window.L.control.userList();
 		this.map.addControl(this.map.userList);
 		this.map.aboutDialog = JSDialog.aboutDialog(this.map);
-
-		if (window.L.Map.versionBar && window.allowUpdateNotification)
-			this.map.addControl(window.L.Map.versionBar);
 
 		var openBusyPopup = (label: string) => {
 			this.busyPopupTimer = window.setTimeout(() => {
@@ -642,6 +706,7 @@ class UIManager extends window.L.Control {
 
 		this.map.on('showbusy', (e: any) => {
 			fadeoutBusyPopup();
+			if (app.telemetry) app.telemetry.noteBusyShown(e.label);
 			openBusyPopup(e.label);
 		});
 
@@ -692,6 +757,144 @@ class UIManager extends window.L.Control {
 	initializeSpecializedUI(docType: string): void {
 		app.console.debug('UIManager: initialize specialized UI for: ' + docType);
 
+		// Writer web-view reflow, and the phone caret reveal.
+		//
+		// These attach HERE, not in initializeBasicUI, because they are gated
+		// on the document type and initializeBasicUI runs BEFORE there is one.
+		// main.js calls it during map construction; the doc type only exists
+		// once the tile layer is built, which is what calls THIS method
+		// (WriterTileLayer.js -> initializeSpecializedUI('text')). Gating on
+		// `this.map.getDocType() === 'text'` up there therefore tested a value
+		// that was not populated yet, the guard was false on every load, and
+		// both controllers stayed permanently unattached.
+		//
+		// Measured on a real phone viewport before this moved: vulcanPhoneChrome
+		// true, isSmallScreenDevice true, docType 'text', app.writerReflow
+		// present -- and reflowAttached false, wantsReflow false, lastVoteSent
+		// null, ZERO .uno:BrowseWidth frames on the wire. Everything shipped,
+		// nothing ran. Use the `docType` PARAMETER here, never a re-read.
+		//
+		// Reflow: attaching does NOT turn reflow on -- it means that if it IS
+		// on, the engine is told a width instead of inferring one. Not gated on
+		// screen size: any surface that can reach .uno:BrowseView needs the
+		// width stated or it lands on MIN_BROWSE_WIDTH. The controller gates
+		// the phone half itself.
+		if (docType === 'text') {
+			if (app.writerReflow) app.writerReflow.attach(this.map);
+		}
+
+		// The page canvas keeps white paper. The kit opens a drawing or a
+		// presentation on the Light document theme whatever theme the load
+		// asked for (Kit.cpp), because text laid out under the dark theme
+		// keeps its recoloured ink after a later push. The chrome's own paper
+		// setting was stamped from the theme before the document type was
+		// known (Socket.ts, initDarkBackgroundUI), so set it now; the guards
+		// in activateDarkModeInCore / setDarkBackground keep the core Light on
+		// every later theme change and reconnect.
+		if (docType === 'drawing' || docType === 'presentation') {
+			this.activateDarkModeInCore(false);
+			this.setDarkBackground(false);
+		}
+
+		/*
+		 * CARET REVEAL: TEXT AND PRESENTATION, NOT SPREADSHEET.
+		 *
+		 * Calc is excluded for the reason it always was: it raises the keyboard
+		 * optimistically at touchdown, before `invalidatecursor` returns, so the
+		 * `textCursor.visible` test every reveal in the tree gates on is false
+		 * exactly when it is needed. CalcTileLayer._vulcanKeyboardSafeY1 answers
+		 * the same question from the anchored CELL instead, and two revealers
+		 * would fight.
+		 *
+		 * PRESENTATION WAS EXCLUDED FOR A REASON THAT DOES NOT HOLD. The note
+		 * here used to read "Impress edits inside a shape with its own zoom
+		 * lane, so both would be moved twice". Two facts refute it:
+		 *
+		 *   1. Nothing moved it ONCE. This controller triggers on map 'resize'
+		 *      — the container resize that republishes viewedRectangle — and on
+		 *      the shipping mobile surface phone Impress's container provably
+		 *      never resized for a keyboard: `vulcanApplyBodyHeight` discarded
+		 *      the host geometry for this doctype, the iframe box is fixed, and
+		 *      an iframe's visualViewport cannot see a keyboard. Attaching it
+		 *      before that was fixed would have shipped a controller whose
+		 *      trigger could not fire — the same defect this method's header
+		 *      records for the two Writer controllers. The css/vulcan-theme.css
+		 *      13i.0 keyboard inset is what makes the trigger real; this
+		 *      attach and that rule are one change and neither works alone.
+		 *   2. The zoom lane does not compete with it. VulcanImpressTextEntry's
+		 *      entry zoom goes through Map.setZoom, which anchors on the caret
+		 *      rectangle whenever the caret is visible and keeps it at the same
+		 *      screen position across the rung change — so a caret this
+		 *      controller has already lifted stays lifted through the zoom.
+		 *
+		 * Gated on the PARAMETER, never a re-read of getDocType(): see the
+		 * header above for what that cost the last time.
+		 */
+		if (docType === 'text' || docType === 'presentation') {
+			if (app.caretReveal) app.caretReveal.attach(this.map);
+		}
+
+		// Phone Writer always SHOWS tracked changes, and cannot be talked out
+		// of it (the Show Changes toggle is absent from the phone kebab).
+		//
+		// Two reasons, and the second is the load-bearing one.
+		//
+		// 1. Product: on a phone you are reading someone else's document.
+		//    Redlines are the document's CONTENT -- hiding them is a desktop
+		//    reviewing posture, not a phone one.
+		// 2. Correctness: hide-redlines is a per-VIEW setting, but the DOCX
+		//    exporter writes it into the shared file as
+		//    <w:revisionView insDel="0" formatting="0">, read from whichever
+		//    collaborator's view last took focus (GetCurrentViewShell() is a
+		//    bare pointer reassigned in SwView::GotFocus). So one person
+		//    hiding changes can write "hide tracked changes" into everyone
+		//    else's copy, Word included. Pinning phones to SHOW means a phone
+		//    session can only ever write the SAFE value.
+		//
+		// This does NOT fix the desktop-originated case -- that needs the
+		// exporter to read document state instead of the focused view, which
+		// is a core patch and its own ticket. This closes the phone half at
+		// zero cost and in the fail-safe direction.
+		if (
+			docType === 'text' &&
+			window.mode.isSmallScreenDevice() &&
+			document.documentElement.classList.contains('vulcan-mobile-chrome')
+		) {
+			// ShowTrackedChanges is a TOGGLE, so the state has to be KNOWN
+			// before firing or we flip it the wrong way -- and at 'docloaded'
+			// it provably is not. The only writer of that cache entry is a
+			// core `statechanged:`, parsed in CanvasTileLayer._onMessage;
+			// Socket.ts queues every message that arrives before
+			// _map._docLayer exists and drains the queue AFTER it fires
+			// 'docloaded', and nothing seeds the key (the seeds above cover
+			// viewchanges-*, not this). So on a fresh load getItemValue()
+			// returns undefined, `!== 'true'` is always true, and the toggle
+			// would go out unconditionally and HIDE the redlines -- the
+			// inverse of this block, and the exact unsafe value argument 2
+			// says a phone must never write.
+			//
+			// Decide on the first commandstatechanged that carries a state
+			// for the command instead: the earliest moment the answer is
+			// real. One-shot. If core already has it shown, nothing is sent.
+			// If core never sends the state, nothing is sent either and
+			// core's own default (Show Changes ON) stands -- inert, not
+			// inverted. A statechanged may carry only 'enabled' and no state
+			// at all (CanvasTileLayer.js:2276), which is not an answer, so
+			// those are skipped rather than treated as "not shown".
+			const pinTrackedChangesShown = (e: any) => {
+				if (e.commandName !== '.uno:ShowTrackedChanges') return;
+				if (e.state === undefined) return;
+				this.map.off(
+					'commandstatechanged',
+					pinTrackedChangesShown,
+					this,
+				);
+				if (e.state !== 'true')
+					this.map.sendUnoCommand('.uno:ShowTrackedChanges');
+			};
+			this.map.on('commandstatechanged', pinTrackedChangesShown, this);
+		}
+
 		const startWelcomePresentation = window.coolParams.get('welcome');
 
 		// Return early when we are loading welcome slideshow
@@ -709,19 +912,86 @@ class UIManager extends window.L.Control {
 		var isDesktop = window.mode.isDesktop();
 		var currentMode = this.getCurrentMode();
 		var enableNotebookbar = currentMode === 'notebookbar' && !app.isReadOnly();
-		var hasShare = this.map.wopi.EnableShare;
 
 		document.body.setAttribute('data-userInterfaceMode', currentMode);
 		document.body.setAttribute('data-docType', docType);
 
-		if (hasShare)
-			document.body.setAttribute('data-integratorSidebar', 'true');
+		// EnableShare is CheckFileInfo-derived and can land after this init
+		// runs — a direct map.wopi read here raced it (same shape as the
+		// Share-pill bug), leaving data-integratorSidebar unset.
+		app.onWopiProps((wopiInfo: any) => {
+			if (wopiInfo['EnableShare'])
+				document.body.setAttribute('data-integratorSidebar', 'true');
+		});
 
 		if (window.mode.isSmallScreenDevice()) {
 			$('#mobile-edit-button').css('display', 'flex');
 			this.map.mobileBottomBar = JSDialog.MobileBottomBar(this.map);
 			this.map.mobileTopBar = JSDialog.MobileTopBar(this.map);
+			// Start mirroring the top bar's inventory to the host, which draws
+			// it in the ONE app bar (SPEC-one-topbar). Attaches after
+			// mobileTopBar exists because items() reads its item state. Self-
+			// gated on phone chrome, and the row does not collapse until the
+			// host acks with Vulcan_TopBarHosted — so a host that never
+			// answers leaves this a no-op.
+			if ((window as any).VulcanTopBar)
+				(window as any).VulcanTopBar.attach(this.map);
 			this.map.mobileSearchBar = JSDialog.MobileSearchBar(this.map);
+			// Google-style floating selection pill: Writer selections
+			// (docs/mobile-redesign/01 §6) and Calc row/column header
+			// selections (02 §5 — shown from Control.Header.ts, phone
+			// chrome only).
+			//
+			// BOTH halves of the phone gate, not just the small-screen half we
+			// are already inside. Every rule that styles these pills is scoped
+			// html.vulcan-mobile-chrome, and `?vulcanChrome=desktop` forces the
+			// desktop chrome on ANY device without consulting screen size — so
+			// under that param the bar was still CREATED and still given inline
+			// display:flex on every selection, while matching no styling at all:
+			// an unstyled in-flow row of buttons at the end of
+			// #document-container, with no position, width or surface. Building
+			// a control whose entire appearance depends on a class that is not
+			// present is worse than not building it.
+			const vulcanPhoneChrome =
+				document.documentElement.classList.contains('vulcan-mobile-chrome');
+			if (vulcanPhoneChrome &&
+				(docType === 'text' || docType === 'spreadsheet') &&
+				(window as any).VulcanMobileSelectionBar)
+				this.map.mobileSelectionBar =
+					(window as any).VulcanMobileSelectionBar.create(this.map);
+			// Google-style Cut/Copy/Paste/Delete popup for Impress/Draw
+			// shape and text-box selections (docs/mobile-redesign/03 §3).
+			else if (
+				vulcanPhoneChrome &&
+				(docType === 'presentation' || docType === 'drawing') &&
+				(window as any).VulcanImpressSelectionBar
+			)
+				this.map.mobileSelectionBar =
+					(window as any).VulcanImpressSelectionBar.create(this.map);
+
+			// Per-change Accept/Reject over the tapped redline (VulcanRedlineBar).
+			//
+			// Constructed HERE, alongside the selection pill and behind the
+			// same phone-chrome gate, because this is the one initializer that
+			// runs with a document type in hand: main.js calls
+			// initializeBasicUI during map construction, before there is one,
+			// and the tile layer calls THIS (WriterTileLayer.js:35) once there
+			// is. Both phone Writer controllers were gated on getDocType() up
+			// there and never attached at all; that is not a mistake to repeat
+			// on a third.
+			//
+			// Constructing IS attaching for this control: the constructor is
+			// what subscribes to 'commandstatechanged', which is the only
+			// signal it has. Writer alone -- Calc and Impress have no redlines
+			// and .uno:TrackedChangeIndex is a Writer payload.
+			if (
+				vulcanPhoneChrome &&
+				docType === 'text' &&
+				(window as any).VulcanRedlineBar
+			)
+				this.map.redlineBar = (window as any).VulcanRedlineBar.create(
+					this.map,
+				);
 		} else {
 			this.createNotebookbarControl(docType, enableNotebookbar);
 			// makeSpaceForNotebookbar call in onUpdatePermission
@@ -750,10 +1020,103 @@ class UIManager extends window.L.Control {
 		if (docType === 'spreadsheet') {
 			this.sheetsBar = JSDialog.SheetsBar(this.map, isDesktop || window.mode.isTablet());
 
+			// Desktop Calc on short / narrow panes: single-line
+			// toolbar, ⋯ More, one bottom bar. Self-gated on desktop chrome.
+			if ((window as any).VulcanCalcDesktopChrome)
+				(window as any).VulcanCalcDesktopChrome.attach(this.map);
+
 			const formulabarRow = document.getElementById('formulabar-row');
 			const spreadsheetToolbar = document.getElementById('spreadsheet-toolbar');
 			spreadsheetToolbar?.classList?.remove('hidden');
 			formulabarRow?.classList?.remove('hidden');
+
+			// Google-Sheets phone chrome (docs/mobile-redesign/02 §2): dock
+			// the formula bar at the BOTTOM, directly above the soft keyboard
+			// — the key mobile inversion vs desktop. Re-parent #formulabar-row
+			// out of the top chrome to just before the sheet-tab strip (same
+			// one-time re-parent precedent as ImpressTileLayer's
+			// _putPCWOutsideFlex); global.js sizes <body> to the space the
+			// keyboard leaves, so in-flow bottom rows ride above it. That
+			// height comes from the host's Vulcan_HostKeyboard message when
+			// there is one — embedded in a cross-origin iframe this frame's
+			// own visualViewport never sees the keyboard at all — and from
+			// visualViewport when the fork stands alone. Styling: vulcan-theme.css
+			// §13-CALC. Phone chrome only — stock/tablet/desktop keep the
+			// top placement.
+			if (window.mode.isSmallScreenDevice() &&
+				document.documentElement.classList.contains('vulcan-mobile-chrome') &&
+				formulabarRow && spreadsheetToolbar && spreadsheetToolbar.parentNode)
+				spreadsheetToolbar.parentNode.insertBefore(formulabarRow, spreadsheetToolbar);
+
+			// Operator strip (docs/mobile-redesign/02 §2): sits below the
+			// bottom-docked formula bar and above the keyboard so formula
+			// symbols never require paging the soft keyboard. Its own element,
+			// NOT inside #formulabar — createFormulabar() calls
+			// replaceChildren() on that container. Visibility is CSS-only off
+			// html.vulcan-formula-editing (§13-CALC.5), so there is nothing to
+			// wire up here beyond construction.
+			if (window.mode.isSmallScreenDevice() &&
+				document.documentElement.classList.contains('vulcan-mobile-chrome') &&
+				spreadsheetToolbar && spreadsheetToolbar.parentNode &&
+				(window as any).VulcanCalcOperatorStrip)
+				this.map.calcOperatorStrip =
+					(window as any).VulcanCalcOperatorStrip.create(this.map);
+
+			// The live aggregate readout (G33, EX-14): with a RANGE selected
+			// and the keyboard down, Google Sheets phone puts SUM/AVG/MAX in
+			// the formula-bar position; a single cell shows nothing. The
+			// numbers come off `.uno:StateTableCell`, which core already
+			// broadcasts for the desktop status bar — no client arithmetic and
+			// no per-selection round trip. It REPLACES the formula bar rather
+			// than stacking on it (§13-CALC.11), so it costs no height, and it
+			// never shares the screen with the operator strip above, which
+			// exists only while an edit is live. Visibility is CSS-only off
+			// the one attribute the component publishes, so there is nothing
+			// to wire up here beyond construction — the CalcOperatorStrip
+			// contract, and the same both-halves phone gate it uses.
+			if (window.mode.isSmallScreenDevice() &&
+				document.documentElement.classList.contains('vulcan-mobile-chrome') &&
+				formulabarRow && formulabarRow.parentNode &&
+				(window as any).VulcanCalcAggregateStrip)
+				this.map.calcAggregateStrip =
+					(window as any).VulcanCalcAggregateStrip.create(this.map);
+
+			// The EDIT-READY style rail (VulcanCalcFormatRow.ts): B/I/U/S,
+			// both alignment axes, text colour, cell fill, wrap and merge, in
+			// Google's published format-panel order. It TAKES THE SHEET-TAB
+			// STRIP'S SLOT rather than adding a row — inserted before
+			// #spreadsheet-toolbar, at the same 49px the strip and the
+			// operator strip lockstep to. Visibility is CSS-only off the
+			// EDIT-READY marker (§13-CALC.13), so there is nothing to wire up
+			// here beyond construction — the CalcOperatorStrip contract, and
+			// the same both-halves phone gate it uses.
+			if (window.mode.isSmallScreenDevice() &&
+				document.documentElement.classList.contains('vulcan-mobile-chrome') &&
+				spreadsheetToolbar && spreadsheetToolbar.parentNode &&
+				(window as any).VulcanCalcFormatRow)
+				this.map.calcFormatRow =
+					(window as any).VulcanCalcFormatRow.create(this.map);
+
+			// The EDIT-READY cell preview (VulcanCalcCellPreview.ts): the
+			// engaged cell's value in italic over its formula, with the ✎ door
+			// at the trailing edge. It takes #formulabar-row's slot — the fx
+			// bar belongs to FULL EDIT (§13-CALC.2c) — so like the rail above
+			// it costs no height it did not replace, and it reads two map
+			// events core already broadcasts rather than adding a round trip.
+			// Visibility is CSS-only off the EDIT-READY marker (§13-CALC.14),
+			// so there is nothing to wire up here beyond construction — the
+			// CalcOperatorStrip contract, and the same both-halves phone gate.
+			//
+			// Constructed BEFORE JSDialog.FormulaBar below on purpose only for
+			// readability (the three fork-added phone bars stay contiguous);
+			// the pencil reaches map.formulabar lazily, at tap time.
+			if (window.mode.isSmallScreenDevice() &&
+				document.documentElement.classList.contains('vulcan-mobile-chrome') &&
+				formulabarRow && formulabarRow.parentNode &&
+				(window as any).VulcanCalcCellPreview)
+				this.map.calcCellPreview =
+					(window as any).VulcanCalcCellPreview.create(this.map);
+
 			this.map.formulabar = JSDialog.FormulaBar(this.map);
 			JSDialog.MessageRouter.flushPending('formulabar');
 			this.map.addressInputField = JSDialog.AddressInputField(this.map);
@@ -775,10 +1138,25 @@ class UIManager extends window.L.Control {
 		if (this.map.isPresentationOrDrawing()) {
 			// remove unused elements
 			window.L.DomUtil.remove(window.L.DomUtil.get('spreadsheet-toolbar'));
-			$('#presentation-controls-wrapper').show();
+			this.revealPresentationControls(docType);
 			this.initializeRuler();
 			this.map.slideShowPresenter = new SlideShow.SlideShowPresenter(this.map, window.enableAccessibility);
 			this.map.presenterConsole = new SlideShow.PresenterConsole(this.map, this.map.slideShowPresenter);
+
+			// The Impress phone contextual format row (slides G-P1-1,
+			// vulcan-theme.css §13i.22): per-noun row with the pinned Format
+			// chip, docked above the keyboard in every editor mode — the
+			// reference carries a contextual bar there in all of them, and in
+			// caret modes its pinned chip is the only Format door. Presentation
+			// only: drawing keeps its stock chrome. Construction here, the
+			// same both-halves phone gate as the Writer strip; visibility is
+			// CSS-only off the posture and keyboard markers.
+			if (docType === 'presentation' &&
+				window.mode.isSmallScreenDevice() &&
+				document.documentElement.classList.contains('vulcan-mobile-chrome') &&
+				(window as any).VulcanImpressFormatRow)
+				this.map.impressFormatRow =
+					(window as any).VulcanImpressFormatRow.create(this.map);
 		}
 
 		if (docType === 'text') {
@@ -791,6 +1169,24 @@ class UIManager extends window.L.Control {
 
 			this.initializeRuler();
 			this.initializeFormattingMarks();
+
+			// The phone text-format strip (R6-17, vulcan-theme.css
+			// §13-WRITER.6): B/I/U, text colour, highlight and alignment
+			// docked directly above the soft keyboard, so formatting a
+			// selection mid-edit no longer means the A sheet — measured on
+			// build #10 at 325px of a 463px keyboard-shrunk viewport, and it
+			// drops TextInput._acceptInput on the way in. Its own element
+			// inserted before #toolbar-down (display:none on Writer since
+			// §13-WRITER.1, but still the anchor of the bottom-docked column
+			// global.js sizes to the keyboard). Visibility is CSS-only off
+			// the read-posture and keyboard-open markers, so there is nothing
+			// to wire up here beyond construction — the CalcOperatorStrip
+			// contract, and the same both-halves phone gate it uses.
+			if (window.mode.isSmallScreenDevice() &&
+				document.documentElement.classList.contains('vulcan-mobile-chrome') &&
+				(window as any).VulcanWriterFormatRow)
+				this.map.writerFormatRow =
+					(window as any).VulcanWriterFormatRow.create(this.map);
 
 			var showResolved = this.getBooleanDocTypePref('ShowResolved', true);
 			if (showResolved === false)
@@ -937,7 +1333,16 @@ class UIManager extends window.L.Control {
 	initializeSidebar(): void {
 		// Hide the sidebar on start if saved state or UIDefault is set.
 		if (window.mode.isDesktop() && !window.ThisIsAMobileApp) {
-			var showSidebar = this.getBooleanDocTypePref('ShowSidebar', true);
+			// Vulcan Office fork default: the properties/Slide sidebar starts
+			// COLLAPSED for Writer, Calc and Impress. The host application sets
+			// TextSidebar/SpreadsheetSidebar/PresentationSidebar=false, but the
+			// presentation scope is not always honoured by the ui_defaults
+			// mapping, so Impress otherwise falls through to the stock `true`
+			// default and auto-opens its Slide property deck. Defaulting to false
+			// keeps all three collapsed on first load; a saved state or an
+			// explicit UIDefault=true still wins, and the user can open it
+			// normally from the sidebar toggle.
+			var showSidebar = this.getBooleanDocTypePref('ShowSidebar', false);
 
 			if (showSidebar && this.getBooleanDocTypePref('PropertyDeck', true)) {
 				app.socket.sendMessage('uno .uno:SidebarShow');
@@ -1062,9 +1467,8 @@ class UIManager extends window.L.Control {
 		this.map.menubar = new Menubar();
 		this.map.addControl(this.map.menubar);
 		this.map.topToolbar = JSDialog.TopToolbar(this.map);
-
-		//update the toolbar according to CheckFileInfo
-		this.map.topToolbar.onWopiProps(this.map.wopi);
+		// (The toolbar replays cached CheckFileInfo props itself now — see
+		// the app.wopiProps replay in the TopToolbar constructor.)
 
 		this.map.menubar._onDocLayerInit();
 		this.map.topToolbar.onDocLayerInit();
@@ -1790,6 +2194,40 @@ class UIManager extends window.L.Control {
 	 */
 	focusSearch(): void {
 		const isTextDoc = this.map.isText();
+
+		/*
+			🔴 ON A PHONE THIS THREW. The branch below dereferences
+			this.map.navigator, and the Navigator is built only under
+			`if (!window.mode.isSmallScreenDevice())` (:601-606) -- as is the
+			QuickFind panel it would have focused (:1006-1010). So on a phone
+			Writer the property is undefined and `home-search` was a
+			TypeError, not a search. It is reachable: Ctrl-F, Ctrl-Alt-S and
+			Ctrl-B all dispatch `home-search` for every doctype
+			(Map.KeyboardShortcuts.ts:382, :471, :481), and a paired keyboard
+			on a phone is ordinary for anyone reviewing a long document.
+
+			Phone Writer's find surface is the MobileSearchBar, which IS built
+			on every small screen (:866) and which the kebab's own "Search" row
+			already opens through this exact action
+			(Control.Menubar.ts recsearch -> docdispatcher 'showsearchbar').
+			Sending the keyboard to the same place the menu goes is both the
+			crash fix and the parity fix -- Ctrl-F on a phone now opens find,
+			the way it does in Docs.
+
+			The test is `!this.map.navigator` and NOT a fresh small-screen
+			predicate on purpose: the property being absent is the exact
+			condition that makes the next line unsafe, so the guard cannot
+			drift away from the hazard it is guarding. Phone Calc and Impress
+			are untouched -- they are not text documents and keep the
+			.uno:SearchDialog route below, which is the phone surface they
+			shipped with.
+		*/
+		if (isTextDoc && !this.map.navigator) {
+			app.dispatcher.dispatch('showsearchbar');
+			this.map.fire('focussearch');
+			return;
+		}
+
 		if (isTextDoc && !app.showNavigator) {
 			this.map.navigator.preFocusQuickFind();
 			this.showNavigator();
@@ -1823,6 +2261,211 @@ class UIManager extends window.L.Control {
 	// Event handlers
 
 	/**
+	 * True when the phone posture stylesheet, not inline style, owns the
+	 * Impress filmstrip's visibility: Vulcan phone chrome, presentation
+	 * doctype (13i.1c hides the strip in the read/browse posture, 13i.1d is
+	 * the edit reveal — both keyed on the classes this file stamps).
+	 *
+	 * Everywhere the stock code writes the wrapper's INLINE display it must
+	 * ask this first: cool.css hides #presentation-controls-wrapper by
+	 * default, so jQuery .show() always materializes an inline
+	 * `display: block`, and an inline style outranks every sheet rule —
+	 * 13i.1c was shipped structurally dead that way (R6-6 acceptance
+	 * residual: the filmstrip stayed docked in browse on build #9).
+	 *
+	 * `docType` mirrors initializeSpecializedUI's own rule (see its header):
+	 * during that call the parameter is the truth. Every later caller omits
+	 * it and the null-safe Parts.getDocType() re-read answers; pre-doclayer
+	 * it returns null, the predicate is false, and stock behaviour runs —
+	 * fail-safe in the direction that cannot lose the strip.
+	 */
+	vulcanPostureGovernsFilmstrip(docType?: string): boolean {
+		return (
+			window.mode.isSmallScreenDevice() &&
+			document.documentElement.classList.contains('vulcan-mobile-chrome') &&
+			(docType ?? this.map.getDocType()) === 'presentation'
+		);
+	}
+
+	/**
+	 * The initializeSpecializedUI reveal of #presentation-controls-wrapper.
+	 *
+	 * Stock (desktop, tablet, ?vulcanChrome=desktop phones, Draw): the
+	 * jQuery .show() it always was, byte for byte — an inline
+	 * `display: block` over cool.css's default hide.
+	 *
+	 * Vulcan phone Impress chrome: CLEAR the inline property instead and let
+	 * the posture stylesheet govern — 13i.1d shows the strip in the edit
+	 * posture, 13i.1c hides it in browse, and stampReadPosture flips the
+	 * class both rules key on. Writing inline block here would outrank both
+	 * forever (the R6-6 build #9 failure). Runtime contract pinned in
+	 * mocha_tests/ImpressPhoneFilmstripPosture.test.ts.
+	 */
+	revealPresentationControls(docType?: string): void {
+		if (this.vulcanPostureGovernsFilmstrip(docType)) {
+			const pcw = document.getElementById('presentation-controls-wrapper');
+			if (pcw) pcw.style.removeProperty('display');
+		} else $('#presentation-controls-wrapper').show();
+	}
+
+	/**
+	 * The mobile wizard's close-side restore of the filmstrip (the open side,
+	 * MobileWizardWindow, hides it under the wizard with an inline
+	 * `display: none`; portrait only, both sides). Lives HERE, next to the
+	 * posture machinery, because the un-hide is posture business: stock
+	 * restores the inline `block` it always did, but under the Vulcan phone
+	 * Impress chrome that block would outlive the wizard and resurrect the
+	 * filmstrip in the browse posture (hamburger menu open→close was enough),
+	 * so there the restore is clearing the inline property — the posture
+	 * stylesheet then answers per 13i.1c/13i.1d.
+	 */
+	restorePresentationControlsAfterWizard(): void {
+		const container = document.getElementById('document-container');
+		if (container && container.classList.contains('landscape')) return;
+		const pcw = document.getElementById('presentation-controls-wrapper');
+		if (!pcw) return;
+		if (this.vulcanPostureGovernsFilmstrip()) pcw.style.removeProperty('display');
+		else pcw.style.display = 'block';
+	}
+
+	/**
+	 * Mirrors the READ posture onto <html> as `vulcan-read-posture`, so phone
+	 * CSS can be scoped to it.
+	 *
+	 * There was NO read-posture signal reachable from the phone chrome before
+	 * this. The stock one is `.readonly` on #toolbar-wrapper, and Map.js adds
+	 * and removes it inside `if (window.mode.isDesktop() || window.mode
+	 * .isTablet())` -- so on a phone it is never written, and cool.css
+	 * `#toolbar-wrapper.readonly:not(.spreadsheet) { display: none }` never
+	 * fires there. (Map.js DOES put `.readonly` on the map container's parent
+	 * unconditionally, but that element is a descendant-side sibling of the
+	 * toolbar, so it cannot scope a rule on the toolbar without :has().)
+	 *
+	 * Shape copied from `html.vulcan-formula-editing` (Control.Toolbar.js,
+	 * consumed by §13-CALC.5): one class on the document element, written from
+	 * the one handler that already runs on every permission change, so a CSS
+	 * rule and the posture cannot drift apart.
+	 *
+	 * Phone only -- the caller is already inside `isSmallScreenDevice()`.
+	 * Desktop and tablet never receive the class, so every rule scoped on it is
+	 * unmatched there and substituting it away recovers the stock behaviour
+	 * byte for byte.
+	 *
+	 * @param isReadPosture - true when the document is NOT in edit permission.
+	 */
+	stampReadPosture(isReadPosture: boolean): void {
+		document.documentElement.classList.toggle(
+			'vulcan-read-posture',
+			isReadPosture,
+		);
+		// The stamp is the single posture authority, so it also clears any
+		// inline display a stock write site left on the filmstrip wrapper —
+		// an inline value outranks 13i.1c/13i.1d forever, which is exactly
+		// how build #9 kept the strip docked in browse. Self-healing on BOTH
+		// flips: a stray inline `block` dies at the read stamp, a stray
+		// `none` dies at the edit stamp. Predicate false (desktop, tablet,
+		// Draw, declared-desktop phones) leaves inline state untouched.
+		if (this.vulcanPostureGovernsFilmstrip()) {
+			const pcw = document.getElementById('presentation-controls-wrapper');
+			if (pcw) pcw.style.removeProperty('display');
+		}
+		// R6-18: leaving READ must put the chrome back, and it cannot wait for
+		// a scroll -- the pencil tap is exactly the case where no further scroll
+		// arrives, and a reader who had scrolled the header away would land in
+		// edit mode with a keyboard and no ✓ Done. Done HERE and not in the
+		// section's own gate re-read for that reason: this is the one handler
+		// that certainly runs on the flip. Idempotent both ways (setEnabled is a
+		// no-op when the arming has not changed), and absent on desktop, tablet
+		// and any document where nothing ever armed it.
+		this.vulcanSyncReadImmersion(!isReadPosture);
+		// the phone Writer read apron comes and goes with this
+		// stamp, so the map's bounds follow it here.
+		const docLayer: any = app.map && app.map._docLayer;
+		if (docLayer && docLayer._vulcanRefreshApronBounds)
+			docLayer._vulcanRefreshApronBounds();
+		this.emitPosture();
+	}
+
+	/**
+	 * Disarm the read immersion when the document leaves READ posture, forcing
+	 * the chrome back and clearing the fork's own hidden stamp.
+	 *
+	 * Deliberately one-directional. Leaving read DISARMS here; entering read
+	 * does not arm here, because arming is a decision the section re-reads from
+	 * the DOM on every movement and the chrome should be SHOWN the moment a
+	 * document becomes readable anyway. Failing toward chrome on both edges is
+	 * the whole safety property.
+	 */
+	vulcanSyncReadImmersion(leftReadPosture: boolean): void {
+		if (!leftReadPosture) return;
+		const scroll: any = app.sectionContainer
+			&& app.sectionContainer.getSectionWithName(app.CSections.Scroll.name);
+		if (scroll && typeof scroll.setVulcanImmersionArmed === 'function')
+			scroll.setVulcanImmersionArmed(false);
+		else if (app.readImmersion)
+			app.readImmersion.setEnabled(false);
+		document.documentElement.classList.remove('vulcan-chrome-hidden');
+	}
+
+	/**
+	 * Tell the host which posture and chrome the fork is actually in.
+	 *
+	 * NONE of the fork's other outbound messages carries permission, so without
+	 * this the host cannot tell READ from EDIT -- and the one-bar contract needs
+	 * it to. The host publishes Comment and the document menu into its own
+	 * header only while the fork's band is hidden; in EDIT that band returns
+	 * (it carries undo, redo and the two wizards), and a host still painting
+	 * those two would be the duplicate-control defect §13-WRITER.2 exists to
+	 * prevent, one row up.
+	 *
+	 * READ FROM THE DOM, not from a parameter, so this can be re-emitted at any
+	 * time without a caller having to remember the current state. The class IS
+	 * the source of truth -- it is what §13-WRITER.4 matches on -- so a message
+	 * derived from it cannot drift from the CSS.
+	 *
+	 * Called from TWO places on purpose. stampReadPosture covers every
+	 * permission change; sendVulcanReady re-announces at load. Only the second
+	 * makes the feature reliable: permission can settle BEFORE the host has
+	 * finished mounting its listener, and posture otherwise re-fires only on a
+	 * change that may never come -- so a dropped first message would leave
+	 * one-bar silently switched off for the whole session, with nothing in any
+	 * log to say so. It fails safe (the band stays), which is exactly what
+	 * makes it the kind of dead feature nobody notices.
+	 *
+	 * PhoneChrome is sent explicitly rather than implied: the host's breakpoint
+	 * (useIsMobile, 768) and the fork's isSmallScreenDevice() DISAGREE on a
+	 * 768px tablet, which renders the takeover header while getting stock fork
+	 * chrome. The host has to gate on our answer, not on its own.
+	 */
+	emitPosture(): void {
+		const root = document.documentElement.classList;
+		this.map.fire('postMessage', {
+			msgId: 'Vulcan_Posture',
+			args: {
+				Posture: root.contains('vulcan-read-posture') ? 'read' : 'edit',
+				PhoneChrome: root.contains('vulcan-mobile-chrome'),
+				DocType: this.map.getDocType(),
+				// R6-18 immersive read, host half. A SIBLING FIELD on the
+				// posture message the host already listens to, not a new
+				// channel: the host's takeover header and this frame's own band
+				// are two halves of one bar count, and splitting them across two
+				// messages would let them disagree by one dropped frame.
+				//
+				// Read from the DOM for the same reason Posture is: the class is
+				// what §13-WRITER.5 matches on, so a message derived from it
+				// cannot drift from what is painted, and emitPosture stays
+				// re-emittable from anywhere with no caller state.
+				//
+				// A host that predates the field ignores it and keeps its header
+				// exactly as today -- fork-new + host-old is a real deployment
+				// state, the fork being a pinned image and the host a separate
+				// deploy, and the safe direction is chrome.
+				Chrome: root.contains('vulcan-chrome-hidden') ? 'hidden' : 'shown',
+			},
+		});
+	}
+
+	/**
 	 * Event handler for updating document permission.
 	 * @param e - The event object containing permission details.
 	 */
@@ -1836,6 +2479,7 @@ class UIManager extends window.L.Control {
 				history.pushState({context: 'app-started'}, 'readonly-mode');
 				$('#toolbar-down').hide();
 			}
+			this.stampReadPosture(e.detail.perm !== 'edit');
 		}
 
 		var enableNotebookbar = this.shouldUseNotebookbarMode();
@@ -1909,12 +2553,34 @@ class UIManager extends window.L.Control {
 	 */
 	enterReadonlyOrClose(): void {
 		if (this.map.isEditMode()) {
-			this.map.setPermission('readonly');
-			var toolbar = app.map.topToolbar;
-			if (toolbar) {
-				toolbar.selectItem('closemobile', false);
-				toolbar.selectItem('close', false);
+			const enterReadonly = () => {
+				// The user may have kept typing while the notes write was in
+				// flight. Do not let an older completion flip that newer draft to
+				// readonly; flushBeforeReadonly resolves false in that case.
+				if (!this.map.isEditMode()) return;
+				this.map.setPermission('readonly');
+				const toolbar = app.map.topToolbar;
+				if (toolbar) {
+					toolbar.selectItem('closemobile', false);
+					toolbar.selectItem('close', false);
+				}
+			};
+
+			// sendUnoCommand rejects document mutations after setPermission has
+			// flipped. Speaker Notes therefore owns the one narrow asynchronous
+			// seam here: wait for its exact command acknowledgement AND its
+			// authoritative presentationinfo readback before leaving edit mode.
+			if (VulcanSpeakerNotes.isPhoneImpressChrome()) {
+				const speakerNotes = VulcanSpeakerNotes.get();
+				if (speakerNotes.hasPendingEdits()) {
+					speakerNotes.flushBeforeReadonly().then((saved) => {
+						if (saved && !speakerNotes.hasPendingEdits()) enterReadonly();
+					});
+					return;
+				}
 			}
+
+			enterReadonly();
 		} else {
 			app.dispatcher.dispatch('closeapp');
 		}
@@ -1924,18 +2590,291 @@ class UIManager extends window.L.Control {
 	 * Handles mobile back navigation.
 	 * @param popStateEvent - The popstate event.
 	 */
+	/**
+	 * Ends a running slide show, if there is one, so Back leaves the show
+	 * before it starts unwinding the editor.
+	 *
+	 * A real full-screen show never gets here: the browser spends Back on
+	 * leaving full screen and fires fullscreenchange instead of popstate. This
+	 * is for the in-page fallback show, which used to swallow nothing — Back
+	 * dropped the document to readonly or closed the app with the slides still
+	 * covering the screen.
+	 * @returns true when a show was ended and Back is spent.
+	 */
+	private exitSlideshowOnGoBack(): boolean {
+		// BOTH halves of the phone gate, not just the small-screen half.
+		// popstate is registered under isSmallScreenDevice() alone, which is
+		// NOT the same thing: `?vulcanChrome=desktop` forces the desktop chrome
+		// on ANY device without consulting screen size (js/global.js), so a
+		// phone loaded that way has isSmallScreenDevice() true and no
+		// vulcan-mobile-chrome class. There, the swipe rewrite and the pinned
+		// exit are correctly off — and Back must stay off with them, or this is
+		// the one change that does not reduce to HEAD when the gate is false.
+		if (!(window as any).mode.isSmallScreenDevice() ||
+			!document.documentElement.classList.contains('vulcan-mobile-chrome'))
+			return false;
+
+		const presenter = this.map.slideShowPresenter;
+		if (!presenter || !presenter._checkAlreadyPresenting()) return false;
+
+		presenter.endPresentation(true);
+		// Back consumed one of the entries pushed in onAdd. Put it back so the
+		// next Back still has one to spend on leaving the editor.
+		history.pushState({context: 'app-started'}, 'app-started');
+		return true;
+	}
+
+	/**
+	 * Leaves the Impress Notes view, so an exit spends itself on getting the
+	 * slide back before it starts unwinding the editor.
+	 *
+	 * WHAT NOTES VIEW ACTUALLY IS HERE, because it is not what Google Slides
+	 * does. google-slides.json "Speaker notes pane" (formatting, common):
+	 * "Toggle Speaker notes from the editor's overflow menu; a 'Tap to add
+	 * speaker notes' region appears below the slide and is fully editable
+	 * inline." The slide stays. Our kebab row dispatches the stock 'notesmode'
+	 * action, which sends `.uno:NotesMode` (docdispatcher.ts) — a SERVER-side
+	 * view-mode switch. Core then renders the notes page as the document, the
+	 * context flips to 'NotesPage', and ImpressTileLayer._onContextChange
+	 * swaps activeModes and refreshes every tile. It is a whole-canvas swap.
+	 *
+	 * 🔴 A Slides-shaped pane is NOT reachable from this fork and this change
+	 * does not claim one. Notes exist client-side in exactly one place —
+	 * SlideShowPresenter.getNotes(), reading _presentationInfo — and that is
+	 * populated only by 'getpresentationinfo', which is sent when a
+	 * presentation STARTS (SlideShowPresenter _onStart / _onStartInWindow).
+	 * There is no editor-time notes feed to render beside the slide, and that
+	 * text would be read-only anyway where Google's pane is editable inline.
+	 * Showing notes without losing the slide needs a second rendered stream;
+	 * that is a core/protocol change, not a browser one.
+	 *
+	 * So the swap stays, and what improves is that it is REVERSIBLE from the
+	 * exit the user already has. Before this, the upper-left ✓ dropped you to
+	 * the read posture with the notes page still on screen, and the kebab's own
+	 * Speaker Notes row cannot get you back from there: in read-only mode
+	 * Toolbar.js sendUnoCommand silently drops any command outside
+	 * allowedCommands, and `.uno:NotesMode` is not in that list. Notes view was
+	 * a one-way door on the phone — and a sticky one: ImpressTileLayer
+	 * _handleViewModeState reports the switch as `updateviewmode mode=notes`,
+	 * which the WOPI host persists per user per document.
+	 *
+	 * @returns true when notes view was left and the exit is spent.
+	 */
+	private exitPhoneNotesView(): boolean {
+		// BOTH halves of the phone gate, exactly as exitSlideshowOnGoBack
+		// argues above: the ✓ handler and popstate are registered under
+		// isSmallScreenDevice() alone, and `?vulcanChrome=desktop` gives a
+		// phone that half without the chrome class. With the gate false this
+		// returns false and every caller reproduces HEAD.
+		if (!(window as any).mode.isSmallScreenDevice() ||
+			!document.documentElement.classList.contains('vulcan-mobile-chrome'))
+			return false;
+
+		if (this.map.getDocType() !== 'presentation') return false;
+		if (!app.impress || !app.impress.notesMode) return false;
+
+		// Only claim the layer if the way out can actually be sent. In the read
+		// posture Toolbar.js sendUnoCommand drops `.uno:NormalMultiPaneGUI`
+		// (not in allowedCommands), so taking the tap here would swallow it and
+		// leave the notes page on screen — a dead exit, which is worse than the
+		// one-way door. There, the tap falls through to the HEAD behaviour.
+		// Notes view is only ENTERABLE in edit mode for the same reason, so the
+		// read-only case needs the permission to have flipped underneath it.
+		if (!this.map.isEditMode()) return false;
+
+		// One owner for the toggle: the dispatcher action already chooses
+		// .uno:NormalMultiPaneGUI vs .uno:NotesMode from app.impress.notesMode,
+		// and it is the same action the kebab row sends, so the two cannot
+		// disagree about which direction the toggle goes.
+		app.dispatcher.dispatch('notesmode');
+		return true;
+	}
+
+	/**
+	 * Is the soft keyboard up, as far as this frame can know?
+	 *
+	 * ONE TERM, AND IT IS THE ONLY ONE THAT IS TRUE ON THIS SURFACE.
+	 * `data-vulcan-keyboard-open` has a single writer — global.js'
+	 * `vulcanSetHostKeyboard`, applying the host's `Vulcan_HostKeyboard`
+	 * message — and on phone Impress the host is the ONLY source there is:
+	 * Capacitor runs `Keyboard resize: 'none'`, the host mounts the editor in
+	 * a fixed takeover whose iframe box never changes size, and inside a
+	 * cross-origin iframe `visualViewport` describes THIS frame, so it never
+	 * shrinks either (global.js' own trace, `vulcanApplyBodyHeight`). It is
+	 * also the term the fork's own stylesheet already treats as "the keyboard
+	 * is up" (vulcan-theme.css §13-CALC), so the Back arm below and the CSS
+	 * cannot disagree about the keyboard's state.
+	 *
+	 * 🔴 NOT `_textInput.hasFocus()`, and not `getMobileKeyboardVisibility()`.
+	 * The first over-reports exactly where the host is right: a keyboard the
+	 * PLATFORM took down (app switch, hardware keyboard) is corrected by
+	 * Map.WOPI's `open === false` arm as "the latch and the intent window
+	 * only, never a blur", so the hidden editable still holds DOM focus over a
+	 * keyboard that is gone. The second answers a different question entirely
+	 * — may a CLICK raise the keyboard — and VO-P-0011 already paid for
+	 * mistaking it for this one (its row B3 reads false whether the transition
+	 * under it is right or wrong, because the keyboard on that leg is raised
+	 * by core's cursor round trip, not by the click grammar).
+	 *
+	 * Fail-open, and in the direction that cannot descend: a host that never
+	 * sends the message leaves the attribute absent, so a Back in text edit
+	 * ends the text edit and keeps the selection on the FIRST press instead of
+	 * the second. That is one press early, never one rung deep.
+	 */
+	private vulcanPhoneKeyboardUp(): boolean {
+		return document.documentElement.hasAttribute('data-vulcan-keyboard-open');
+	}
+
+	/**
+	 * The phone Impress floor for hardware Back / the iPhone edge-swipe-back:
+	 * Back stops at the SELECTION instead of walking the exit ladder.
+	 *
+	 * WHAT THE REFERENCE DOES (M-0018, measured 2026-09-01 leg by leg, each
+	 * leg asserting its origin, and calibrated against known positives in the
+	 * same session — the same key dismissed a popup, collapsed the keyboard
+	 * and left the document from the read stream, so the inertness below is
+	 * the app's and not a dead injection):
+	 *
+	 *   S0  read stream                  Back leaves the document
+	 *   S1  edit canvas, no selection     Back is INERT
+	 *   S2  object selected               Back is INERT
+	 *   S2t table selection               Back is INERT
+	 *   S3  text edit, keyboard UP        Back is consumed by the IME ONLY
+	 *   S3  text edit, keyboard DOWN      Back ends the text edit, keeps S2
+	 *
+	 * (Slides' own state names, per RU-16 — Impress is not mapped onto Calc's
+	 * mode vocabulary.) Ours ran `VulcanEscape.popOneLayer()` once per press,
+	 * so every press after the second was a rung the reference does not take:
+	 * text edit -> selection -> edit posture -> read posture -> leave.
+	 *
+	 * 🔴 CS-4'S RATIONALE IS UNTOUCHED. A Back must never silently flip
+	 * permission or close a sheet plus every dialog in one press, and it still
+	 * cannot: this narrows WHICH rungs Back shares with the host's chevron
+	 * (the top two) rather than reintroducing the multi-effect arms. The
+	 * chevron's own ladder S3 -> S2 -> S1 -> S0 is unchanged — M-0018 measures
+	 * the per-rung descent on the upper-left control, and VO-P-0011's group E
+	 * pins it.
+	 *
+	 * THREE SCOPES, so nothing else moves:
+	 *  · both halves of the phone gate, like `exitSlideshowOnGoBack` and
+	 *    `exitPhoneNotesView` — with the gate false this returns false and the
+	 *    caller reproduces HEAD;
+	 *  · IMPRESS ONLY. M-0018 is an Impress record. Calc's and Writer's Back
+	 *    rows are unmeasured, and nothing here licenses changing them;
+	 *  · ABOVE THE CANVAS IS NOT OURS. With any wizard window open the ladder's
+	 *    overlay rungs answer as they do today (popOneLayer -> goLevelUp), so
+	 *    sheets, dialogs, the mobile wizard and the drill-in pickers keep their
+	 *    own Back. Only the canvas rungs become a floor.
+	 *
+	 * @returns true when Back is spent on the canvas floor.
+	 */
+	private vulcanImpressBackStopsAtSelection(escape: any): boolean {
+		// BOTH halves of the phone gate, exactly as exitSlideshowOnGoBack
+		// argues: popstate is registered under isSmallScreenDevice() alone, and
+		// `?vulcanChrome=desktop` gives a phone that half without the chrome
+		// class. There, this returns false and Back keeps today's ladder.
+		if (!(window as any).mode.isSmallScreenDevice() ||
+			!document.documentElement.classList.contains('vulcan-mobile-chrome'))
+			return false;
+
+		if (this.map.getDocType() !== 'presentation') return false;
+		// The upper rungs are unchanged: with a sheet, a dialog or a drill-in
+		// picker open, this press belongs to that layer.
+		if (escape.overlayCount() > 0) return false;
+		// The read posture is M-0018's S0 row, and it is the one row where Back
+		// still leaves — read as the permission, not as the ladder's posture
+		// rung, so a canvas state the rung predicate cannot see still lands on
+		// the floor rather than on `closeapp`.
+		if (!this.map.isEditMode()) return false;
+
+		if (escape.topKind() === 'textedit') {
+			if (this.vulcanPhoneKeyboardUp()) {
+				// S3 + keyboard up: the IME eats the press and NOTHING else —
+				// the caret and the text edit stay. This is the door
+				// VulcanImpressTextZoom already uses for the settled end of an
+				// edit; it takes DOM focus off the hidden editable and sends
+				// core nothing, so the text edit is untouched.
+				const textInput: any = this.map ? this.map._textInput : null;
+				if (textInput && typeof textInput.dismissSoftKeyboard === 'function')
+					textInput.dismissSoftKeyboard();
+			} else {
+				// S3 + keyboard down: end the text edit and KEEP the selection
+				// (S2/S2t). Exactly one rung, through the ladder that already
+				// owns that boundary — one implementation, per CS-4 — which
+				// here is the 'textedit' rung's core Escape. overlayCount() is
+				// 0 and topKind() is 'textedit', so popOneLayer provably takes
+				// that rung and cannot reach the object rung or the posture.
+				escape.popOneLayer();
+			}
+		}
+		// S1 / S2 / S2t: nothing at all. Not a deselect, not a posture pop, not
+		// a permission change, not `closeapp`.
+
+		// Back consumed one of the entries pushed in onAdd. Put it back — on
+		// every arm above, including the pop — or the next press has nothing to
+		// spend and Safari navigates away for real. Same bookkeeping as
+		// exitNotesViewOnGoBack and exitSlideshowOnGoBack.
+		history.pushState({context: 'app-started'}, 'app-started');
+		return true;
+	}
+
 	onGoBack(popStateEvent: any): void {
+		if (this.exitSlideshowOnGoBack()) return;
+
 		if (popStateEvent.state && popStateEvent.state.context) {
+			// CS-4. Under phone chrome the hardware/browser back runs the
+			// SAME ladder as the host's chevron. Before this, two of the
+			// three arms called enterReadonlyOrClose(), so a hardware back
+			// could silently change the document's permission and — with a
+			// sheet open — close the sheet, close every dialog and clear the
+			// selection in one press (Control.Permission.js:701-702). One
+			// press, one layer, one implementation.
+			const escape = (window as any).VulcanEscape;
+			if (escape
+				&& document.documentElement.classList.contains('vulcan-mobile-chrome')
+				&& window.mode.isSmallScreenDevice()) {
+				// ...and on phone Impress the ladder Back shares with the
+				// chevron stops at the selection (M-0018; VO-P-0017). Ahead of
+				// popOneLayer because it is the arm that must NOT pop.
+				if (this.vulcanImpressBackStopsAtSelection(escape)) return;
+				// A press spent on a layer that pushed no history of its own
+				// (the Calc function browser, Calc's cell edit and edit-ready
+				// units: VulcanEscape.lastPopPushedNoHistory) puts the entry
+				// back, as exitSlideshowOnGoBack does, so stepping them costs
+				// the Android host's goBack() budget nothing.
+				if (escape.popOneLayer()) {
+					if (escape.lastPopPushedNoHistory())
+						history.pushState({context: 'app-started'}, 'app-started');
+					return;
+				}
+				app.dispatcher.dispatch('closeapp');
+				return;
+			}
 			if (popStateEvent.state.context === 'mobile-wizard' && this.mobileWizard) {
 				if (this.mobileWizard.isOpen()) {
 					this.mobileWizard.goLevelUp(true);
-				} else {
+				} else if (!this.exitNotesViewOnGoBack()) {
 					this.enterReadonlyOrClose();
 				}
 			} else if (popStateEvent.state.context === 'app-started') {
-				this.enterReadonlyOrClose();
+				if (!this.exitNotesViewOnGoBack())
+					this.enterReadonlyOrClose();
 			}
 		}
+	}
+
+	/**
+	 * Back-button wrapper around exitPhoneNotesView: same layer, same both-
+	 * halves gate, plus the history bookkeeping exitSlideshowOnGoBack does.
+	 * @returns true when notes view was left and Back is spent.
+	 */
+	private exitNotesViewOnGoBack(): boolean {
+		if (!this.exitPhoneNotesView()) return false;
+
+		// Back consumed one of the entries pushed in onAdd. Put it back so the
+		// next Back still has one to spend on leaving the editor.
+		history.pushState({context: 'app-started'}, 'app-started');
+		return true;
 	}
 
 	// Blocking UI
@@ -2058,6 +2997,7 @@ class UIManager extends window.L.Control {
 			}
 			document.removeEventListener('mousemove', hideTooltip);
 			document.removeEventListener('wheel', hideTooltip);
+			document.removeEventListener('pointerdown', hideTooltipOnTouch);
 			document.removeEventListener('keydown', hideTooltipOnKey, { capture: true } as any);
 		};
 
@@ -2067,18 +3007,29 @@ class UIManager extends window.L.Control {
 			}
 		};
 
+		// A finger produces none of the three dismissers below, so on touch
+		// this tooltip had none at all and stayed up until something else
+		// moved a mouse. The next press is touch's "I am done with that".
+		// Mouse pointers are excluded rather than gated on the phone chrome:
+		// they already have mousemove, and a dismisser they do not have today
+		// is a desktop behaviour change however small.
+		const hideTooltipOnTouch = function(e: PointerEvent) {
+			if (e.pointerType !== 'mouse') hideTooltip();
+		};
+
 		document.addEventListener('mousemove', hideTooltip);
 		document.addEventListener('wheel', hideTooltip);
+		document.addEventListener('pointerdown', hideTooltipOnTouch);
 		document.addEventListener('keydown', hideTooltipOnKey, { capture: true });
 	}
 
 	// Snack bar
 
 	/**
-	 * Closes the snackbar.
+	 * Closes the snackbar the caller showed.
 	 */
 	closeSnackbar(): void {
-		JSDialog.SnackbarController.closeSnackbar();
+		JSDialog.SnackbarController.closeUnkeyed();
 	}
 
 	/**
@@ -2100,6 +3051,21 @@ class UIManager extends window.L.Control {
 		withDismiss?: boolean,
 	): void {
 		JSDialog.SnackbarController.showSnackbar(label, action, callback, timeout, hasProgress, withDismiss);
+	}
+
+	/**
+	 * Displays a snackbar with no timeout until dismissSnackbar(key). Showing a
+	 * key already on screen or queued does nothing.
+	 */
+	showStickySnackbar(key: string, label: string): void {
+		JSDialog.SnackbarController.showSticky(key, label);
+	}
+
+	/**
+	 * Takes down showStickySnackbar(key)'s snackbar without moving focus.
+	 */
+	dismissSnackbar(key: string): void {
+		JSDialog.SnackbarController.dismiss(key);
 	}
 
 	/**
@@ -2187,18 +3153,26 @@ class UIManager extends window.L.Control {
 	/**
 	 * Closes a modal dialog.
 	 * @param dialogId - The ID of the dialog to close.
+	 * @param focusHandled - Vulcan Office: leaves focus where it is, where by
+	 * default the close gives it back to what had it when the dialog opened,
+	 * or to the document.
 	 */
-	closeModal(dialogId: string): void {
-		var closeMessage = { id: dialogId, jsontype: 'dialog', type: 'modalpopup', action: 'close' };
+	closeModal(dialogId: string, focusHandled?: boolean): void {
+		var closeMessage: any = { id: dialogId, jsontype: 'dialog', type: 'modalpopup', action: 'close' };
+		if (focusHandled)
+			closeMessage.focusHandled = true;
 		app.socket._onMessage({ textMsg: 'jsdialog: ' + JSON.stringify(closeMessage) });
 	}
 
 	/**
 	 * Closes all open dialogs.
+	 * @param leaveSnackbar - Leaves the snackbar open.
+	 * @param focusHandled - Vulcan Office: leaves focus where it is, where by
+	 * default each close gives it back to what had it when that dialog opened.
 	 */
-	closeAll(): void {
+	closeAll(leaveSnackbar?: boolean, focusHandled?: boolean): void {
 		if (this.map.jsdialog)
-			this.map.jsdialog.closeAll();
+			this.map.jsdialog.closeAll(leaveSnackbar, /* leaveAlert */ false, focusHandled);
 		else
 			this.mobileWizard._closeWizard();
 	}
@@ -2468,6 +3442,8 @@ class UIManager extends window.L.Control {
 
 	/// buttonObjectList: [{id: button's id, text: button's text, ..other properties if needed}, ...]
 	/// callbackList: [{id: button's id, func_: function}, ...]
+	/// focusHandled: Vulcan Office, the modal opens without taking focus
+	/// (JSDialog.setupInitialFocus), for a caller that leaves it where it is.
 	showModalWithCustomButtons(
 		id: string,
 		title: string,
@@ -2476,6 +3452,7 @@ class UIManager extends window.L.Control {
 		buttonObjectList: any[],
 		callbackList: any[],
 		errorDetail?: string,
+		focusHandled?: boolean,
 	): void {
 		var dialogId = this.generateModalId(id);
 
@@ -2510,6 +3487,8 @@ class UIManager extends window.L.Control {
 		});
 
 		var json = this._modalDialogJSON(id, title, !!cancellable, children);
+		if (focusHandled)
+			json.focusHandled = true;
 
 		buttonObjectList.forEach((button) => {
 			callbackList.forEach((callback) => {

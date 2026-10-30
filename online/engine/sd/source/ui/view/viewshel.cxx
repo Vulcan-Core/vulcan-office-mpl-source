@@ -69,6 +69,8 @@
 #include <svx/svdoutl.hxx>
 #include <tools/svborder.hxx>
 #include <comphelper/kit.hxx>
+#include <undo/undomanager.hxx>
+#include <svl/stritem.hxx>
 
 #include <svl/slstitm.hxx>
 #include <sfx2/request.hxx>
@@ -1309,6 +1311,23 @@ public:
 
 }
 
+SfxViewUndoLookup ViewShell::LookupPerViewUndo(const SfxUndoManager& rUndoManager) const
+{
+    const ViewShellId nViewId = GetViewShellBase().GetViewShellId();
+    if (auto pSdUndoManager = dynamic_cast<const sd::UndoManager*>(&rUndoManager))
+        return pSdUndoManager->LookupViewUndo(nViewId);
+    // A text edit's own undo manager: its steps all belong to the one view editing, so only
+    // the in-order answer applies.
+    return rUndoManager.LookupViewUndo(
+        nViewId, [](const SfxUndoAction&) { return false; },
+        [](const SfxUndoAction&, const SfxUndoAction&) { return false; });
+}
+
+bool ViewShell::IsConditionalFastCall(const SfxRequest& rReq)
+{
+    return IsKitPerViewUndoRedo(rReq) || SfxShell::IsConditionalFastCall(rReq);
+}
+
 void ViewShell::ImpSidUndo(SfxRequest& rReq)
 {
     //The xWatcher keeps the SlideSorter selection in sync
@@ -1340,19 +1359,35 @@ void ViewShell::ImpSidUndo(SfxRequest& rReq)
         sal_uInt16 nCount(pUndoManager->GetUndoActionCount());
         if(nCount >= nNumber)
         {
+            size_t nUndoOffset = 0;
             if (comphelper::COKit::isActive() && !bRepair)
             {
-                // If another view created the first undo action, prevent redoing it from this view.
-                const SfxUndoAction* pAction = pUndoManager->GetUndoAction();
-                if (pAction->GetViewShellId() != GetViewShellBase().GetViewShellId())
+                // Vulcan fork: per-view undo (sd::UndoManager::LookupViewUndo). This view's
+                // Undo takes back this view's own most recent change, out of order when the
+                // changes above it only touched other shapes; otherwise it does nothing and
+                // answers why, as a JSON string -- never the numeric SID_REPAIRPACKAGE value
+                // behind the stock "Conflict Undo/Redo with multiple users" dialog.
+                // "Undo N" is only ever in order, over this view's own topmost actions: it
+                // never reaches another view's (ForCount).
+                const SfxViewUndoLookup aLookup = LookupPerViewUndo(*pUndoManager).ForCount(nNumber);
+                if (!aLookup.CanDo())
                 {
-                    rReq.SetReturnValue(SfxUInt32Item(SID_UNDO, static_cast<sal_uInt32>(SID_REPAIRPACKAGE)));
+                    if (aLookup.eStatus != SfxViewUndoLookup::Status::Empty)
+                        rReq.SetReturnValue(SfxStringItem(SID_UNDO, SfxViewUndoLookupToJson(aLookup, /*bRedo=*/false)));
                     return;
                 }
+                nUndoOffset = aLookup.nOffset;
             }
 
             try
             {
+                if (nUndoOffset > 0)
+                {
+                    // Only the document undo manager can say an action is independent.
+                    if (auto pSdUndoManager = dynamic_cast<sd::UndoManager*>(pUndoManager))
+                        pSdUndoManager->UndoAtOffset(nUndoOffset);
+                    nNumber = 0;
+                }
                 // when UndoStack is cleared by ModifyPageUndoAction
                 // the nCount may have changed, so test GetUndoActionCount()
                 while (nNumber && pUndoManager->GetUndoActionCount())
@@ -1376,6 +1411,9 @@ void ViewShell::ImpSidUndo(SfxRequest& rReq)
     // This one is corresponding to the default handling
     // of SID_UNDO in sfx2
     GetViewFrame()->GetBindings().InvalidateAll(false);
+    // Vulcan fork: what the OTHER views can undo changed too.
+    if (comphelper::COKit::isActive())
+        sd::UndoManager::InvalidateUndoStateInAllViews();
 
     rReq.Done();
 }
@@ -1412,11 +1450,14 @@ void ViewShell::ImpSidRedo(SfxRequest& rReq)
         {
             if (comphelper::COKit::isActive() && !bRepair)
             {
-                // If another view created the first undo action, prevent redoing it from this view.
-                const SfxUndoAction* pAction = pUndoManager->GetRedoAction();
-                if (pAction->GetViewShellId() != GetViewShellBase().GetViewShellId())
+                // Vulcan fork: per-view redo, in order only; a refusal answers JSON, never
+                // the numeric SID_REPAIRPACKAGE "conflict" value.
+                const SfxViewUndoLookup aLookup
+                    = pUndoManager->LookupViewRedo(GetViewShellBase().GetViewShellId()).ForCount(nNumber);
+                if (!aLookup.CanDo())
                 {
-                    rReq.SetReturnValue(SfxUInt32Item(SID_REDO, static_cast<sal_uInt32>(SID_REPAIRPACKAGE)));
+                    if (aLookup.eStatus != SfxViewUndoLookup::Status::Empty)
+                        rReq.SetReturnValue(SfxStringItem(SID_REDO, SfxViewUndoLookupToJson(aLookup, /*bRedo=*/true)));
                     return;
                 }
             }
@@ -1448,6 +1489,9 @@ void ViewShell::ImpSidRedo(SfxRequest& rReq)
     // This one is corresponding to the default handling
     // of SID_UNDO in sfx2
     GetViewFrame()->GetBindings().InvalidateAll(false);
+    // Vulcan fork: what the OTHER views can undo changed too.
+    if (comphelper::COKit::isActive())
+        sd::UndoManager::InvalidateUndoStateInAllViews();
 
     rReq.Done();
 }

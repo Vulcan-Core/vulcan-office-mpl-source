@@ -82,6 +82,9 @@ public:
 
     void        ExecUndo(SfxRequest &);
     void        StateUndo(SfxItemSet &);
+    /// Vulcan fork: Ctrl+Z still reaches ExecUndo when Undo is disabled for this view, so a
+    /// refusal is answered (see SfxShell::IsKitPerViewUndoRedo).
+    virtual bool IsConditionalFastCall(const SfxRequest& rReq) override;
 
     void        Execute(SfxRequest &);
     void        GetState(SfxItemSet &);

@@ -84,6 +84,9 @@ public:
 private:
     void processPrimitive(const drawinglayer::primitive2d::BasePrimitive2D& rPrimitive);
 
+    /// Write the primitive's own decomposition as the node's "children".
+    void writeDecompositionAsChildren(const drawinglayer::primitive2d::BasePrimitive2D& rPrimitive);
+
     /// Write matrix with all 6 components scaled
     void writeMatrixScaled(std::string_view sName, const basegfx::B2DHomMatrix& rMatrix);
 
@@ -97,6 +100,7 @@ private:
     void writePathScaled(const basegfx::B2DPolyPolygon& rPolyPolygon);
 
     void writeRangeScaled(std::string_view sName, const basegfx::B2DRange& rRange);
+    void writeContentRange(const drawinglayer::primitive2d::BasePrimitive2D& rPrimitive);
     void writeHatchScaled(const drawinglayer::attribute::FillHatchAttribute& rHatch);
     void writeFillGraphicScaled(const drawinglayer::attribute::FillGraphicAttribute& rFillGraphic);
     void writeLineAttributeScaled(const drawinglayer::attribute::LineAttribute& rLineAttribute);

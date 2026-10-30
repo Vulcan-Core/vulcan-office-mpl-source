@@ -347,6 +347,20 @@ nav.hasnotebookbar [id^='save'].saved::after {
 
 /* Hamburger button */
 
+/* Three of these declarations are sized for the 22px desktop hamburger and are
+ * wrong for the 44px phone kebab that reuses the element. On a phone they are
+ * corrected, not removed:
+ *   `margin: 2px 8px` -> 44 + 8 + 8 is a 60px margin box in a 36px column
+ *      (device-mobile.css:15), and the left margin alone pushes the target 8px
+ *      further past the right edge of the row.
+ *   `text-indent: 17px` -> applies once the label is a block container and
+ *      shifts the ⋮ off centre.
+ *   `width/height: 22px` -> beaten by vulcan-theme.css §13.2's min-width /
+ *      min-height: 44px, which is why the box is 44 and not 22.
+ * The corrections live in vulcan-theme.css §13i.11, presentation doctype only.
+ * If you retune these values, re-read that section first — it states the
+ * arithmetic it is undoing, and silently disagreeing with it puts the kebab's
+ * hit box back off the right edge of the screen. */
 .main-menu-btn {
 	margin: 2px 8px;
 	position: relative;

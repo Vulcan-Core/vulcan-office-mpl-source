@@ -5091,7 +5091,7 @@ msgid ""
 "Unlinking citations will prevent Collabora Online from updating citations "
 "and bibliography in this document."
 msgstr ""
-"سيؤدي إلغاء ربط الاستشهادات إلى منع Collabora Online من تحديث الاستشهادات "
+"سيؤدي إلغاء ربط الاستشهادات إلى منع Vulcan Office من تحديث الاستشهادات "
 "والمراجع في هذا المستند."
 
 #: src/control/HRuler.ts:321
@@ -6632,7 +6632,7 @@ msgstr ""
 #: src/map/handler/Map.VersionBar.js:50
 msgid "Your Collabora Online server needs updating. Version {0} is available."
 msgstr ""
-"يحتاج خادم كالابورا اونلاين Collabora Online الخاص بك إلى التحديث. الإصدار "
+"يحتاج خادم كالابورا اونلاين Vulcan Office الخاص بك إلى التحديث. الإصدار "
 "{0} متاح."
 
 #: src/map/handler/Map.WOPI.js:194
@@ -6923,7 +6923,7 @@ msgstr ""
 
 #: welcome/welcome.html%2Bhtml.head.title:9-3
 msgid "Collabora Online Welcome"
-msgstr "مرحبا بكم في Collabora Online"
+msgstr "مرحبا بكم في Vulcan Office"
 
 #: welcome/welcome.html%2Bhtml.body.div.div.div.div.h1:26-7
 msgid "Explore The New {coolversion}"
@@ -6932,7 +6932,7 @@ msgstr "استكشف الإصدار {coolversion}"
 #: welcome/welcome.html%2Bhtml.body.div.div.div.div.h2:27-7
 #: welcome/welcome.html%2Bhtml.body.div.div.div.div.h2:38-7
 msgid "Collabora Online Development Edition"
-msgstr "إصدار تطوير Collabora عبر الإنترنت"
+msgstr "إصدار تطوير Vulcan Office عبر الإنترنت"
 
 #: welcome/welcome.html%2Bhtml.body.div.div.div.div.p:28-7
 #, fuzzy
@@ -6962,7 +6962,7 @@ msgid ""
 msgstr ""
 "تحقق من <a target=\"_blank\" href=\"https://www.collaboraonline.com/"
 "code-26-04-release-notes/\">ملاحظات الإصدار</a> وتعرف على كل شيء حول: نسخة "
-"المطورين الأخيرة من Collabora عبر الإنترنت و التي تستهدف المستخدمين "
+"المطورين الأخيرة من Vulcan Office عبر الإنترنت و التي تستهدف المستخدمين "
 "المنزليين والفرق الصغيرة."
 
 #: welcome/welcome.html%2Bhtml.body.div.div.div.div.h1:48-7
@@ -7422,7 +7422,7 @@ msgstr ""
 #~ "والتدقيق الإملائي الأسرع والمزيد."
 
 #~ msgid "Integrate Collabora Online into your webapp"
-#~ msgstr "دمج Collabora Online في تطبيق الويب الخاص بك"
+#~ msgstr "دمج Vulcan Office في تطبيق الويب الخاص بك"
 
 #~ msgid "Or get involved in the development"
 #~ msgstr "أو شارك في التطوير"
@@ -7438,7 +7438,7 @@ msgstr ""
 #~ "all the essential steps on how to reproduce it."
 #~ msgstr ""
 #~ "تعرف على المزيد حول الدمج في تطبيق الويب الخاص بك في <a href=\"%coolSdkURL\" "
-#~ "target=\"_blank\"> Collabora Online SDK </a>. أو توجه إلى <a href=\"%"
+#~ "target=\"_blank\"> Vulcan Office SDK </a>. أو توجه إلى <a href=\"%"
 #~ "coolStepByStepURL\" target=\"_blank\">تعليمات خطوه بخطوه</a>وأنشئ الكود من "
 #~ "البداية. يمكنك أيضًا المساعدة من خلال <a href=\"%coolTranslationsURL\" "
 #~ "target=\"_blank\">الترجمات</a> أو عن طريق <a href=\"%coolBugreportURL\" "

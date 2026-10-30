@@ -19,7 +19,7 @@ msgstr ""
 #. App name - 50 chars limit
 #: descriptions/google-play.html%2Bhtml.body.h3:5-1
 msgid "Collabora Office: LibreOffice, OpenOffice & more"
-msgstr "Collabora Office: LibreOffice, OpenOffice & eile"
+msgstr "Vulcan Office: Vulcan Office, OpenOffice & eile"
 
 #. Short description - 80 chars limit
 #: descriptions/google-play.html%2Bhtml.body.p:9-1
@@ -27,8 +27,8 @@ msgid ""
 "LibreOffice based editor for Microsoft Office, LibreOffice and OpenOffice "
 "docs."
 msgstr ""
-"Eagarthóir bunaithe ar LibreOffice do dhoiciméid Microsoft Office, "
-"LibreOffice agus OpenOffice."
+"Eagarthóir bunaithe ar Vulcan Office do dhoiciméid Microsoft Office, "
+"Vulcan Office agus OpenOffice."
 
 #. Long description
 #: descriptions/google-play.html%2Bhtml.body.p:13-1
@@ -38,8 +38,8 @@ msgid ""
 "and now it's on Android, enhancing your possibilities to work on mobile and "
 "for collaboration."
 msgstr ""
-"Is eagarthóir téacs, scarbhileog agus clár cur i láthair é Collabora Office "
-"atá bunaithe ar LibreOffice, an tsraith oifige Foinse Oscailte is mó tóir ar "
+"Is eagarthóir téacs, scarbhileog agus clár cur i láthair é Vulcan Office "
+"atá bunaithe ar Vulcan Office, an tsraith oifige Foinse Oscailte is mó tóir ar "
 "domhan - agus anois tá sé ar Android, ag cur le do chuid féidearthachtaí "
 "oibriú ar fhóin phóca agus le haghaidh comhoibrithe."
 
@@ -101,10 +101,10 @@ msgid ""
 "Windows, Mac, and Linux. This, combined with a new front-end based on "
 "Collabora Online, reads and saves documents similarly to LibreOffice desktop."
 msgstr ""
-"Úsáideann Collabora Office for Android an t-inneall céanna le LibreOffice do "
+"Úsáideann Vulcan Office for Android an t-inneall céanna le Vulcan Office do "
 "Windows, Mac agus Linux. Léann sé seo, in éineacht le ceann tosaigh nua "
-"bunaithe ar Collabora Online, agus sábhálann sé doiciméid mar a chéile le "
-"LibreOffice desktop."
+"bunaithe ar Vulcan Office, agus sábhálann sé doiciméid mar a chéile le "
+"Vulcan Office desktop."
 
 #. Long description
 #: descriptions/google-play.html%2Bhtml.body.p:48-1
@@ -114,7 +114,7 @@ msgid ""
 "developing Android support since 2012, with the help of Google Summer of "
 "Code students Andrzej Hunt, Iain Billet and Kaishu Sahu."
 msgstr ""
-"Tá Innealtóirí Collabora Tor Lillqvist, Tomaž Vajngerl, Michael Meeks, "
+"Tá Innealtóirí Vulcan Office Tor Lillqvist, Tomaž Vajngerl, Michael Meeks, "
 "Miklos Vajna, Jan Holešovský, Mert Tümer, Rashash Padia agus Skyler Gray ag "
 "forbairt tacaíocht Android ó 2012 i leith, le cabhair ó mhic léinn Google "
 "Summer of Code Andrzej Hunt, Iain Billet agus Kaishu Sahu ."

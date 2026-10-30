@@ -196,7 +196,25 @@ bool FuSelection::MouseButtonDown(const MouseEvent& rMEvt)
         SdrViewEvent aVEvt;
         SdrHitKind eHit = mpView->PickAnything(rMEvt, SdrMouseEventKind::BUTTONDOWN, aVEvt);
 
-        if (eHit == SdrHitKind::TextEditObj && (mrViewShell.GetFrameView()->IsQuickEdit() || dynamic_cast< sdr::table::SdrTableObj* >(aVEvt.mpObj) != nullptr))
+        // Vulcan (phone Impress tap grammar, SPEC-slides L3/A4): a single
+        // tap SELECTS the object it lands on — handles, no caret. QuickEdit's
+        // "Seamless Editing" arm below answers a count-1 click on text ink
+        // with SID_TEXTEDIT, so a fresh tap on placeholder glyph ink produced
+        // a caret with no selection pill and the object-selected boundary had
+        // no entry gesture from ink. Gate the SINGLE click off on a Kit
+        // phone: the tap then falls through to the stock UnmarkAll+MarkObj
+        // tail and selects. A count-2 event keeps the stock entry — the
+        // browser's double tap AND its tap-again-on-selected replay
+        // (ShapeHandlesSection) both arrive as a count-2 pair, so every
+        // text-entry door is untouched. Tablets keep stock single-click
+        // direct edit; desktop keeps stock (same shape as the G10 spell gate
+        // in sc gridwin.cxx).
+        SfxViewShell* pKitViewShell = mrViewShell.GetViewShell();
+        const bool bKitPhoneSingleTap = comphelper::COKit::isActive()
+            && pKitViewShell && pKitViewShell->isKitMobilePhone()
+            && rMEvt.GetClicks() == 1;
+
+        if (!bKitPhoneSingleTap && eHit == SdrHitKind::TextEditObj && (mrViewShell.GetFrameView()->IsQuickEdit() || dynamic_cast< sdr::table::SdrTableObj* >(aVEvt.mpObj) != nullptr))
         {
             bTextEdit = true;
         }

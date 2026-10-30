@@ -1,5 +1,5 @@
 :root {
-	/*LibreOffice Colors: https://wiki.documentfoundation.org/Marketing/Branding#Colors
+	/*Stock engine palette colors
 	 * this is the color prefab for light mode
 	----------------------------------[to do]*/
 	--blue1-txt-primary-color: 3, 105, 163;
@@ -85,6 +85,9 @@
 	--color-grid-helper-line-solid: #e6e6e6;
 	--color-grid-helper-line-dashed: #191919;
 	--color-smart-guides-helper-line: #f36d4f;
+	--color-shape-handle-fill: #ffffff;
+	--color-shape-handle-stroke: #767676;
+	--color-shape-selection-frame: #9b9b9b;
 	--color-insert-marker-background: #DDDD;
 	--color-insert-marker-background-dark: #F5F5F5;
 

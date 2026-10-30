@@ -1070,6 +1070,15 @@ void StyleSheetTable::ApplyStyleSheets( const FontTablePtr& rFontTable )
     return ApplyStyleSheetsImpl(rFontTable, m_aStyleSheetEntries);
 }
 
+/// Word's outline level (0-8) of its built-in "heading 1".."heading 9", else -1.
+static sal_Int16 lcl_GetBuiltInHeadingOutlineLevel(const OUString& rConvertedStyleName)
+{
+    if (rConvertedStyleName.getLength() == 9 && rConvertedStyleName.startsWith("Heading ")
+        && rConvertedStyleName[8] >= '1' && rConvertedStyleName[8] <= '9')
+        return static_cast<sal_Int16>(rConvertedStyleName[8] - '1');
+    return -1;
+}
+
 void StyleSheetTable::ApplyStyleSheetsImpl(const FontTablePtr& rFontTable, std::vector<StyleSheetEntryPtr> const& rEntries)
 {
     if (!m_xTextDocument)
@@ -1247,6 +1256,12 @@ void StyleSheetTable::ApplyStyleSheetsImpl(const FontTablePtr& rFontTable, std::
                         if ( pStyleSheetProperties )
                         {
                             sal_Int16 nLvl = pStyleSheetProperties->GetOutlineLevel();
+                            // Word ties its built-in heading N to outline level N whether or not
+                            // the style says so, and docx-js writes them without w:outlineLvl
+                            // SetPropertiesToDefault() above cleared Writer's own level,
+                            // so without this they import as body text and a TOC \o finds nothing.
+                            if (nLvl == -1)
+                                nLvl = lcl_GetBuiltInHeadingOutlineLevel(sConvertedStyleName);
                             // convert MS body Level (9) to LO body level (0) and equivalent outline levels
                             if (nLvl != -1)
                             {

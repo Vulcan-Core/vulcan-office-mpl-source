@@ -27,6 +27,9 @@
 #include <xmloff/autolayout.hxx>
 
 #include <com/sun/star/awt/FontUnderline.hpp>
+#include <com/sun/star/chart/XChartDataArray.hpp>
+#include <com/sun/star/chart2/XChartDocument.hpp>
+#include <com/sun/star/drawing/XDrawPageDuplicator.hpp>
 #include <com/sun/star/drawing/EnhancedCustomShapeParameterPair.hpp>
 #include <com/sun/star/drawing/FillStyle.hpp>
 #include <com/sun/star/drawing/TextHorizontalAdjust.hpp>
@@ -35,6 +38,10 @@
 #include <com/sun/star/style/ParagraphAdjust.hpp>
 #include <com/sun/star/text/GraphicCrop.hpp>
 #include <com/sun/star/text/WritingMode2.hpp>
+
+#include <tools/stream.hxx>
+
+#include <vector>
 
 #include <sdpage.hxx>
 #include <SlideSectionManager.hxx>
@@ -50,6 +57,12 @@ public:
         : SdModelTestBase(u"/sd/qa/unit/data/"_ustr)
     {
     }
+
+protected:
+    /// testChartWorkbookLinkedWith*: saves pDeck, whose two charts each link their own workbook,
+    /// the second's series data partly without a c:f, and checks both keep their link and their
+    /// workbook, and the series names their c:f. Returns the second chart's part.
+    xmlDocUniquePtr saveWithBothChartsLinked(const char* pDeck);
 };
 
 CPPUNIT_TEST_FIXTURE(SdOOXMLExportTest4, testTdf160591)
@@ -908,16 +921,16 @@ CPPUNIT_TEST_FIXTURE(SdOOXMLExportTest4, testTdf140912_PicturePlaceholder)
         aPosBefore = xShape->getPosition();
     }
 
-    // The picture placeholder must round-trip with its size and position (inherited from the layout
-    // via an empty <p:spPr/>), and must remain visible.
+    // The picture placeholder must round-trip with its size and position, and must remain visible.
     saveAndReload(TestFilter::PPTX);
 
     {
-        // After reload, the saved markup should be <p:sp> with <p:ph type="pic"/>
-        // and an empty <p:spPr/>.
+        // After reload, the saved markup should be <p:sp> with <p:ph type="pic"/> and its own
+        // geometry. Relying on the layout to supply the geometry instead left the placeholder
+        // 0x0 whenever the slide's layout placeholder could not be resolved on reimport.
         xmlDocUniquePtr pXmlDoc = parseExport(u"ppt/slides/slide1.xml"_ustr);
         assertXPath(pXmlDoc, "/p:sld/p:cSld/p:spTree/p:sp/p:nvSpPr/p:nvPr/p:ph", "type", u"pic");
-        assertXPathChildren(pXmlDoc, "/p:sld/p:cSld/p:spTree/p:sp/p:spPr", 0);
+        assertXPath(pXmlDoc, "/p:sld/p:cSld/p:spTree/p:sp/p:spPr/a:xfrm/a:ext", "cx", u"6635520");
 
         uno::Reference<beans::XPropertySet> xShapeProps(getShapeFromPage(0, 0));
         bool bEmpty = false;
@@ -935,6 +948,40 @@ CPPUNIT_TEST_FIXTURE(SdOOXMLExportTest4, testTdf140912_PicturePlaceholder)
         CPPUNIT_ASSERT_DOUBLES_EQUAL(aPosBefore.X, aPosAfter.X, 1);
         CPPUNIT_ASSERT_DOUBLES_EQUAL(aPosBefore.Y, aPosAfter.Y, 1);
     }
+}
+
+CPPUNIT_TEST_FIXTURE(SdOOXMLExportTest4, testNoPicPlaceholderOnSlideMaster)
+{
+    // Given a deck whose only layout carries a picture placeholder, so on import the placeholder
+    // lands on the Impress master page:
+    createSdImpressDoc("pptx/tdfpictureplaceholder.pptx");
+    save(TestFilter::PPTX);
+
+    // A slide master takes only title, body, dt, ftr and sldNum placeholders. Without the
+    // accompanying fix the master carried <p:ph type="pic"/> and PowerPoint refused to open the
+    // saved file at all, reporting it as corrupted and unreadable.
+    xmlDocUniquePtr pMaster = parseExport(u"ppt/slideMasters/slideMaster1.xml"_ustr);
+    assertXPath(pMaster, "/p:sldMaster/p:cSld/p:spTree/p:sp/p:nvSpPr/p:nvPr/p:ph[@type='pic']", 0);
+}
+
+CPPUNIT_TEST_FIXTURE(SdOOXMLExportTest4, testPicPlaceholderMovedToLayout)
+{
+    // Given a deck of one master and one layout, so the master page's own shapes go into the
+    // p:sldMaster part and the layout gets none of them:
+    createSdImpressDoc("pptx/picture-placeholder-one-layout.pptx");
+    save(TestFilter::PPTX);
+
+    // The picture placeholder still goes on the layout, which is where a slide resolves what it
+    // inherits. Without the accompanying fix it had nowhere to go but the slide master, which may
+    // not carry one, and PowerPoint refused to open the file.
+    xmlDocUniquePtr pLayout = parseExportedLayoutNamed(u"Picture placeholder");
+    assertXPath(pLayout, "/p:sldLayout/p:cSld/p:spTree/p:sp/p:nvSpPr/p:nvPr/p:ph[@type='pic']", 1);
+
+    xmlDocUniquePtr pMaster2 = parseExport(u"ppt/slideMasters/slideMaster1.xml"_ustr);
+    assertXPath(pMaster2, "/p:sldMaster/p:cSld/p:spTree/p:sp/p:nvSpPr/p:nvPr/p:ph[@type='pic']", 0);
+
+    xmlDocUniquePtr pSlide = parseExport(u"ppt/slides/slide1.xml"_ustr);
+    assertXPath(pSlide, "/p:sld/p:cSld/p:spTree/p:sp/p:nvSpPr/p:nvPr/p:ph[@type='pic']", 1);
 }
 
 CPPUNIT_TEST_FIXTURE(SdOOXMLExportTest4, testEnhancedPathViewBox)
@@ -1598,21 +1645,13 @@ CPPUNIT_TEST_FIXTURE(SdOOXMLExportTest4, testCustomPromptTexts)
                                      pTxtObj->GetObjIdentifier());
         const EditTextObject& aEdit = pTxtObj->GetOutlinerParaObject()->GetTextObject();
         OUString aText = aEdit.GetText(0);
-        CPPUNIT_ASSERT_EQUAL_MESSAGE("Wrong placeholder text!", aText, u"Click to add Text"_ustr);
-        /* TODO: handle subtitle shape: see tdf#112557 workaround
-            - Expected: Click to edit customized Master Subtitle style
-            - Actual : Click to add Text
-            - Wrong placeholder text!
-        */
+        CPPUNIT_ASSERT_EQUAL_MESSAGE("Wrong placeholder text!",
+                                     u"Click to edit customized Master Subtitle style"_ustr, aText);
 
         auto xShapeProps(getShapeFromPage(0, 0));
         CPPUNIT_ASSERT(xShapeProps->getPropertyValue(u"CustomPromptText"_ustr) >>= aText);
-        CPPUNIT_ASSERT_EQUAL_MESSAGE("Wrong placeholder text was set!", aText, u""_ustr);
-        /* TODO: handle subtitle shape: see tdf#112557 workaround
-            - Expected: Click to edit customized Master Subtitle style
-            - Actual :
-            - Wrong placeholder text was set!
-        */
+        CPPUNIT_ASSERT_EQUAL_MESSAGE("Wrong placeholder text was set!",
+                                     u"Click to edit customized Master Subtitle style"_ustr, aText);
     }
 
     {
@@ -1622,12 +1661,12 @@ CPPUNIT_TEST_FIXTURE(SdOOXMLExportTest4, testCustomPromptTexts)
                                      pTxtObj->GetObjIdentifier());
         const EditTextObject& aEdit = pTxtObj->GetOutlinerParaObject()->GetTextObject();
         OUString aText = aEdit.GetText(0);
-        CPPUNIT_ASSERT_EQUAL_MESSAGE("Wrong placeholder text!", aText, u"Custom Title 1"_ustr);
+        CPPUNIT_ASSERT_EQUAL_MESSAGE("Wrong placeholder text!", u"Custom Title 1"_ustr, aText);
 
         auto xShapeProps(getShapeFromPage(1, 0));
         CPPUNIT_ASSERT(xShapeProps->getPropertyValue(u"CustomPromptText"_ustr) >>= aText);
-        CPPUNIT_ASSERT_EQUAL_MESSAGE("Wrong placeholder text was set!", aText,
-                                     u"Custom Title 1"_ustr);
+        CPPUNIT_ASSERT_EQUAL_MESSAGE("Wrong placeholder text was set!", u"Custom Title 1"_ustr,
+                                     aText);
     }
 
     const SdrPage* pPage2 = GetPage(3);
@@ -1639,12 +1678,12 @@ CPPUNIT_TEST_FIXTURE(SdOOXMLExportTest4, testCustomPromptTexts)
                                      pTxtObj->GetObjIdentifier());
         const EditTextObject& aEdit = pTxtObj->GetOutlinerParaObject()->GetTextObject();
         OUString aText = aEdit.GetText(0);
-        CPPUNIT_ASSERT_EQUAL_MESSAGE("Wrong placeholder text!", aText, u"Text placeholder"_ustr);
+        CPPUNIT_ASSERT_EQUAL_MESSAGE("Wrong placeholder text!", u"Text placeholder"_ustr, aText);
 
         auto xShapeProps(getShapeFromPage(0, 1));
         CPPUNIT_ASSERT(xShapeProps->getPropertyValue(u"CustomPromptText"_ustr) >>= aText);
-        CPPUNIT_ASSERT_EQUAL_MESSAGE("Wrong placeholder text was set!", aText,
-                                     u"Text placeholder"_ustr);
+        CPPUNIT_ASSERT_EQUAL_MESSAGE("Wrong placeholder text was set!", u"Text placeholder"_ustr,
+                                     aText);
     }
 }
 
@@ -2174,6 +2213,418 @@ CPPUNIT_TEST_FIXTURE(SdOOXMLExportTest4, testSlideSectionsODPToPPTX)
         OUString sId = getXPath(pXmlDoc, sPath + "/p14:section[" + OString::number(i) + "]", "id");
         CPPUNIT_ASSERT(!sId.isEmpty());
     }
+}
+
+namespace
+{
+std::vector<char> readAll(SvStream& rStream)
+{
+    std::vector<char> aBytes(rStream.remainingSize());
+    rStream.ReadBytes(aBytes.data(), aBytes.size());
+    return aBytes;
+}
+}
+
+// a chart keeps the workbook it is backed by, so PowerPoint's Edit Data still opens it.
+CPPUNIT_TEST_FIXTURE(SdOOXMLExportTest4, testChartWorkbooksKept)
+{
+    // One slide, three charts (bar, line, pie). Each links its own embedded workbook,
+    // ppt/embeddings/Microsoft_Excel_WorksheetN.xlsx, and its series read that workbook's cells.
+    createSdImpressDoc("pptx/chart-workbooks.pptx");
+    save(TestFilter::PPTX);
+
+    static constexpr OString sSeries = "/c:chartSpace/c:chart/c:plotArea/*/c:ser[1]"_ostr;
+    for (sal_Int32 i = 1; i <= 3; ++i)
+    {
+        const OUString sChart = "chart" + OUString::number(i) + ".xml";
+        const OUString sName = "Microsoft_Excel_Worksheet" + OUString::number(i) + ".xlsx";
+        const OUString sWorkbook = "ppt/embeddings/" + sName;
+        xmlDocUniquePtr pChart = parseExport("ppt/charts/" + sChart);
+        // Without the fix in place, this test would have failed here: the save wrote no
+        // c:externalData, and no workbook.
+        const OUString sRelId = getXPath(pChart, "/c:chartSpace/c:externalData", "id");
+        const OString sRelationship
+            = "/rels:Relationships/rels:Relationship[@Id='" + sRelId.toUtf8() + "']";
+        xmlDocUniquePtr pRels = parseExport("ppt/charts/_rels/" + sChart + ".rels");
+        assertXPath(pRels, sRelationship, "Type",
+                    u"http://schemas.openxmlformats.org/officeDocument/2006/relationships/package");
+        assertXPath(pRels, sRelationship, "Target", OUString("../embeddings/" + sName));
+
+        // It is the workbook the deck was loaded with, byte for byte.
+        std::unique_ptr<SvStream> pLoaded
+            = parseExportStream(createFileURL(u"pptx/chart-workbooks.pptx"), sWorkbook);
+        std::unique_ptr<SvStream> pSaved = parseExportStream(maTempFile.GetURL(), sWorkbook);
+        CPPUNIT_ASSERT_EQUAL(pLoaded->remainingSize(), pSaved->remainingSize());
+        CPPUNIT_ASSERT_MESSAGE("the workbook is not the one the deck was loaded with",
+                               bool(readAll(*pLoaded) == readAll(*pSaved)));
+
+        // Its series still read the workbook's cells, not our own range names ("label 0",
+        // "categories", "0"), so Edit Data binds them to it.
+        assertXPathContent(pChart, sSeries + "/c:tx/c:strRef/c:f", u"Sheet1!$B$1");
+        assertXPathContent(pChart, sSeries + "/c:cat/c:strRef/c:f", u"Sheet1!$A$2:$A$4");
+        assertXPathContent(pChart, sSeries + "/c:val/c:numRef/c:f", u"Sheet1!$B$2:$B$4");
+    }
+
+    xmlDocUniquePtr pTypes = parseExport(u"[Content_Types].xml"_ustr);
+    assertXPath(pTypes,
+                "/ContentType:Types/ContentType:Override"
+                "[@PartName='/ppt/embeddings/Microsoft_Excel_Worksheet1.xlsx']",
+                "ContentType",
+                u"application/vnd.openxmlformats-officedocument.spreadsheetml.sheet");
+}
+
+// a chart whose data was edited is saved without the workbook it was loaded with: that
+// workbook would make Edit Data show, and refresh the chart to, the numbers the edit replaced.
+CPPUNIT_TEST_FIXTURE(SdOOXMLExportTest4, testChartWorkbookDroppedWhenDataEdited)
+{
+    createSdImpressDoc("pptx/chart-workbooks.pptx");
+    // Change one value of the first chart (the bar), as its data table does.
+    uno::Reference<chart2::XChartDocument> xChartDoc(
+        getShapeFromPage(0, 0)->getPropertyValue(u"Model"_ustr), uno::UNO_QUERY_THROW);
+    uno::Reference<chart::XChartDataArray> xData(xChartDoc->getDataProvider(),
+                                                 uno::UNO_QUERY_THROW);
+    cpo::uno::Sequence<cpo::uno::Sequence<double>> aData = xData->getData();
+    aData.getArray()[0].getArray()[0] += 1.0;
+    xData->setData(aData);
+    save(TestFilter::PPTX);
+
+    // The edited chart: no workbook and no link, as before the fix; its series name no cells.
+    xmlDocUniquePtr pChart = parseExport(u"ppt/charts/chart1.xml"_ustr);
+    assertXPath(pChart, "/c:chartSpace/c:externalData", 0);
+    assertXPathContent(pChart,
+                       "/c:chartSpace/c:chart/c:plotArea/c:barChart/c:ser[1]/c:val/c:numRef/c:f",
+                       u"0");
+    uno::Reference<packages::zip::XZipFileAccess2> xZip
+        = packages::zip::ZipFileAccess::createWithURL(m_xContext, maTempFile.GetURL());
+    CPPUNIT_ASSERT(!xZip->hasByName(u"ppt/embeddings/Microsoft_Excel_Worksheet1.xlsx"_ustr));
+
+    // The two unedited charts keep theirs.
+    for (sal_Int32 i = 2; i <= 3; ++i)
+    {
+        assertXPath(parseExport("ppt/charts/chart" + OUString::number(i) + ".xml"),
+                    "/c:chartSpace/c:externalData", 1);
+        CPPUNIT_ASSERT(xZip->hasByName("ppt/embeddings/Microsoft_Excel_Worksheet"
+                                       + OUString::number(i) + ".xlsx"));
+    }
+}
+
+// a duplicated slide's charts name the same workbooks as the original's; each workbook
+// is linked from one chart only, as Word reports charts sharing one as corrupt (tdf#168977).
+// The copies keep their workbook's name but no c:f (ChartExFormula), so they are not linked
+// either way (testChartWorkbookUnlinkedWhenCopied); testChartWorkbookLinkedOnceWhenShared is the
+// case that needs XmlFilterBase::linkChartEmbeddingOnce.
+CPPUNIT_TEST_FIXTURE(SdOOXMLExportTest4, testChartWorkbookLinkedOnceAfterSlideDuplicate)
+{
+    createSdImpressDoc("pptx/chart-workbooks.pptx");
+    uno::Reference<drawing::XDrawPageDuplicator> xDuplicator(mxComponent, uno::UNO_QUERY_THROW);
+    xDuplicator->duplicate(getPage(0));
+    save(TestFilter::PPTX);
+
+    // Charts 1-3 are on the original slide and link their workbooks; 4-6, on the copy, do not.
+    for (sal_Int32 i = 1; i <= 6; ++i)
+        assertXPath(parseExport("ppt/charts/chart" + OUString::number(i) + ".xml"),
+                    "/c:chartSpace/c:externalData", i <= 3 ? 1 : 0);
+}
+
+// (code review): two charts naming one workbook part, with the same
+// data and c:f: the first links it, and it is written once. The deck is
+// python-pptx-chart-shared-workbook.pptx (infrastructure/vulcan-office/build/fixtures/
+// make-chart-link-fixtures.py writes it).
+CPPUNIT_TEST_FIXTURE(SdOOXMLExportTest4, testChartWorkbookLinkedOnceWhenShared)
+{
+    createSdImpressDoc("pptx/python-pptx-chart-shared-workbook.pptx");
+    save(TestFilter::PPTX);
+
+    assertXPath(parseExport(u"ppt/charts/chart1.xml"_ustr), "/c:chartSpace/c:externalData", 1);
+    // Without XmlFilterBase::linkChartEmbeddingOnce, this test would have failed here: the
+    // second chart linked the same workbook, and wrote it a second time.
+    assertXPath(parseExport(u"ppt/charts/chart2.xml"_ustr), "/c:chartSpace/c:externalData", 0);
+    uno::Reference<packages::zip::XZipFileAccess2> xZip
+        = packages::zip::ZipFileAccess::createWithURL(m_xContext, maTempFile.GetURL());
+    CPPUNIT_ASSERT(xZip->hasByName(u"ppt/embeddings/Microsoft_Excel_Sheet1.xlsx"_ustr));
+}
+
+namespace
+{
+/// The first series of a column chart that make-chart-link-fixtures.py writes.
+constexpr OString gaChartSeries = "/c:chartSpace/c:chart/c:plotArea/c:barChart/c:ser[1]"_ostr;
+}
+
+xmlDocUniquePtr SdOOXMLExportTest4::saveWithBothChartsLinked(const char* pDeck)
+{
+    createSdImpressDoc(pDeck);
+    save(TestFilter::PPTX);
+
+    // The first chart's series read its workbook: it keeps the link, and its c:f.
+    xmlDocUniquePtr pFirst = parseExport(u"ppt/charts/chart1.xml"_ustr);
+    assertXPath(pFirst, "/c:chartSpace/c:externalData", 1);
+    assertXPathContent(pFirst, gaChartSeries + "/c:tx/c:strRef/c:f", u"Sheet1!$B$1");
+    assertXPathContent(pFirst, gaChartSeries + "/c:cat/c:strRef/c:f", u"Sheet1!$A$2:$A$4");
+    assertXPathContent(pFirst, gaChartSeries + "/c:val/c:numRef/c:f", u"Sheet1!$B$2:$B$4");
+
+    // Without the fix in place, this test would have failed here: the second chart was saved
+    // without its workbook, so PowerPoint's Edit Data had nothing to open.
+    xmlDocUniquePtr pSecond = parseExport(u"ppt/charts/chart2.xml"_ustr);
+    assertXPath(pSecond, "/c:chartSpace/c:externalData", 1);
+    uno::Reference<packages::zip::XZipFileAccess2> xZip
+        = packages::zip::ZipFileAccess::createWithURL(m_xContext, maTempFile.GetURL());
+    CPPUNIT_ASSERT(xZip->hasByName(u"ppt/embeddings/Microsoft_Excel_Sheet1.xlsx"_ustr));
+    CPPUNIT_ASSERT(xZip->hasByName(u"ppt/embeddings/Microsoft_Excel_Sheet2.xlsx"_ustr));
+    // Its series names still read its workbook.
+    assertXPathContent(pSecond, gaChartSeries + "/c:tx/c:strRef/c:f", u"Sheet1!$B$1");
+    return pSecond;
+}
+
+// Code review: a chart keeps its workbook while some of its series data kept
+// the c:f it was imported with (ChartExFormula), and writes the data that kept none as the
+// literal it was: our own range names ("categories", "0") name no cell of that workbook. The
+// second chart of this deck has no c:cat, so the import makes its categories up ("1", "2",
+// "3"), with no c:f: they are written as c:strLit.
+CPPUNIT_TEST_FIXTURE(SdOOXMLExportTest4, testChartWorkbookLinkedWithMadeUpCategories)
+{
+    xmlDocUniquePtr pSecond = saveWithBothChartsLinked("pptx/python-pptx-chart-no-categories.pptx");
+    assertXPath(pSecond, gaChartSeries + "/c:cat/c:strLit/c:pt", 3);
+    assertXPathContent(pSecond, gaChartSeries + "/c:cat/c:strLit/c:pt[1]/c:v", u"1");
+    assertXPathContent(pSecond, gaChartSeries + "/c:val/c:numRef/c:f", u"Sheet1!$B$2:$B$4");
+    // The c:f of the two series' names and values, and no other.
+    assertXPath(pSecond, "//c:f", 4);
+}
+
+// The same for a chart whose categories and values are c:strLit and c:numLit data: they come
+// back as the same literals.
+CPPUNIT_TEST_FIXTURE(SdOOXMLExportTest4, testChartWorkbookLinkedWithLiteralData)
+{
+    xmlDocUniquePtr pSecond = saveWithBothChartsLinked("pptx/python-pptx-chart-literal-data.pptx");
+    assertXPathContent(pSecond, gaChartSeries + "/c:cat/c:strLit/c:pt[1]/c:v", u"North");
+    assertXPathContent(pSecond, gaChartSeries + "/c:val/c:numLit/c:pt[1]/c:v", u"55");
+    // The c:f of the two series' names, and no other.
+    assertXPath(pSecond, "//c:f", 2);
+}
+
+// Code review: a chart copied through storage (a duplicated slide, a cut and
+// paste) keeps its workbook's name but no c:f. With its original gone, nothing linked that
+// workbook first, and the copy linked it with our own range names as c:f.
+CPPUNIT_TEST_FIXTURE(SdOOXMLExportTest4, testChartWorkbookUnlinkedWhenCopied)
+{
+    createSdImpressDoc("pptx/chart-workbooks.pptx");
+    uno::Reference<drawing::XDrawPageDuplicator> xDuplicator(mxComponent, uno::UNO_QUERY_THROW);
+    xDuplicator->duplicate(getPage(0));
+    uno::Reference<drawing::XDrawPagesSupplier> xPagesSupplier(mxComponent, uno::UNO_QUERY_THROW);
+    xPagesSupplier->getDrawPages()->remove(getPage(0));
+    CPPUNIT_ASSERT_EQUAL(sal_Int32(1), xPagesSupplier->getDrawPages()->getCount());
+    save(TestFilter::PPTX);
+
+    // Without the fix in place, this test would have failed here: each copy linked its
+    // original's workbook, its c:f "label 0", "categories" and "0".
+    for (sal_Int32 i = 1; i <= 3; ++i)
+        assertXPath(parseExport("ppt/charts/chart" + OUString::number(i) + ".xml"),
+                    "/c:chartSpace/c:externalData", 0);
+}
+
+CPPUNIT_TEST_FIXTURE(SdOOXMLExportTest4, testCool16080_masterKeepsItsPlaceholders)
+{
+    // Given a deck of one master and eleven layouts, so one Impress master page stands for the
+    // whole group:
+    createSdImpressDoc("pptx/master-and-eleven-layouts.pptx");
+    save(TestFilter::PPTX);
+
+    // The master part carries its own placeholders. Without the fix it held a shape tree with
+    // nothing in it, so PowerPoint offered an empty slide master: nothing to inherit from, and
+    // an edit meant for every layout had to be repeated on each of them.
+    xmlDocUniquePtr pMaster = parseExport(u"ppt/slideMasters/slideMaster1.xml"_ustr);
+    static constexpr OString aTree("/p:sldMaster/p:cSld/p:spTree"_ostr);
+    assertXPath(pMaster, aTree + "/p:sp/p:nvSpPr/p:nvPr/p:ph[@type='title']", 1);
+    assertXPath(pMaster, aTree + "/p:sp/p:nvSpPr/p:nvPr/p:ph[@type='dt']", 1);
+    assertXPath(pMaster, aTree + "/p:sp/p:nvSpPr/p:nvPr/p:ph[@type='ftr']", 1);
+    assertXPath(pMaster, aTree + "/p:sp/p:nvSpPr/p:nvPr/p:ph[@type='sldNum']", 1);
+
+    // The body comes from the first layout that has one, since the page standing for the group is
+    // the Title Slide layout and has none. That layout inherits the master's geometry, so the
+    // placeholder lands where the master put it rather than where a layout would.
+    assertXPath(pMaster, aTree + "/p:sp/p:nvSpPr/p:nvPr/p:ph[@type='body']", 1);
+    assertXPath(pMaster, aTree + "/p:sp[p:nvSpPr/p:nvPr/p:ph/@type='body']/p:spPr/a:xfrm/a:off",
+                "y", u"1825560");
+
+    // and it reads across. The first layout with a body is the one the master lists
+    // first; when the layouts came in relationship-id order (rId1, rId10, rId11, rId2 ...), that
+    // was Title and Vertical Text, and its vertical body became the master's, so every layout and
+    // slide inheriting it turned vertical on the next import.
+    assertXPathNoAttribute(
+        pMaster, aTree + "/p:sp[p:nvSpPr/p:nvPr/p:ph/@type='body']/p:txBody/a:bodyPr", "vert");
+}
+
+CPPUNIT_TEST_FIXTURE(SdOOXMLExportTest4, testEng4198_layoutsKeepTheMastersOrder)
+{
+    // Given a deck whose slide master lists eleven layouts, related as rId1 to rId11:
+    createSdImpressDoc("pptx/master-and-eleven-layouts.pptx");
+    save(TestFilter::PPTX);
+
+    // The layouts come back in the master's order. Without the fix the tenth and eleventh, the two
+    // vertical ones, followed the Title Slide, and PowerPoint's layout gallery showed that order.
+    assertXPath(parseExport(u"ppt/slideLayouts/slideLayout1.xml"_ustr), "/p:sldLayout/p:cSld",
+                "name", u"Title Slide");
+    assertXPath(parseExport(u"ppt/slideLayouts/slideLayout2.xml"_ustr), "/p:sldLayout/p:cSld",
+                "name", u"Title and Content");
+}
+
+CPPUNIT_TEST_FIXTURE(SdOOXMLExportTest4, testCool16082_layoutKeepsSubtitle)
+{
+    // Given a deck whose Title Slide layout carries a subtitle placeholder:
+    createSdImpressDoc("pptx/master-and-eleven-layouts.pptx");
+    save(TestFilter::PPTX);
+
+    // The layout keeps it. Without the fix every layout of a master holding more than one lost its
+    // subtitle, so a slide made from the layout afterwards had nowhere to put one.
+    xmlDocUniquePtr pLayout = parseExportedLayoutNamed(u"Title Slide");
+    assertXPath(pLayout, "/p:sldLayout/p:cSld/p:spTree/p:sp/p:nvSpPr/p:nvPr/p:ph[@type='subTitle']",
+                1);
+
+    // The slide master still gets none, which is what PowerPoint refuses the file over.
+    xmlDocUniquePtr pMaster = parseExport(u"ppt/slideMasters/slideMaster1.xml"_ustr);
+    assertXPath(pMaster, "/p:sldMaster/p:cSld/p:spTree/p:sp/p:nvSpPr/p:nvPr/p:ph[@type='subTitle']",
+                0);
+}
+
+CPPUNIT_TEST_FIXTURE(SdOOXMLExportTest4, testCool16079_dateTimeField)
+{
+    // Given a deck whose date placeholders hold an automatically updated date:
+    createSdImpressDoc("pptx/master-and-eleven-layouts.pptx");
+    save(TestFilter::PPTX);
+
+    // The placeholder keeps a field. Without the fix it held our own display string as literal
+    // text, so PowerPoint showed "<date/time>" where the original showed a date. The type is the
+    // one that leaves the format to the reader, which is what a field holding none asks for - the
+    // alias PowerPoint writes here stands for a fixed MM/DD/YYYY.
+    xmlDocUniquePtr pLayout = parseExportedLayoutNamed(u"Title Slide");
+    assertXPath(pLayout, "//p:sp[p:nvSpPr/p:nvPr/p:ph/@type='dt']/p:txBody/a:p/a:fld", "type",
+                u"datetime");
+}
+
+CPPUNIT_TEST_FIXTURE(SdOOXMLExportTest4, testCool16080_layoutShapesStayOffTheMaster)
+{
+    // Given a deck whose first layout paints the whole slide blue, and a slide on another layout:
+    createSdImpressDoc("pptx/layout-own-background.pptx");
+    save(TestFilter::PPTX);
+
+    // An imported master and layout collapse onto one Impress master page, so the page standing
+    // for the group holds the first layout's rectangle - and writing that page's shapes into the
+    // master part painted it under every slide of the deck. The master part writes only
+    // placeholders, and the layout it belongs to still paints it.
+    // (Upstream checks the rendered slide; this port checks the markup that decides it.)
+    xmlDocUniquePtr pMaster = parseExport(u"ppt/slideMasters/slideMaster1.xml"_ustr);
+    assertXPath(pMaster, "/p:sldMaster/p:cSld/p:spTree/p:sp[p:nvSpPr/p:cNvPr/@name='Blue background']",
+                0);
+    xmlDocUniquePtr pLayout = parseExportedLayoutNamed(u"Title Slide");
+    assertXPath(pLayout,
+                "/p:sldLayout/p:cSld/p:spTree/p:sp[p:nvSpPr/p:cNvPr/@name='Blue background']"
+                "/p:spPr/a:solidFill/a:srgbClr",
+                "val", u"0000FF");
+}
+
+// eng4198-master-and-table-styles.pptx is the deck smoke step 2wd generates
+// (infrastructure/vulcan-office/build/smoke-test.sh), shaped as python-pptx's default template
+// writes one: a slide master with p:txStyles (title size 4321, body 2468 and 2000, other 1357)
+// and title, body, date, footer and slide-number placeholders, its eleven layouts related as rId1
+// to rId11, ppt/tableStyles.xml defining one style, ppt/viewProps.xml, and a table on that style
+// (slide 2) and one on the built-in Medium Style 2 - Accent 1 (slide 3), which the part does not
+// define.
+CPPUNIT_TEST_FIXTURE(SdOOXMLExportTest4, testEng4198_masterKeepsItsTextStyles)
+{
+    createSdImpressDoc("pptx/eng4198-master-and-table-styles.pptx");
+    save(TestFilter::PPTX);
+
+    // The master keeps the deck's own title, body and other text styles. Without the fix it had
+    // no p:txStyles, so PowerPoint gave every title, bullet and text box its default size and font.
+    xmlDocUniquePtr pMaster = parseExport(u"ppt/slideMasters/slideMaster1.xml"_ustr);
+    static constexpr OString aStyles("/p:sldMaster/p:txStyles"_ostr);
+    assertXPath(pMaster, aStyles, 1);
+    assertXPath(pMaster, aStyles + "/p:titleStyle/a:lvl1pPr/a:defRPr", "sz", u"4321");
+    assertXPath(pMaster, aStyles + "/p:titleStyle/a:lvl1pPr/a:defRPr/a:latin", "typeface",
+                u"+mj-lt");
+    assertXPath(pMaster, aStyles + "/p:bodyStyle/a:lvl1pPr/a:defRPr", "sz", u"2468");
+    assertXPath(pMaster, aStyles + "/p:bodyStyle/a:lvl1pPr/a:buChar", "char", u"•");
+    assertXPath(pMaster, aStyles + "/p:bodyStyle/a:lvl2pPr/a:defRPr", "sz", u"2000");
+    assertXPath(pMaster, aStyles + "/p:otherStyle/a:lvl1pPr/a:defRPr", "sz", u"1357");
+
+    // With its placeholders, which held nothing before, and their fields
+    static constexpr OString aTree("/p:sldMaster/p:cSld/p:spTree"_ostr);
+    assertXPath(pMaster, aTree + "/p:sp/p:nvSpPr/p:nvPr/p:ph[@type='title']", 1);
+    assertXPath(pMaster, aTree + "/p:sp/p:nvSpPr/p:nvPr/p:ph[@type='body']", 1);
+    assertXPath(pMaster, aTree + "/p:sp/p:nvSpPr/p:nvPr/p:ph[@type='dt']", 1);
+    assertXPath(pMaster, aTree + "/p:sp/p:nvSpPr/p:nvPr/p:ph[@type='ftr']", 1);
+    assertXPath(pMaster, aTree + "/p:sp/p:nvSpPr/p:nvPr/p:ph[@type='sldNum']", 1);
+    assertXPath(pMaster, aTree + "/p:sp/p:nvSpPr/p:nvPr/p:ph[@type='subTitle']", 0);
+    assertXPath(pMaster, aTree + "/p:sp[p:nvSpPr/p:nvPr/p:ph/@type='sldNum']/p:txBody/a:p/a:fld",
+                "type", u"slidenum");
+    assertXPath(pMaster, aTree + "/p:sp[p:nvSpPr/p:nvPr/p:ph/@type='dt']/p:txBody/a:p/a:fld",
+                "type", u"datetime");
+}
+
+CPPUNIT_TEST_FIXTURE(SdOOXMLExportTest4, testEng4198_tablesKeepTheirStyle)
+{
+    createSdImpressDoc("pptx/eng4198-master-and-table-styles.pptx");
+    save(TestFilter::PPTX);
+
+    // The deck's table styles come back as it had them. Without the fix there was no
+    // ppt/tableStyles.xml, so a style the deck defined was gone.
+    xmlDocUniquePtr pStyles = parseExport(u"ppt/tableStyles.xml"_ustr);
+    assertXPath(pStyles, "/a:tblStyleLst", "def", u"{5C22544A-7EE6-4342-B048-85BDC9FD1C3A}");
+    assertXPath(pStyles, "/a:tblStyleLst/a:tblStyle", "styleId",
+                u"{B5C4A3D2-1E0F-4A1B-9C8D-7E6F5A4B3C2D}");
+    xmlDocUniquePtr pRels = parseExport(u"ppt/_rels/presentation.xml.rels"_ustr);
+    assertXPath(pRels, "/rels:Relationships/rels:Relationship[@Target='tableStyles.xml']", "Type",
+                u"http://schemas.openxmlformats.org/officeDocument/2006/relationships/tableStyles");
+    assertXPath(pRels, "/rels:Relationships/rels:Relationship[@Target='viewProps.xml']", "Type",
+                u"http://schemas.openxmlformats.org/officeDocument/2006/relationships/viewProps");
+    xmlDocUniquePtr pTypes = parseExport(u"[Content_Types].xml"_ustr);
+    assertXPath(pTypes, "/ContentType:Types/ContentType:Override[@PartName='/ppt/tableStyles.xml']",
+                "ContentType",
+                u"application/vnd.openxmlformats-officedocument.presentationml.tableStyles+xml");
+
+    // Each table still cites its style, with the parts of it it turns on. Without the fix the
+    // cells kept the style's look as their own formatting, and the table named no style.
+    xmlDocUniquePtr pSlide2 = parseExport(u"ppt/slides/slide2.xml"_ustr);
+    assertXPathContent(pSlide2, "//a:tbl/a:tblPr/a:tableStyleId",
+                       u"{B5C4A3D2-1E0F-4A1B-9C8D-7E6F5A4B3C2D}");
+    assertXPath(pSlide2, "//a:tbl/a:tblPr", "firstRow", u"1");
+    assertXPath(pSlide2, "//a:tbl/a:tblPr", "bandRow", u"1");
+    xmlDocUniquePtr pSlide3 = parseExport(u"ppt/slides/slide3.xml"_ustr);
+    assertXPathContent(pSlide3, "//a:tbl/a:tblPr/a:tableStyleId",
+                       u"{5C22544A-7EE6-4342-B048-85BDC9FD1C3A}");
+
+    // The view properties come back too, with the drawing guides
+    xmlDocUniquePtr pView = parseExport(u"ppt/viewProps.xml"_ustr);
+    assertXPath(pView, "//p:guide[@pos='2879']", 1);
+}
+
+CPPUNIT_TEST_FIXTURE(SdOOXMLExportTest4, testEng4198_duplicatedTableKeepsItsStyle)
+{
+    // A slide duplicated in the editor copies its table, and the copy cites the style too
+    createSdImpressDoc("pptx/eng4198-master-and-table-styles.pptx");
+    uno::Reference<drawing::XDrawPageDuplicator> xDuplicator(mxComponent, uno::UNO_QUERY_THROW);
+    xDuplicator->duplicate(getPage(1));
+    save(TestFilter::PPTX);
+
+    xmlDocUniquePtr pCopy = parseExport(u"ppt/slides/slide3.xml"_ustr);
+    assertXPathContent(pCopy, "//a:tbl/a:tblPr/a:tableStyleId",
+                       u"{B5C4A3D2-1E0F-4A1B-9C8D-7E6F5A4B3C2D}");
+}
+
+CPPUNIT_TEST_FIXTURE(SdOOXMLExportTest4, testEng4198_undefinedTableStyleIsNotCited)
+{
+    // The same deck with a ppt/tableStyles.xml that defines no style, so the table on slide 2
+    // cites a style that is neither built in nor defined (step 2wd generates it too). The import
+    // read past the end of its built-in style list and crashed; sd_filters_test loads it as well.
+    createSdImpressDoc("pptx/pass/eng4198-undefined-table-style.pptx");
+    save(TestFilter::PPTX);
+
+    // The save cites no style it lacks: that table is written on no style, the built-in id stays
+    xmlDocUniquePtr pSlide2 = parseExport(u"ppt/slides/slide2.xml"_ustr);
+    assertXPath(pSlide2, "//a:tbl", 1);
+    assertXPath(pSlide2, "//a:tbl/a:tblPr/a:tableStyleId", 0);
+    xmlDocUniquePtr pSlide3 = parseExport(u"ppt/slides/slide3.xml"_ustr);
+    assertXPathContent(pSlide3, "//a:tbl/a:tblPr/a:tableStyleId",
+                       u"{5C22544A-7EE6-4342-B048-85BDC9FD1C3A}");
 }
 
 CPPUNIT_PLUGIN_IMPLEMENT();

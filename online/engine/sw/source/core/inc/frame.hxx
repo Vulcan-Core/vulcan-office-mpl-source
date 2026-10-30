@@ -615,7 +615,8 @@ public:
         std::optional<Color>& rxColor,
         SwRect &rOrigRect,
         bool bLowerMode,
-        bool bConsiderTextBox ) const;
+        bool bConsiderTextBox,
+        const SwFrame** ppBrushFrame = nullptr ) const;
 
     inline void SetCompletePaint() const;
     inline void ResetCompletePaint() const;

@@ -29,7 +29,9 @@
 #include <com/sun/star/form/binding/XBindableValue.hpp>
 #include <com/sun/star/form/binding/XListEntrySink.hpp>
 #include <com/sun/star/awt/Size.hpp>
+#include <com/sun/star/beans/PropertyValue.hpp>
 #include <com/sun/star/chart/XChartDocument.hpp>
+#include <com/sun/star/io/XOutputStream.hpp>
 
 #include <set>
 #include <vcl/BitmapReadAccess.hxx>
@@ -43,6 +45,7 @@
 
 #include <unonames.hxx>
 #include <convuno.hxx>
+#include <docsh.hxx>
 #include <postit.hxx>
 
 #include <fapihelper.hxx>
@@ -53,6 +56,7 @@
 #include <xelink.hxx>
 #include <xename.hxx>
 #include <xestyle.hxx>
+#include <xlactivex.hxx>
 #include <xllink.hxx>
 #include <xltools.hxx>
 #include <userdat.hxx>
@@ -247,6 +251,26 @@ void lcl_GetFromTo( const XclExpRoot& rRoot, const tools::Rectangle &aRect, sal_
             }
         }
     }
+}
+
+/** The parts the xlsx import kept for an ActiveX control (drawingfragment.cxx,
+    lclKeepActiveXParts), or an empty sequence. */
+Sequence< css::beans::PropertyValue > lcl_GetActiveXStash( const Reference< XShape >& rxShape )
+{
+    Sequence< css::beans::PropertyValue > aGrabBag, aStash;
+    // GetProperty catches: a shape without InteropGrabBag gives false
+    if( ScfPropertySet( rxShape ).GetProperty( aGrabBag, u"InteropGrabBag"_ustr ) )
+    {
+        for( const css::beans::PropertyValue& rProp : aGrabBag )
+        {
+            if( rProp.Name == XclActiveX::STASH )
+            {
+                rProp.Value >>= aStash;
+                break;
+            }
+        }
+    }
+    return aStash;
 }
 
 } // namespace
@@ -472,6 +496,7 @@ void XclExpControlHelper::ConvertSheetLinks( Reference< XShape > const & xShape 
     mxCellLink.reset();
     mxCellLinkAddress.SetInvalid();
     mxSrcRange.reset();
+    moSrcRangeAddress.reset();
     mnEntryCount = 0;
 
     // get control model
@@ -514,6 +539,7 @@ void XclExpControlHelper::ConvertSheetLinks( Reference< XShape > const & xShape 
     {
         ScRange aSrcRange;
         ScUnoConversion::FillScRange( aSrcRange, aApiRange );
+        moSrcRangeAddress = aSrcRange;
         if( (aSrcRange.aStart.Tab() == aSrcRange.aEnd.Tab()) && GetTabInfo().IsExportTab( aSrcRange.aStart.Tab() ) )
             mxSrcRange = GetFormulaCompiler().CreateFormula( EXC_FMLATYPE_CONTROL, aSrcRange );
         mnEntryCount = static_cast< sal_uInt16 >( aSrcRange.aEnd.Col() - aSrcRange.aStart.Col() + 1 );
@@ -1243,6 +1269,93 @@ void VmlFormControlExporter::EndShape(sal_Int32 nShapeElement)
     VMLExport::EndShape(nShapeElement);
 }
 
+/// Handles the VML export of an ActiveX control (ObjectType="Pict"), as Excel writes it.
+class VmlActiveXExporter : public oox::vml::VMLExport
+{
+    OUString m_aName;
+    tools::Rectangle m_aAreaFrom;
+    tools::Rectangle m_aAreaTo;
+    OUString m_aImageRelId;
+    OUString m_aCellLink;
+    OUString m_aListRange;
+    bool m_bPrint;
+
+public:
+    VmlActiveXExporter(const sax_fastparser::FSHelperPtr& p, OUString aName,
+                       const tools::Rectangle& rAreaFrom, const tools::Rectangle& rAreaTo,
+                       OUString aImageRelId, OUString aCellLink, OUString aListRange,
+                       bool bPrint);
+
+protected:
+    using VMLExport::StartShape;
+    sal_Int32 StartShape() override;
+    using VMLExport::EndShape;
+    void EndShape(sal_Int32 nShapeElement) override;
+};
+
+VmlActiveXExporter::VmlActiveXExporter(const sax_fastparser::FSHelperPtr& p, OUString aName,
+                                       const tools::Rectangle& rAreaFrom,
+                                       const tools::Rectangle& rAreaTo, OUString aImageRelId,
+                                       OUString aCellLink, OUString aListRange, bool bPrint)
+    : VMLExport(p)
+    , m_aName(std::move(aName))
+    , m_aAreaFrom(rAreaFrom)
+    , m_aAreaTo(rAreaTo)
+    , m_aImageRelId(std::move(aImageRelId))
+    , m_aCellLink(std::move(aCellLink))
+    , m_aListRange(std::move(aListRange))
+    , m_bPrint(bPrint)
+{
+}
+
+sal_Int32 VmlActiveXExporter::StartShape()
+{
+    // Host control, as VmlFormControlExporter; the id is the control name (VBA binds by it).
+    AddShapeAttribute(XML_type, "#_x0000_t201");
+    AddShapeAttribute(XML_id, m_aName.toUtf8());
+    AddShapeAttribute(XML_stroked, "f");
+    return VMLExport::StartShape();
+}
+
+void VmlActiveXExporter::EndShape(sal_Int32 nShapeElement)
+{
+    sax_fastparser::FSHelperPtr pVmlDrawing = GetFS();
+
+    if (!m_aImageRelId.isEmpty())
+        pVmlDrawing->singleElement(FSNS(XML_v, XML_imagedata), FSNS(XML_o, XML_relid),
+                                   m_aImageRelId, FSNS(XML_o, XML_title), "");
+
+    pVmlDrawing->startElement(FSNS(XML_x, XML_ClientData), XML_ObjectType, "Pict");
+    pVmlDrawing->singleElement(FSNS(XML_x, XML_SizeWithCells));
+    const OString aAnchor
+        = OString::number(m_aAreaFrom.Left()) + ", " + OString::number(m_aAreaFrom.Top()) + ", "
+          + OString::number(m_aAreaFrom.Right()) + ", " + OString::number(m_aAreaFrom.Bottom()) + ", "
+          + OString::number(m_aAreaTo.Left()) + ", " + OString::number(m_aAreaTo.Top()) + ", "
+          + OString::number(m_aAreaTo.Right()) + ", " + OString::number(m_aAreaTo.Bottom());
+    XclXmlUtils::WriteElement(pVmlDrawing, FSNS(XML_x, XML_Anchor), aAnchor);
+    if (!m_bPrint)
+        XclXmlUtils::WriteElement(pVmlDrawing, FSNS(XML_x, XML_PrintObject), "False");
+    XclXmlUtils::WriteElement(pVmlDrawing, FSNS(XML_x, XML_AutoLine), "False");
+    // WriteElement does not escape, and sheet names may hold '&' or '<'
+    if (!m_aCellLink.isEmpty())
+    {
+        pVmlDrawing->startElement(FSNS(XML_x, XML_FmlaLink));
+        pVmlDrawing->writeEscaped(m_aCellLink);
+        pVmlDrawing->endElement(FSNS(XML_x, XML_FmlaLink));
+    }
+    if (!m_aListRange.isEmpty())
+    {
+        pVmlDrawing->startElement(FSNS(XML_x, XML_FmlaRange));
+        pVmlDrawing->writeEscaped(m_aListRange);
+        pVmlDrawing->endElement(FSNS(XML_x, XML_FmlaRange));
+    }
+    XclXmlUtils::WriteElement(pVmlDrawing, FSNS(XML_x, XML_CF), "Pict");
+    pVmlDrawing->singleElement(FSNS(XML_x, XML_AutoPict));
+    pVmlDrawing->singleElement(FSNS(XML_x, XML_MapOCX));
+    pVmlDrawing->endElement(FSNS(XML_x, XML_ClientData));
+    VMLExport::EndShape(nShapeElement);
+}
+
 }
 
 /// Save into xl/drawings/vmlDrawing1.vml.
@@ -1615,6 +1728,304 @@ void XclExpTbxControlObj::SaveSheetXml(XclExpXmlStream& rStrm, const OUString& a
             break;
         }
     }
+}
+
+// ActiveX controls in .xlsx/.xlsm ============================================
+
+bool XclExpOcxXmlControlObj::IsImportedActiveX( Reference< XShape > const & xShape )
+{
+    return lcl_GetActiveXStash( xShape ).hasElements();
+}
+
+XclExpOcxXmlControlObj::XclExpOcxXmlControlObj( XclExpObjectManager& rObjMgr, Reference< XShape > const & xShape,
+        const tools::Rectangle* pChildAnchor ) :
+    XclObj( rObjMgr, EXC_OBJTYPE_PICTURE, true ),
+    XclExpControlHelper( rObjMgr.GetRoot() ),
+    mxShape( xShape ),
+    mnShapeId( 0 ),
+    mnPartId( 0 ),
+    mbPrint( true )
+{
+    Reference< XControlModel > xCtrlModel = XclControlHelper::GetControlModel( xShape );
+    SdrObject* pSdrObj = SdrObject::getSdrObjectFromXShape( xShape );
+    ScfPropertySet aCtrlProp( xCtrlModel );
+    // a control in a group shape, or one without a name, is exported as before
+    if( !xCtrlModel.is() || !pSdrObj || pChildAnchor || !aCtrlProp.GetProperty( maName, u"Name"_ustr ) || maName.isEmpty() )
+        return;
+
+    Sequence< sal_Int8 > aLoadedBin, aLoadedPrint;
+    const Sequence< css::beans::PropertyValue > aStash = lcl_GetActiveXStash( xShape );
+    for( const css::beans::PropertyValue& rProp : aStash )
+    {
+        if( rProp.Name == "Bin" )
+            rProp.Value >>= aLoadedBin;
+        else if( rProp.Name == "Fingerprint" )
+            rProp.Value >>= aLoadedPrint;
+        else if( rProp.Name == "Preview" )
+            rProp.Value >>= maPreview;
+        else if( rProp.Name == "PreviewExt" )
+            rProp.Value >>= maPreviewExt;
+    }
+
+    /*  The loaded binary while the model makes the same bytes it made when it was loaded (the
+        same writer, the same model): it keeps everything the model never held. Otherwise the
+        control as it is now: the user's change wins. A model the writer cannot serialise at all
+        keeps the loaded binary. */
+    rtl::Reference< ScModelObj > xDocModel( GetDocShell() ? GetDocShell()->GetModel() : nullptr );
+    const Sequence< sal_Int8 > aNowPrint = XclActiveX::ExportStream( xDocModel, xCtrlModel, css::awt::Size( 0, 0 ) );
+    if( aLoadedBin.hasElements() && (aNowPrint == aLoadedPrint) )
+        maBinData = aLoadedBin;
+    else if( aNowPrint.hasElements() )
+    {
+        maBinData = XclActiveX::ExportStream( xDocModel, xCtrlModel, xShape->getSize() );
+        maPreview = Sequence< sal_Int8 >();     // drawn from the loaded state: stale now
+    }
+    else if( aLoadedBin.hasElements() )
+        maBinData = aLoadedBin;
+    maClassId = XclActiveX::ClassIdOf( maBinData );
+    if( maClassId.isEmpty() )
+    {
+        maBinData = Sequence< sal_Int8 >();     // IsValid() false: the caller exports the shape as before
+        return;
+    }
+    mbPrint = aCtrlProp.GetBoolProperty( u"Printable"_ustr );
+
+    // OBJ record flags and DFF data, as XclExpOcxControlObj without its metafile: the escher pass
+    // runs for the xlsx export too
+    SetLocked( true );
+    SetPrintable( mbPrint );
+    SetAutoFill( false );
+    SetAutoLine( false );
+
+    mrEscherEx.OpenContainer( ESCHER_SpContainer );
+    mrEscherEx.AddShape( ESCHER_ShpInst_HostControl,
+                         ShapeFlag::HaveShapeProperty | ShapeFlag::HaveAnchor | ShapeFlag::OLEShape );
+    EscherPropertyContainer aPropOpt;
+    aPropOpt.AddOpt( ESCHER_Prop_FitTextToShape,    0x00080008 );   // bool field
+    aPropOpt.AddOpt( ESCHER_Prop_lineColor,         0x08000040 );
+    aPropOpt.AddOpt( ESCHER_Prop_fNoLineDrawDash,   0x00080000 );   // bool field
+    aPropOpt.AddOpt( ESCHER_Prop_wzName, maName );
+    aPropOpt.Commit( mrEscherEx.GetStream() );
+
+    ImplWriteAnchor( pSdrObj, pChildAnchor );
+
+    mrEscherEx.AddAtom( 0, ESCHER_ClientData );                       // OBJ record
+    mrEscherEx.CloseContainer();  // ESCHER_SpContainer
+    mrEscherEx.UpdateDffFragmentEnd();
+
+    // cell link and list source, as the import bound them from the VML (x:FmlaLink, x:FmlaRange)
+    ConvertSheetLinks( xShape );
+}
+
+sal_Int32 XclExpOcxXmlControlObj::GetPartId( XclExpXmlStream& rStrm )
+{
+    // the counter drawingN and ctrlPropsN take their N from
+    if( !mnPartId )
+        mnPartId = rStrm.getNewDrawingUniqueId();
+    return mnPartId;
+}
+
+const OUString& XclExpOcxXmlControlObj::GetPreviewTarget( XclExpXmlStream& rStrm )
+{
+    if( maPreviewTarget.isEmpty() && maPreview.hasElements() )
+    {
+        const char* pMediaType = nullptr;
+        if( maPreviewExt == "emf" )
+            pMediaType = "image/x-emf";
+        else if( maPreviewExt == "wmf" )
+            pMediaType = "image/x-wmf";
+        else if( maPreviewExt == "png" )
+            pMediaType = "image/png";
+        else if( (maPreviewExt == "jpeg") || (maPreviewExt == "jpg") )
+            pMediaType = "image/jpeg";
+        else if( maPreviewExt == "gif" )
+            pMediaType = "image/gif";
+        if( pMediaType )
+        {
+            const OUString aName = "activeX" + OUString::number( GetPartId( rStrm ) ) + "." + maPreviewExt;
+            const OUString aPath = "xl/media/" + aName;
+            Reference< css::io::XOutputStream > xOut = rStrm.openFragmentStream( aPath, OUString::createFromAscii( pMediaType ) );
+            if( xOut.is() )
+            {
+                xOut->writeBytes( maPreview );
+                xOut->closeOutput();
+                maPreviewTarget = "../media/" + aName;
+            }
+        }
+    }
+    return maPreviewTarget;
+}
+
+void XclExpOcxXmlControlObj::WriteAnchor( const sax_fastparser::FSHelperPtr& rTarget, bool bDrawingML ) const
+{
+    // the current position: a moved control is written where it is now
+    tools::Rectangle aFrom;
+    tools::Rectangle aTo;
+    if( SdrObject* pObj = SdrObject::getSdrObjectFromXShape( mxShape ) )
+        lcl_GetFromTo( GetRoot(), pObj->GetLogicRect(), GetTab(), aFrom, aTo, /*bInEMU=*/true );
+
+    rTarget->startElement( bDrawingML ? FSNS( XML_xdr, XML_from ) : XML_from );
+    lcl_WriteAnchorVertex( rTarget, aFrom );
+    rTarget->endElement( bDrawingML ? FSNS( XML_xdr, XML_from ) : XML_from );
+    rTarget->startElement( bDrawingML ? FSNS( XML_xdr, XML_to ) : XML_to );
+    lcl_WriteAnchorVertex( rTarget, aTo );
+    rTarget->endElement( bDrawingML ? FSNS( XML_xdr, XML_to ) : XML_to );
+}
+
+// xl/drawings/drawingN.xml: the hidden twin Excel 2010+ writes (XclExpTbxControlObj::SaveXml without txBody)
+void XclExpOcxXmlControlObj::SaveXml( XclExpXmlStream& rStrm )
+{
+    sax_fastparser::FSHelperPtr pDrawing = rStrm.GetCurrentStream();
+
+    pDrawing->startElement( FSNS( XML_mc, XML_AlternateContent ),
+        FSNS( XML_xmlns, XML_mc ), rStrm.getNamespaceURL( OOX_NS( mce ) ) );
+    pDrawing->startElement( FSNS( XML_mc, XML_Choice ),
+        FSNS( XML_xmlns, XML_a14 ), rStrm.getNamespaceURL( OOX_NS( a14 ) ),
+        XML_Requires, "a14" );
+
+    pDrawing->startElement( FSNS( XML_xdr, XML_twoCellAnchor ), XML_editAs, "oneCell" );
+    WriteAnchor( pDrawing, /*bDrawingML=*/true );
+
+    pDrawing->startElement( FSNS( XML_xdr, XML_sp ) );
+    pDrawing->startElement( FSNS( XML_xdr, XML_nvSpPr ) );
+    // hidden: the control is drawn from the VML shape, linked by compatExt/@spid
+    pDrawing->startElement( FSNS( XML_xdr, XML_cNvPr ), XML_id, OString::number( mnShapeId ),
+                            XML_name, maName, XML_hidden, "1" );
+    pDrawing->startElement( FSNS( XML_a, XML_extLst ) );
+    pDrawing->startElement( FSNS( XML_a, XML_ext ), XML_uri, "{63B3BB69-23CF-44E3-9099-C40C66FF867C}" );
+    pDrawing->setAllowXEscape( false );
+    pDrawing->singleElement( FSNS( XML_a14, XML_compatExt ),
+                             XML_spid, "_x0000_s" + OString::number( mnShapeId ) );
+    pDrawing->setAllowXEscape( true );
+    pDrawing->endElement( FSNS( XML_a, XML_ext ) );
+    pDrawing->endElement( FSNS( XML_a, XML_extLst ) );
+    pDrawing->endElement( FSNS( XML_xdr, XML_cNvPr ) );
+    pDrawing->singleElement( FSNS( XML_xdr, XML_cNvSpPr ) );
+    pDrawing->endElement( FSNS( XML_xdr, XML_nvSpPr ) );
+
+    pDrawing->startElement( FSNS( XML_xdr, XML_spPr ) );
+    pDrawing->startElement( FSNS( XML_a, XML_xfrm ) );
+    pDrawing->singleElement( FSNS( XML_a, XML_off ), XML_x, "0", XML_y, "0" );
+    pDrawing->singleElement( FSNS( XML_a, XML_ext ), XML_cx, "0", XML_cy, "0" );
+    pDrawing->endElement( FSNS( XML_a, XML_xfrm ) );
+    pDrawing->startElement( FSNS( XML_a, XML_prstGeom ), XML_prst, "rect" );
+    pDrawing->singleElement( FSNS( XML_a, XML_avLst ) );
+    pDrawing->endElement( FSNS( XML_a, XML_prstGeom ) );
+    pDrawing->endElement( FSNS( XML_xdr, XML_spPr ) );
+    pDrawing->endElement( FSNS( XML_xdr, XML_sp ) );
+
+    pDrawing->singleElement( FSNS( XML_xdr, XML_clientData ) );
+    pDrawing->endElement( FSNS( XML_xdr, XML_twoCellAnchor ) );
+    pDrawing->endElement( FSNS( XML_mc, XML_Choice ) );
+    pDrawing->endElement( FSNS( XML_mc, XML_AlternateContent ) );
+}
+
+// xl/drawings/vmlDrawingN.vml (the current stream: SaveVmlObjects pushed it)
+void XclExpOcxXmlControlObj::SaveVml( XclExpXmlStream& rStrm )
+{
+    SdrObject* pObj = SdrObject::getSdrObjectFromXShape( mxShape );
+    if( !pObj )
+        return;
+
+    tools::Rectangle aFrom;
+    tools::Rectangle aTo;
+    // as XclExpTbxControlObj::SaveVml: x:Anchor is not in EMU
+    lcl_GetFromTo( GetRoot(), pObj->GetLogicRect(), GetTab(), aFrom, aTo );
+
+    const OUString& rPreview = GetPreviewTarget( rStrm );
+    const OUString aImageRelId = rPreview.isEmpty() ? OUString()
+        : rStrm.addRelation( rStrm.GetCurrentStream()->getOutputStream(),
+                             oox::getRelationship( Relationship::IMAGE ), rPreview );
+
+    // formatted here, not in the ctor: GetTab() is set once the object is in the sheet's list
+    const ScAddress::Details aXlA1( formula::FormulaGrammar::CONV_XL_A1 );
+    OUString aCellLink;
+    if( mxCellLinkAddress.IsValid() )
+        aCellLink = mxCellLinkAddress.Format(
+            (mxCellLinkAddress.Tab() == GetTab()) ? ScRefFlags::ADDR_ABS : ScRefFlags::ADDR_ABS_3D,
+            &GetDoc(), aXlA1 );
+    OUString aListRange;
+    if( moSrcRangeAddress )
+        aListRange = moSrcRangeAddress->Format( GetDoc(),
+            (moSrcRangeAddress->aStart.Tab() == GetTab()) ? ScRefFlags::RANGE_ABS : ScRefFlags::RANGE_ABS_3D,
+            aXlA1 );
+
+    VmlActiveXExporter aExporter( rStrm.GetCurrentStream(), maName, aFrom, aTo, aImageRelId,
+                                  aCellLink, aListRange, mbPrint );
+    aExporter.SetSkipwzName( true );  // use XML_id for legacyid, not XML_ID
+    aExporter.OverrideShapeIDGen( true, "_x0000_s"_ostr );
+    aExporter.AddSdrObject( *pObj, /*bIsFollowingTextFlow=*/false, /*eHOri=*/-1,
+                            /*eVOri=*/-1, /*eHRel=*/-1, /*eVRel=*/-1,
+                            /*pWrapAttrList=*/nullptr, /*bOOxmlExport=*/true, mnShapeId );
+}
+
+// the sheet (the current stream) and xl/activeX
+void XclExpOcxXmlControlObj::SaveSheetXml( XclExpXmlStream& rStrm )
+{
+    sax_fastparser::FSHelperPtr pWorksheet = rStrm.GetCurrentStream();
+    const OUString aPart = "activeX" + OUString::number( GetPartId( rStrm ) );
+
+    // xl/activeX/activeXN.xml, related from the sheet
+    const OUString aXmlPath = "xl/activeX/" + aPart + ".xml";
+    const OUString aXmlTarget = "../activeX/" + aPart + ".xml";
+    sax_fastparser::FSHelperPtr pAx = rStrm.CreateOutputStream( aXmlPath, aXmlTarget,
+            pWorksheet->getOutputStream(),
+            "application/vnd.ms-office.activeX+xml",
+            oox::getRelationship( Relationship::CONTROL ),
+            &maControlRelId );
+
+    // xl/activeX/activeXN.bin, related from the activeX part; typed by an Override, so it never
+    // collides with vbaProject.bin's type in an .xlsm
+    const OUString aBinName = aPart + ".bin";
+    const OUString aBinPath = "xl/activeX/" + aBinName;
+    Reference< css::io::XOutputStream > xBin = rStrm.openFragmentStream( aBinPath, u"application/vnd.ms-office.activeX"_ustr );
+    if( xBin.is() )
+    {
+        xBin->writeBytes( maBinData );
+        xBin->closeOutput();
+    }
+    const OUString aBinRelId = rStrm.addRelation( pAx->getOutputStream(),
+            oox::getRelationship( Relationship::ACTIVEXCONTROLBINARY ), aBinName );
+
+    // as DocxExport::WriteActiveXObject, with Excel's persistence
+    pAx->singleElementNS( XML_ax, XML_ocx,
+            FSNS( XML_xmlns, XML_ax ), rStrm.getNamespaceURL( OOX_NS( ax ) ),
+            FSNS( XML_xmlns, XML_r ), rStrm.getNamespaceURL( OOX_NS( officeRel ) ),
+            FSNS( XML_ax, XML_classid ), maClassId,
+            FSNS( XML_ax, XML_persistence ), "persistStreamInit",
+            FSNS( XML_r, XML_id ), aBinRelId );
+
+    const OUString& rPreview = GetPreviewTarget( rStrm );
+    const OUString aPreviewRelId = rPreview.isEmpty() ? OUString()
+        : rStrm.addRelation( pWorksheet->getOutputStream(),
+                             oox::getRelationship( Relationship::IMAGE ), rPreview );
+
+    // Excel 2010+ reads the x14 Choice; the engine's own import skips every x14 Choice
+    // (oox contexthandler2.cxx) and reads the Fallback
+    pWorksheet->startElement( FSNS( XML_mc, XML_AlternateContent ),
+        FSNS( XML_xmlns, XML_mc ), rStrm.getNamespaceURL( OOX_NS( mce ) ) );
+    pWorksheet->startElement( FSNS( XML_mc, XML_Choice ), XML_Requires, "x14" );
+    pWorksheet->startElement( XML_control, XML_shapeId, OString::number( mnShapeId ),
+                              FSNS( XML_r, XML_id ), maControlRelId, XML_name, maName );
+    pWorksheet->startElement( XML_controlPr, XML_defaultSize, "0", XML_autoLine, "0",
+                              XML_print, sax_fastparser::UseIf( "0", !mbPrint ),
+                              FSNS( XML_r, XML_id ), sax_fastparser::UseIf( aPreviewRelId, !aPreviewRelId.isEmpty() ) );
+    pWorksheet->startElement( XML_anchor, XML_moveWithCells, "1" );
+    WriteAnchor( pWorksheet, /*bDrawingML=*/false );
+    pWorksheet->endElement( XML_anchor );
+    pWorksheet->endElement( XML_controlPr );
+    pWorksheet->endElement( XML_control );
+    pWorksheet->endElement( FSNS( XML_mc, XML_Choice ) );
+    pWorksheet->startElement( FSNS( XML_mc, XML_Fallback ) );
+    SaveFallbackXml( rStrm );
+    pWorksheet->endElement( FSNS( XML_mc, XML_Fallback ) );
+    pWorksheet->endElement( FSNS( XML_mc, XML_AlternateContent ) );
+}
+
+void XclExpOcxXmlControlObj::SaveFallbackXml( XclExpXmlStream& rStrm ) const
+{
+    rStrm.GetCurrentStream()->singleElement( XML_control, XML_shapeId, OString::number( mnShapeId ),
+                                             FSNS( XML_r, XML_id ), maControlRelId, XML_name, maName );
 }
 
 //#endif

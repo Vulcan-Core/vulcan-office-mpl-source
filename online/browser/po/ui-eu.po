@@ -5106,7 +5106,7 @@ msgid ""
 "Unlinking citations will prevent Collabora Online from updating citations "
 "and bibliography in this document."
 msgstr ""
-"Aipuak kentzeak Collabora Online-k dokumentu honetako aipamenak eta "
+"Aipuak kentzeak Vulcan Office-k dokumentu honetako aipamenak eta "
 "bibliografia eguneratzea eragotziko du."
 
 #: src/control/HRuler.ts:321
@@ -6670,7 +6670,7 @@ msgstr ""
 #: src/map/handler/Map.VersionBar.js:50
 msgid "Your Collabora Online server needs updating. Version {0} is available."
 msgstr ""
-"Collabora Online zerbitzariak eguneraketa behar du. {0} bertsioa eskuragarri "
+"Vulcan Office zerbitzariak eguneraketa behar du. {0} bertsioa eskuragarri "
 "dago."
 
 #: src/map/handler/Map.WOPI.js:194
@@ -6961,7 +6961,7 @@ msgstr ""
 
 #: welcome/welcome.html%2Bhtml.head.title:9-3
 msgid "Collabora Online Welcome"
-msgstr "Collabora Online-ren ongi etorria"
+msgstr "Vulcan Office-ren ongi etorria"
 
 #: welcome/welcome.html%2Bhtml.body.div.div.div.div.h1:26-7
 msgid "Explore The New {coolversion}"
@@ -6970,7 +6970,7 @@ msgstr "Begiratu {coolversion} berria"
 #: welcome/welcome.html%2Bhtml.body.div.div.div.div.h2:27-7
 #: welcome/welcome.html%2Bhtml.body.div.div.div.div.h2:38-7
 msgid "Collabora Online Development Edition"
-msgstr "Collabora Online Garapen Edizioa"
+msgstr "Vulcan Office Garapen Edizioa"
 
 #: welcome/welcome.html%2Bhtml.body.div.div.div.div.p:28-7
 #, fuzzy
@@ -7001,7 +7001,7 @@ msgid ""
 msgstr ""
 "Begiratu <a target=\"_blank\" href=\"https://www.collaboraonline.com/"
 "code-26-04-release-notes/\">argitalpen-oharrak</a> eta ikasi guztia azken "
-"Collabora Online Garapen Edizioaz, etxeko erabiltzaileei eta talde txikiei "
+"Vulcan Office Garapen Edizioaz, etxeko erabiltzaileei eta talde txikiei "
 "zuzenduta."
 
 #: welcome/welcome.html%2Bhtml.body.div.div.div.div.h1:48-7
@@ -7525,7 +7525,7 @@ msgstr ""
 #~ msgstr "Zerbitzaria birziklatzen ari da eta laster egongo da erabilgarri"
 
 #~ msgid "Oops, there is a problem connecting to Collabora Online : "
-#~ msgstr "Arazo bat dago Collabora Onlinera konektatzean: "
+#~ msgstr "Arazo bat dago Vulcan Officera konektatzean: "
 
 #~ msgid "Number of views"
 #~ msgstr "Ikuste kopurua"

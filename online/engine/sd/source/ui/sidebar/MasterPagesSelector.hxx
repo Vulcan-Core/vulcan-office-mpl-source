@@ -173,6 +173,7 @@ protected:
 
 private:
     css::uno::Reference<css::ui::XSidebar> mxSidebar;
+    bool mbSidebarReadySnapshotSent;
     UpdateTask maUpdateTask;
 
     /** The offset between ValueSet index and MasterPageContainer::Token

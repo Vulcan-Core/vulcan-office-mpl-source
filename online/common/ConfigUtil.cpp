@@ -80,7 +80,7 @@ static const Util::UnorderedStringMap<std::string> DefAppConfig = {
     { "ai.image_size", "" },
     { "ai.model", "" },
     { "allowed_languages", "de_DE en_GB en_US es_ES fr_FR it nl pt_BR pt_PT ru" },
-    { "allow_update_popup", "true" },
+    { "allow_update_popup", "false" },
     { "browser_logging", "false" },
     { "cache_files.path", "cache" },
     { "cache_files.expiry_min", "3000" },
@@ -116,7 +116,7 @@ static const Util::UnorderedStringMap<std::string> DefAppConfig = {
     { "feature_lock.unlock_title", UNLOCK_TITLE },
     { "feature_lock.writer_unlock_highlights", WRITER_UNLOCK_HIGHLIGHTS },
 #endif
-    { "fetch_update_check", "10" },
+    { "fetch_update_check", "0" },
     { "fonts_missing.handling", "log" },
     { "file_server_root_path", "browser/.." },
 #if !MOBILEAPP
@@ -244,6 +244,8 @@ static const Util::UnorderedStringMap<std::string> DefAppConfig = {
     { "per_document.min_time_between_saves_ms", "500" },
     { "per_document.min_time_between_uploads_ms", "5000" },
     { "per_document.redlining_as_comments", "false" },
+    // Vulcan: 0 = no roster/cursor coalescing, i.e. upstream fan-out.
+    { "per_document.view_update_coalesce_ms", "0" },
     { "per_view.custom_os_info", "" },
     { "per_view.idle_timeout_secs", "900" },
     { "per_view.min_saved_message_timeout_secs", "6" },

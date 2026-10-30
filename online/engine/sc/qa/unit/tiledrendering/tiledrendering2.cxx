@@ -22,6 +22,7 @@
 
 #include <sctestviewcallback.hxx>
 #include <docuno.hxx>
+#include <markdata.hxx>
 #include <scmod.hxx>
 #include <sfx2/linkmgr.hxx>
 #include <tabvwsh.hxx>
@@ -515,6 +516,40 @@ CPPUNIT_TEST_FIXTURE(ScTiledRenderingTest, testEditTextPaintStartInTiledMode)
     // the cell, rather than staying at the output area top-left
     const Point aStartPos = pEditView->CalculateTextPaintStartPosition();
     CPPUNIT_ASSERT_EQUAL(pEditView->GetOutputArea().Left() - nVisDocLeft, aStartPos.X());
+}
+
+CPPUNIT_TEST_FIXTURE(ScTiledRenderingTest, testStaleTabSelectedDoesNotGroupSheets)
+{
+    // Given an xlsx that shows its first sheet (activeTab="0") while its second sheet still
+    // carries tabSelected="1", as openpyxl writes it after create_sheet(name, 0):
+    // When loading it in the kit:
+    ScModelObj* pModelObj = createDoc("stale-tab-selected.xlsx");
+    ScTabViewShell* pView = dynamic_cast<ScTabViewShell*>(SfxViewShell::Current());
+    CPPUNIT_ASSERT(pView);
+    ScViewData& rViewData = pView->GetViewData();
+    ScDocument* pDoc = pModelObj->GetDocument();
+
+    // Then the view shows the first sheet, selected alone:
+    CPPUNIT_ASSERT_EQUAL(SCTAB(0), rViewData.GetTabNumber());
+    // Without the accompanying fix in place, this test would have failed with:
+    // - Expected: 1
+    // - Actual  : 2
+    // i.e. the two sheets were grouped, which the editor can neither show nor end.
+    CPPUNIT_ASSERT_EQUAL(SCTAB(1), rViewData.GetMarkData().GetSelectCount());
+
+    // When typing into the shown sheet, only that sheet takes the text (the group wrote it into
+    // the second sheet too):
+    typeCharsInCell("typed", 1, 1, pView, pModelObj);
+    CPPUNIT_ASSERT_EQUAL(u"typed"_ustr, pDoc->GetString(ScAddress(1, 1, 0)));
+    CPPUNIT_ASSERT_EQUAL(u""_ustr, pDoc->GetString(ScAddress(1, 1, 1)));
+
+    // When switching to the second tab, the view shows the second sheet (inside the group,
+    // ScTabControl::SwitchToPageId left it on the first):
+    pModelObj->setPart(1);
+    Scheduler::ProcessEventsToIdle();
+    CPPUNIT_ASSERT_EQUAL(SCTAB(1), rViewData.GetTabNumber());
+    CPPUNIT_ASSERT_EQUAL(SCTAB(1), rViewData.GetMarkData().GetSelectCount());
+    CPPUNIT_ASSERT_EQUAL(SCTAB(1), rViewData.GetMarkData().GetFirstSelected());
 }
 
 CPPUNIT_PLUGIN_IMPLEMENT();

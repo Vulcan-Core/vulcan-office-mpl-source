@@ -25,6 +25,7 @@
 #include <tools/datetime.hxx>
 #include <o3tl/strong_int.hxx>
 
+#include <functional>
 #include <memory>
 #include <vector>
 
@@ -190,6 +191,69 @@ namespace svl::undo::impl
     class LockGuard;
 }
 
+/** Vulcan fork: where one view's own undo (or redo) action sits in a document's
+    shared, multi-view undo stack.
+
+    Co-editing keeps ONE undo stack per document, but an action belongs to the view
+    that made it. Per-user undo (the Google Docs model) lets a view take back its own
+    most recent change even when other views (people, or an AI agent's headless view)
+    edited after it, provided that change can be undone out of order without touching
+    anything done after it. See SfxUndoManager::LookupViewUndo, and
+    docs/architecture/vulcan-office.md, "Per-user undo".
+*/
+struct SfxViewUndoLookup
+{
+    enum class Status
+    {
+        Empty,       ///< nothing to undo (or redo) at all
+        OwnTop,      ///< the next action is the view's own: an ordinary undo
+        Independent, ///< the view's own action sits below others' actions it provably does not touch
+        Blocked,     ///< the view's own action cannot be taken back without touching a later change
+        NothingOwn,  ///< every action on the stack belongs to other views
+        Busy,        ///< a list action is open (an edit is in flight): nothing can be undone now
+        NotMovable   ///< the view's own action is of a kind that is never undone out of order, and
+                     ///< other views' actions sit above it: no other view is to blame
+    };
+    Status eStatus = Status::Empty;
+    /// Independent: the offset of the view's own action from the top of the stack.
+    size_t nOffset = 0;
+    /// Blocked: the view whose later action is in the way. NothingOwn: the view of the top action.
+    /// NotMovable: -1 (the view's own action is the reason, not another view's).
+    ViewShellId nOtherViewId = ViewShellId(-1);
+    /// OwnTop / Independent: how many actions in a row, counted from the top of the stack,
+    /// are the view's own (0 when the top one is another view's).
+    size_t nOwnRun = 0;
+    /// OwnTop / Independent: the view of the first action below that run; -1 when the run
+    /// reaches the bottom of the stack (bOwnRunToBottom).
+    ViewShellId nBelowOwnRunViewId = ViewShellId(-1);
+    /// OwnTop: no other view's action lies below the run.
+    bool bOwnRunToBottom = false;
+
+    bool CanDo() const { return eStatus == Status::OwnTop || eStatus == Status::Independent; }
+
+    /** Vulcan fork: the answer for "Undo N" / "Redo N" (the toolbar's undo list). N > 1 is only
+        ever an in-order undo of the view's own topmost actions, so it must never reach another
+        view's action: it is refused (Blocked, naming the view whose action ends the run) when
+        fewer than N actions from the top are the view's own. A run that reaches the bottom of
+        the stack needs no refusal: the undo just stops there, as it always has. */
+    SfxViewUndoLookup ForCount(size_t nCount) const
+    {
+        if (nCount <= 1 || !CanDo() || nOwnRun >= nCount || bOwnRunToBottom)
+            return *this;
+        SfxViewUndoLookup aRet;
+        aRet.eStatus = Status::Blocked;
+        aRet.nOtherViewId = nBelowOwnRunViewId;
+        return aRet;
+    }
+};
+
+/** Vulcan fork: the dispatch return value of an undo/redo that did nothing, as a JSON string:
+    {"vulcanUndo":{"status":"blocked"|"nothing_own"|"busy"|"not_movable"|"empty","otherViewId":N,"command":"undo"|"redo"}}.
+    The kit (kit/ChildSession.cpp) turns otherViewId into "the AI" / "a person" before anything
+    reaches a browser; it replaces the numeric SID_REPAIRPACKAGE value that made the browser show
+    the stock "Conflict Undo/Redo with multiple users" dialog. */
+SVL_DLLPUBLIC OUString SfxViewUndoLookupToJson(const SfxViewUndoLookup& rLookup, bool bRedo);
+
 struct SfxUndoManager_Data;
 class SVL_DLLPUBLIC SfxUndoManager
 {
@@ -315,6 +379,29 @@ public:
     bool            RemoveOldestUndoAction();
 
     void dumpAsXml(xmlTextWriterPtr pWriter) const;
+
+    /** Vulcan fork: find nViewId's own most recent undo action and decide whether it can be
+        undone now, possibly out of order (see SfxViewUndoLookup).
+
+        Only top-level actions are considered; while a list action is open the answer is Busy.
+        The view's own action M is the topmost one whose GetViewShellId() is nViewId. When other
+        views' actions sit above it, M may be undone out of order only if rCanMove(M) holds and
+        rIndependent(M, F) holds for EVERY other-view action F above it and for every other-view
+        action F on the redo stack. The predicates are the application's knowledge of what
+        an action touches; unknown must mean "not independent".
+
+        The first F that fails is reported as nOtherViewId, nearest to M first. When rCanMove(M)
+        fails the answer is NotMovable: M's own kind is the reason, so no other view is named.
+    */
+    SfxViewUndoLookup LookupViewUndo(
+        ViewShellId nViewId,
+        const std::function<bool(const SfxUndoAction& rMine)>& rCanMove,
+        const std::function<bool(const SfxUndoAction& rMine, const SfxUndoAction& rOther)>& rIndependent) const;
+
+    /** Vulcan fork: redo is per view and IN ORDER only: CanDo() only when the next redo
+        action is nViewId's own. Any new action from any view clears the redo stack, so the
+        only way to be blocked here is another view's undo landing on top of yours. */
+    SfxViewUndoLookup LookupViewRedo(ViewShellId nViewId) const;
 
 protected:
     bool    UndoWithContext( SfxUndoContext& i_context );

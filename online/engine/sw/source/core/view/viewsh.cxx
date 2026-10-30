@@ -2236,8 +2236,37 @@ void SwViewShell::PaintTile(VirtualDevice &rDevice, int contextWidth, int contex
     rDevice.SetMapMode(aMapMode);
 
     // Update scaling of SwEditWin and its sub-widgets, needed for comments.
+    //
+    // VULCAN (R6-12): ...but NEVER in browse mode. In browse mode without
+    // PrtFormat the WINDOW is the text formatter's reference device
+    // (SwViewShell::GetRefDev), so swapping its MapMode to the tile's
+    // rasterisation scale hands that scale to the FORMATTER: the
+    // CheckInvalidForPaint below runs SwLayAction over whatever frames an
+    // edit left invalid (under COKit the eager pass only covers the
+    // tile-sized maVisArea, so after any line-re-breaking edit there always
+    // are some), and a paragraph formatted against the swapped device caches
+    // glyph advances measured at rasterisation scale into its SwParaPortions.
+    // That corruption is SILENT at first -- InvalidateWindows early-returns
+    // while isTiledPainting() -- and every later honest repaint of the region
+    // draws the cached wrong advances: the phone-Writer "canvas tearing"
+    // (paragraphs below an edit collapsing into overprinted glyph bands),
+    // wet-measured on slot-02: one Backspace in a reflowed docx tears; the
+    // same Backspace in page layout does not; fresh tiles re-render torn
+    // (layout-resident); one full browse-mode reformat heals it.
+    //
+    // The earlier fix (9c8551ea63) stopped this swap from TRIGGERING a
+    // reformat; this stops the formatting an edit already owes from running
+    // UNDER it. Skipping the swap loses nothing here: its beneficiaries are
+    // comment sub-widget scaling and chart-edit mouse mapping, neither of
+    // which applies to the phone reflow surface, and the post-paint state is
+    // identical either way (the restore below put the resting zoom back).
+    // In page layout the formatter's reference is the printer/virtual device,
+    // the window's MapMode never reaches formatting, and the swap stays.
+    const SwViewOption* pPaintTileOpts = GetViewOptions();
+    const bool bWindowIsFormattingRef
+        = pPaintTileOpts->getBrowseMode() && !pPaintTileOpts->IsPrtFormat();
     sal_uInt16 nOldZoomValue = 0;
-    if (GetWin() && GetWin()->GetMapMode().GetScaleX() != scaleX)
+    if (GetWin() && !bWindowIsFormattingRef && GetWin()->GetMapMode().GetScaleX() != scaleX)
     {
         double fScale = scaleX;
         SwViewOption aOption(*GetViewOptions());
@@ -2319,18 +2348,113 @@ const Size& SwViewShell::GetBrowseBorder() const
     return maBrowseBorder;
 }
 
+/* VULCAN (R6-15): the browse border in the layout's units, converted against
+ * the FORMATTING reference device rather than whatever output device happens
+ * to be current.
+ *
+ * GetBrowseBorder() is a PIXEL size (SfxViewShell::GetMargin(), 8x12), and
+ * every layout consumer used to convert it with PixelToLogic against a
+ * device of its own choosing -- pRenderContext in SwPageFrame::MakeAll,
+ * GetOut() in SwContentFrame::MakePrtArea, SwFlyFrame::CalcRel,
+ * SwVirtFlyDrawObj::NbcResize and GetBrowseWidth() below. Under COKit that
+ * choice is load-bearing: PaintTile makes mpOut the tile VirtualDevice for
+ * the duration of the paint (UNGATED -- the R6-12 fix, a608cffc9b, guarded
+ * the WINDOW's MapMode, not mpOut), and CheckInvalidForPaint formats
+ * whatever an edit left invalid under it. The tile device's MapMode carries
+ * the tile's rasterisation scale, so a border converted through it swings
+ * with that scale -- 8px is 120 twips through a device at scale 1.0, 50 at
+ * the phone's 2.4, 480 at a zoomed-out tile's 0.25 -- while the resting
+ * layout converts through the mapmode-disabled kit window and gets the raw
+ * pixel value. SwPageFrame::MakeAll adds 2 * border to the page width and
+ * SwContentFrame::MakePrtArea subtracts 2 * border from the paragraph
+ * budget, so page and paragraph widths wobble on nothing but which device
+ * was current when formatting ran; the client's correctForChrome absorbs
+ * that today with a 120-twip hysteresis after watching the chrome overhead
+ * oscillate 584-808. A rasterisation scale is not a formatting change; the
+ * wobble should not exist.
+ *
+ * The conversion therefore goes through GetRefDev() -- in browse mode
+ * without PrtFormat that is the WINDOW, the same reference the text
+ * formatter itself uses for glyph advances, exactly as R6-12 established.
+ * STABILITY across paints, not any particular twip value, is the contract.
+ */
+Size SwViewShell::GetBrowseBorderTwips() const
+{
+    return GetRefDev().PixelToLogic( maBrowseBorder );
+}
+
+/* VULCAN: the single test for "this document is in client-driven reflow".
+ *
+ * Every consumer of the stated browse width has to answer the same question
+ * before it reads the number, and until now each of them spelled the answer
+ * out again (SwRootFrame::ImplCalcBrowseWidth, GetBrowseWidth() below). A
+ * third spelling was about to be added in SwTabFrame::Format, where getting
+ * the predicate a shade wider than the other two would clamp tables in
+ * sessions that never asked for reflow -- so it lives here instead.
+ *
+ * MINLAY rather than 0: a stated width below the layout minimum is not a
+ * narrower reflow, it is a client that sent nonsense, and the fallback is the
+ * right answer for it.
+ */
+bool SwViewShell::hasKitBrowseWidth() const
+{
+    return comphelper::COKit::isActive() && mnKitBrowseWidth > MINLAY;
+}
+
 sal_Int32 SwViewShell::GetBrowseWidth() const
 {
+    /*
+     * VULCAN (Lane W1): under COKit the CLIENT states this width; nothing here
+     * infers it.
+     *
+     * 🔴 THIS FUNCTION WAS THE SECOND, UNCONTROLLED SOURCE OF THE BROWSE WIDTH,
+     * and it survived the fix that removed the first one.
+     * SwRootFrame::ImplCalcBrowseWidth stopped reading VisArea(); this did not,
+     * and it does not even go through VisArea() -- it reads the raw maVisArea
+     * member, so the COKit branch in VisArea() (which returns the root frame's
+     * area) never applied to it.
+     *
+     * Under COKit maVisArea is whatever SwViewShell::PaintTile last passed to
+     * VisPortChgd(), i.e. THE RECTANGLE OF THE LAST TILE PAINTED
+     * (sw/source/core/view/viewsh.cxx, PaintTile). That is a ~256px tile in
+     * twips at the current zoom -- a number with no relationship to the
+     * viewport, that changes as the user scrolls, and that depends on which
+     * view painted last. It reaches the layout as a FLOOR on the page width:
+     *
+     *     // SwPageFrame::MakeAll, sw/source/core/layout/calcmove.cxx
+     *     tools::Long nWidth = ...->GetBrowseWidth();      // root: the client's
+     *     const auto nDefWidth = pSh->GetBrowseWidth();    // this function
+     *     if (nWidth < nDefWidth)
+     *         nWidth = nDefWidth;                          // ... and it wins
+     *
+     * and as the reference width for relative-width flys and tables in browse
+     * mode (fly.cxx, wsfrm.cxx, tabfrm.cxx, htmltbl.cxx). So a phone reflow
+     * could be silently overridden, or a table sized to a tile, by a quantity
+     * the client never stated and cannot see.
+     *
+     * The postit-sidebar arithmetic below is not reachable under COKit either:
+     * it subtracts a desktop sidebar's pixel width from a document-coordinate
+     * rectangle. COOL draws comments client-side.
+     *
+     * Falls through to the stock arithmetic when no client has stated a width
+     * (vote 0 / veto), which is the same fallback ImplCalcBrowseWidth uses and
+     * the same case it was always for.
+     */
+    if (hasKitBrowseWidth())
+        return static_cast<sal_Int32>(mnKitBrowseWidth);
+
     const SwPostItMgr* pPostItMgr = GetPostItMgr();
     if ( pPostItMgr && pPostItMgr->HasNotes() && pPostItMgr->ShowNotes() )
     {
         Size aBorder( maBrowseBorder );
         aBorder.AdjustWidth(maBrowseBorder.Width() );
         aBorder.AdjustWidth(pPostItMgr->GetSidebarWidth(true) + pPostItMgr->GetSidebarBorderWidth(true) );
-        return maVisArea.Width() - GetOut()->PixelToLogic(aBorder).Width();
+        // VULCAN (R6-15): convert against the formatting reference, not the
+        // current device -- see GetBrowseBorderTwips().
+        return maVisArea.Width() - GetRefDev().PixelToLogic(aBorder).Width();
     }
     else
-        return maVisArea.Width() - 2 * GetOut()->PixelToLogic(maBrowseBorder).Width();
+        return maVisArea.Width() - 2 * GetBrowseBorderTwips().Width();
 }
 
 void SwViewShell::InvalidateLayout( bool bSizeChanged )
@@ -2560,7 +2684,21 @@ void SwViewShell::ImplApplyViewOptions( const SwViewOption &rOpt )
         pMyWin->SetMapMode( aMode );
         // if not a reference device (printer) is used for formatting,
         // but the screen, new formatting is needed for zoomfactor changes.
-        if (mpOpt->getBrowseMode() || mpOpt->IsWhitespaceHidden())
+        //
+        // ...except while tiled painting, where the zoom is not the user's
+        // zoom at all: PaintTile swaps in the TILE's rasterisation scale and
+        // swaps it back around a single tile's paint (SwViewShell::PaintTile).
+        // setClientZoom cannot keep the window in step -- it early-returns
+        // without an SfxInPlaceClient, which a plain text document never has --
+        // so the window stays at the initial zoom 100 and the guard there fires
+        // on EVERY tile whenever the client is not at 100%. In browse mode that
+        // turned each tile into two whole-document reformats, so adjacent tiles
+        // were composited from DIFFERENT line-break decisions, and the client
+        // was never told to repaint the earlier ones because InvalidateWindows
+        // early-returns while tiled painting. That is the phone-reflow
+        // overprint. A rasterisation scale must not reformat the document.
+        if ((mpOpt->getBrowseMode() || mpOpt->IsWhitespaceHidden())
+            && !comphelper::COKit::isTiledPainting())
             bReformat = true;
     }
 

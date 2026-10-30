@@ -65,7 +65,9 @@
 #include <sfx2/request.hxx>
 #include <sfx2/viewfrm.hxx>
 #include <sfx2/bindings.hxx>
+#include <sfx2/kit/helper.hxx>
 #include <sfx2/sidebar/Sidebar.hxx>
+#include <comphelper/kit.hxx>
 #include <svx/svxids.hrc>
 #include <svx/svxdlg.hxx>
 #include <svl/intitem.hxx>
@@ -1449,6 +1451,12 @@ void SlotManager::ChangeSlideExclusionState (
     rBindings.Invalidate(SID_HIDE_SLIDE);
     rBindings.Invalidate(SID_SHOW_SLIDE);
     mrSlideSorter.GetModel().GetDocument()->SetChanged();
+
+    // Exclusion is part metadata. Notify every COKit view once after the
+    // complete batch so each client receives one authoritative status update
+    // rather than an intermediate state for every selected slide.
+    if (comphelper::COKit::isActive())
+        KitHelper::notifyDocumentSizeChangedAllViews(pDocument->getUnoModel(), false);
 }
 
 sal_Int32 SlotManager::GetInsertionPosition() const

@@ -18,6 +18,7 @@
  */
 
 #include <sal/log.hxx>
+#include <svtools/htmlout.hxx>
 #include <svx/svdoutl.hxx>
 #include <svx/svdogrp.hxx>
 #include <svx/svdotable.hxx>
@@ -40,12 +41,17 @@ using namespace sdr::table;
 
 namespace
 {
+OUString EscapeHTML(const OUString& rText)
+{
+    return OUString::fromUtf8(HTMLOutFuncs::ConvertStringToHTML(rText));
+}
+
 void CreateTitleDescription(const SdrObject* pObject, OUStringBuffer& rHtml)
 {
     rHtml.append("<h2>");
-    rHtml.append(pObject->GetTitle());
+    rHtml.append(EscapeHTML(pObject->GetTitle()));
     rHtml.append("</h2>\n\r<p>");
-    rHtml.append(pObject->GetDescription());
+    rHtml.append(EscapeHTML(pObject->GetDescription()));
     rHtml.append("</p>\n\r");
 }
 }

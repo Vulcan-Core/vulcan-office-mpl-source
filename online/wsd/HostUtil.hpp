@@ -33,8 +33,15 @@
 class HostUtil
 {
 private:
-    /// Allowed/denied WOPI hosts, if any and if WOPI is enabled.
+    /// Allowed/denied WOPI hosts, if any and if WOPI is enabled. Every entry, from
+    /// every alias group: what a server-to-server request may use.
     static RegexUtil::RegexListMatcher WopiHosts;
+    /// The entries any caller may use: storage.wopi.host, the first host in 'first'
+    /// mode, and alias_groups.group[0]. While storage.wopi.alias_groups[@secondary_groups_internal]
+    /// is true (the default), the hosts and aliases of group[1] and later are left out
+    /// of this list, so only a server-to-server request can reach them. See
+    /// allowedWopiHost().
+    static RegexUtil::RegexListMatcher PublicWopiHosts;
     /// mapping of alias host and port to real host and port
     static std::map<std::string, std::string> AliasHosts;
     /// When group configuration is not defined only the firstHost gets access
@@ -62,7 +69,14 @@ public:
     /// is accessed using different aliases
     static std::string getNewUri(const Poco::URI& uri);
 
-    static bool allowedWopiHost(const std::string& host);
+    /// True iff host (a name or an address) is an allowed WOPI host for this caller.
+    /// serverToServer is the caller's trust, from ClientRequestDispatcher::isServerToServer():
+    /// true only for a request whose TCP peer matches net.post_allow and that carries no
+    /// X-Forwarded-For. A server-to-server caller may use every alias group; any other
+    /// caller only the public entries (see PublicWopiHosts), so a host admitted solely by
+    /// an internal group is refused exactly like an unlisted one. The answer for a host
+    /// the public entries admit does not depend on serverToServer.
+    static bool allowedWopiHost(const std::string& host, bool serverToServer);
 
     static bool isWopiEnabled() { return WopiEnabled; }
 
@@ -77,6 +91,16 @@ public:
 
     static bool isForbiddenKitHost(const std::string& host);
 
+    /// True iff address (a numeric IPv4 or IPv6 address, as net::resolveAddresses()
+    /// returns them) is not a public internet unicast address: unspecified, loopback,
+    /// private (RFC 1918, RFC 6598 shared space, IPv6 unique-local), link-local (where
+    /// the cloud metadata endpoints live), multicast or reserved, including any of those
+    /// carried inside an IPv4-mapped, IPv4-compatible, NAT64 or 6to4 IPv6 address.
+    /// A string that is not an address is non-public too: nothing vouches for it.
+    /// Used to keep an unauthenticated public caller from steering an outbound request
+    /// into the network coolwsd runs in (see FileServerRequestHandler::fetchModels()).
+    static bool isNonPublicAddress(const std::string& address);
+
 private:
     /// parse a single alias from groups of alias_groups, return an empty string if the pattern was invalid
     ///
@@ -86,8 +110,9 @@ private:
     /// invalid my-domain[1
     static std::string parseAlias(const std::string& aliasPattern);
 
-    /// add host to WopiHosts
-    static void addWopiHost(const std::string& host, bool allow);
+    /// add host to WopiHosts, and to PublicWopiHosts unless it is an allowed entry of an
+    /// internal (server-to-server only) alias group. A deny goes to both lists.
+    static void addWopiHost(const std::string& host, bool allow, bool serverToServerOnly = false);
 
     friend class HostUtilTests;
 };

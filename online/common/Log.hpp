@@ -151,6 +151,9 @@ namespace Log
 
     /// Main entry function for all logging
     void log(Level l, const std::string &text);
+    /// Vulcan: LOG_FTL's direct stderr write, which bypasses the logger (and so its
+    /// secret scrub). Writes `text` and std::endl with Vulcan::scrubLogSecrets applied.
+    void fatalToStderr(const std::string& text);
     bool isLogUIEnabled();
     void logUI(Level l, const std::string &text);
     bool isLogUIMerged();
@@ -431,7 +434,9 @@ static constexpr std::size_t skipPathPrefix(const char (&s)[N], std::size_t n = 
 #define LOG_FTL(X)                                                                                 \
     do                                                                                             \
     {                                                                                              \
-        std::cerr << X << std::endl;                                                               \
+        std::ostringstream UNIQUE_VAR(vulcanFtlStderr_);                                           \
+        UNIQUE_VAR(vulcanFtlStderr_) << X;                                                         \
+        Log::fatalToStderr(UNIQUE_VAR(vulcanFtlStderr_).str());                                    \
         if (LOG_CONDITIONAL(FTL, Generic))                                      \
         {                                                                                          \
             LOG_BODY_(FTL, X, logPrefix, LOG_END);  \

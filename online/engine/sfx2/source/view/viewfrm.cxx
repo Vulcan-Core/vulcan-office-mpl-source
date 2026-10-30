@@ -989,6 +989,11 @@ void SfxViewFrame::StateReload_Impl( SfxItemSet& rSet )
     }
 }
 
+bool SfxViewFrame::IsConditionalFastCall( const SfxRequest &rReq )
+{
+    return IsKitPerViewUndoRedo(rReq) || SfxShell::IsConditionalFastCall(rReq);
+}
+
 void SfxViewFrame::ExecHistory_Impl( SfxRequest &rReq )
 {
     // Is there an Undo-Manager on the top Shell?
@@ -1008,16 +1013,37 @@ void SfxViewFrame::ExecHistory_Impl( SfxRequest &rReq )
                 break;
 
             case SID_UNDO:
-                pShUndoMgr->Undo();
-                GetBindings().InvalidateAll(false);
-                bOK = true;
-                break;
-
             case SID_REDO:
-                pShUndoMgr->Redo();
+            {
+                const bool bUndo = rReq.GetSlot() == SID_UNDO;
+                // Vulcan fork: with several views co-editing, this generic path only ever
+                // takes back the calling view's OWN top step (the applications' own shells do
+                // per-view, out-of-order undo). Anything else does nothing and answers why as
+                // JSON -- it must never silently undo another person's (or the AI's) change.
+                if (comphelper::COKit::isActive() && GetViewShell())
+                {
+                    const ViewShellId nViewId = GetViewShell()->GetViewShellId();
+                    const SfxViewUndoLookup aLookup = bUndo
+                        ? pShUndoMgr->LookupViewUndo(
+                              nViewId, [](const SfxUndoAction&) { return false; },
+                              [](const SfxUndoAction&, const SfxUndoAction&) { return false; })
+                        : pShUndoMgr->LookupViewRedo(nViewId);
+                    if (aLookup.eStatus != SfxViewUndoLookup::Status::OwnTop)
+                    {
+                        if (aLookup.eStatus != SfxViewUndoLookup::Status::Empty)
+                            rReq.SetReturnValue(SfxStringItem(rReq.GetSlot(), SfxViewUndoLookupToJson(aLookup, !bUndo)));
+                        rReq.Done();
+                        return;
+                    }
+                }
+                if (bUndo)
+                    pShUndoMgr->Undo();
+                else
+                    pShUndoMgr->Redo();
                 GetBindings().InvalidateAll(false);
                 bOK = true;
                 break;
+            }
 
             case SID_REPEAT:
                 if ( pSh->GetRepeatTarget() )
@@ -1030,8 +1056,15 @@ void SfxViewFrame::ExecHistory_Impl( SfxRequest &rReq )
     {
         // The SW has its own undo in the View
         const SfxPoolItemHolder& rResult(GetViewShell()->ExecuteSlot(rReq));
-        if (rResult)
-            bOK = static_cast<const SfxBoolItem*>(rResult.getItem())->GetValue();
+        // Vulcan fork: a refused per-view undo answers a JSON string (already rReq's return
+        // value), not a bool; keep it rather than overwrite it with "false".
+        if (dynamic_cast<const SfxStringItem*>(rResult.getItem()))
+        {
+            rReq.Done();
+            return;
+        }
+        if (const auto* pBool = dynamic_cast<const SfxBoolItem*>(rResult.getItem()))
+            bOK = pBool->GetValue();
     }
 
     rReq.SetReturnValue( SfxBoolItem( rReq.GetSlot(), bOK ) );
@@ -1069,7 +1102,9 @@ void SfxViewFrame::StateHistory_Impl( SfxItemSet &rSet )
         SfxViewShell *pViewSh = GetViewShell();
         if (pViewSh && pAction->GetViewShellId() != pViewSh->GetViewShellId())
         {
-            rSet.Put(SfxUInt32Item(SID_UNDO, static_cast<sal_uInt32>(SID_REPAIRPACKAGE)));
+            // Vulcan fork: not this view's step to take back: disabled, never the
+            // SID_REPAIRPACKAGE "conflict" state (the browser's stock conflict dialog).
+            rSet.DisableItem(SID_UNDO);
         }
         else
         {
@@ -1085,7 +1120,8 @@ void SfxViewFrame::StateHistory_Impl( SfxItemSet &rSet )
         SfxViewShell *pViewSh = GetViewShell();
         if (pViewSh && pAction->GetViewShellId() != pViewSh->GetViewShellId())
         {
-            rSet.Put(SfxUInt32Item(SID_REDO, static_cast<sal_uInt32>(SID_REPAIRPACKAGE)));
+            // Vulcan fork: disabled, never the SID_REPAIRPACKAGE "conflict" state.
+            rSet.DisableItem(SID_REDO);
         }
         else
         {

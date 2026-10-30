@@ -45,9 +45,11 @@
 #include <Poco/StreamCopier.h>
 #include <Poco/URI.h>
 
+#include <algorithm>
 #include <cassert>
 #include <chrono>
 #include <memory>
+#include <sstream>
 #include <string>
 
 namespace
@@ -154,6 +156,14 @@ WopiStorage::WOPIFileInfo::WOPIFileInfo(const FileInfo& fileInfo, Poco::JSON::Ob
     JsonUtil::findJSONValue(object, "UserFriendlyName", _username);
     JsonUtil::findJSONValue(object, "TemplateSaveAs", _templateSaveAs);
     JsonUtil::findJSONValue(object, "TemplateSource", _templateSource);
+
+    // Vulcan handshake: the host advertises the storage head's
+    // content timestamp beside LastModifiedTime (which it may pin to the live
+    // session's content while an editing session is open). Presence also means
+    // the host parks conflicted saves, enabling conflict-by-reload.
+    std::string vulcanContentHead;
+    JsonUtil::findJSONValue(object, "VulcanContentHead", vulcanContentHead);
+    setVulcanContentHead(vulcanContentHead);
 
     // UserFriendlyName is used as the Author when loading the document.
     // If it's missing, document loading fails. Since the UserFriendlyName
@@ -385,6 +395,10 @@ StorageBase::LockUpdateResult WopiStorage::updateLockState(const Authorization& 
     LOG_DBG(wopiLog << " requesting: " << uriAnonym);
 
     std::string failureReason("Internal error");
+    // Vulcan: carried on the result as the async path does, so 0 means "no answer"
+    // on both paths (it stays 0 on a timeout or a throw) and
+    // DocumentBroker::handleLockResult never takes a refusal for one.
+    unsigned httpStatus = 0;
     try
     {
         std::shared_ptr<http::Session> httpSession =
@@ -406,6 +420,7 @@ StorageBase::LockUpdateResult WopiStorage::updateLockState(const Authorization& 
         }
 
         failureReason = httpResponse->get("X-WOPI-LockFailureReason", "");
+        httpStatus = static_cast<unsigned>(httpResponse->statusLine().statusCode());
 
         const bool unauthorized =
             http::isUnauthorizedStatusCode(httpResponse->statusLine().statusCode());
@@ -421,7 +436,8 @@ StorageBase::LockUpdateResult WopiStorage::updateLockState(const Authorization& 
         failureReason = std::string("Internal error: ") + exc.what();
     }
 
-    return LockUpdateResult(LockUpdateResult::Status::FAILED, lock, std::move(failureReason));
+    return LockUpdateResult(LockUpdateResult::Status::FAILED, lock, std::move(failureReason),
+                            httpStatus);
 }
 
 void WopiStorage::updateLockStateAsync(const Authorization& auth, LockContext& lockCtx,
@@ -511,9 +527,15 @@ void WopiStorage::updateLockStateAsync(const Authorization& auth, LockContext& l
                                  << ", failure reason: [" << failureReason << "] and response: ["
                                  << responseString << ']');
 
+        // The status rides along so DocumentBroker can separate an expired token
+        // (401, recoverable — ask the host for another) from a refusal (403/404,
+        // terminal). This is the only construction site that can yield UNAUTHORIZED:
+        // the synchronous path collapses every non-200 to FAILED.
         return asyncLockStateCallback(
             AsyncLockUpdate(AsyncLockUpdate::State::Error,
-                            LockUpdateResult(status, lock, std::move(failureReason))));
+                            LockUpdateResult(status, lock, std::move(failureReason),
+                                             static_cast<unsigned>(
+                                                 httpResponse->statusLine().statusCode()))));
     };
 
     _lockHttpSession->setFinishedHandler(std::move(finishedCallback));
@@ -654,6 +676,19 @@ std::string WopiStorage::downloadDocument(const Poco::URI& uriObject, const std:
             LOG_TRC("WOPI::GetFile redirect to URI [" << Anonymizer::anonymizeUrl(location) << ']');
 
             Poco::URI redirectUriObject(location);
+
+            // Vetted as the WOPISrc was, with the loading session's trust: an open
+            // redirect on an allowed WOPI host must not turn the download into a read
+            // of any host the editor can reach.
+            if (StorageBase::validate(redirectUriObject, /*takeOwnership=*/false,
+                                      _serverToServer) != StorageBase::StorageType::Wopi)
+            {
+                throw StorageConnectionException(
+                    "WOPI::GetFile [" + uriAnonym +
+                    "] failed: redirected to a host that is not an allowed WOPI host [" +
+                    Anonymizer::anonymizeUrl(location) + ']');
+            }
+
             return downloadDocument(redirectUriObject, uriAnonym, auth, redirectLimit - 1);
         }
         else
@@ -782,6 +817,63 @@ std::size_t WopiStorage::uploadLocalFileToStorageAsync(
                           attribs.isUserModified() ? "true" : "false");
             setWopiHeader(httpRequest, "IsAutosave", attribs.isAutosave() ? "true" : "false");
             setWopiHeader(httpRequest, "IsExitSave", attribs.isExitSave() ? "true" : "false");
+
+            // Vulcan: a raw extension header, absent unless set, as
+            // X-Vulcan-Editors is below.
+            if (attribs.isDeletingInput())
+                httpRequest.set("X-Vulcan-Deleting-Input", "true");
+
+            // Vulcan: tell the host who was editing during the interval this
+            // upload covers, as a JSON array of WOPI UserIds - the sessions that
+            // sent input wsd counts as modifying since our last upload, which is
+            // not the same as "who authored these bytes" (see
+            // StorageBase::Attributes::editors()). This is a Vulcan extension
+            // rather than a WOPI one, hence the raw header name; hosts that don't
+            // know it ignore it, and the header is absent altogether when we have
+            // nobody to report, so requests look exactly as they did before for
+            // every existing host.
+            if (!attribs.editors().empty())
+            {
+                constexpr std::size_t maxEditors = 100;
+                std::ostringstream editorsJson;
+                editorsJson << '[';
+                std::size_t count = 0;
+                for (const std::string& editor : attribs.editors())
+                {
+                    if (count >= maxEditors)
+                    {
+                        LOG_WRN(wopiLog << ": " << attribs.editors().size()
+                                        << " editors since the last upload; reporting only the "
+                                           "first "
+                                        << maxEditors << " in X-Vulcan-Editors");
+                        break;
+                    }
+
+                    // Header values are printable ASCII in practice: a control
+                    // character makes the header unparseable, and a byte >= 0x80
+                    // is ISO-8859-1 per RFC 7230, so UTF-8 in a user id would
+                    // reach the host mojibaked - an id matching no user, silently.
+                    // Skip such an id (and say so) rather than emit one the host
+                    // cannot use. Our hosts' UserIds are ASCII (uuids).
+                    if (std::any_of(editor.begin(), editor.end(),
+                                    [](unsigned char ch)
+                                    { return ch < 0x20 || ch >= 0x7F; }))
+                    {
+                        LOG_WRN(wopiLog << ": ignoring a user id that is not printable ASCII for "
+                                           "X-Vulcan-Editors");
+                        continue;
+                    }
+
+                    if (count)
+                        editorsJson << ',';
+                    editorsJson << '"' << JsonUtil::escapeJSONValue(editor) << '"';
+                    ++count;
+                }
+                editorsJson << ']';
+
+                if (count)
+                    httpRequest.set("X-Vulcan-Editors", editorsJson.str());
+            }
 
             if (attribs.isExitSave())
             {
@@ -1016,6 +1108,13 @@ WopiStorage::handleUploadToStorageResponse(const WopiUploadDetails& details,
                 {
                     result.setResult(StorageBase::UploadResult::Result::DOC_CHANGED);
                 }
+
+                // Vulcan handshake: how the host disposed of the
+                // rejected bytes ("parked"/"duplicate" = safe to reload).
+                std::string vulcanConflictResolution;
+                JsonUtil::findJSONValue(object, "vulcanConflictResolution",
+                                        vulcanConflictResolution);
+                result.setVulcanConflictResolution(vulcanConflictResolution);
             }
             else
             {
@@ -1052,6 +1151,18 @@ WopiStorage::handleUploadToStorageResponse(const WopiUploadDetails& details,
                     << "]: " << responseString);
             result.setResult(StorageBase::UploadResult::Result::FAILED);
             result.setReason(responseString);
+            // Vulcan: the host never answered, and may have stored the
+            // upload (DocumentBroker::handleUploadToStorageFailed): no status
+            // line arrived, or the load balancer answered for it, because the
+            // host's task died, restarted or stalled mid-save (502, 503, 504).
+            // A failure the host answered (a 500, a 423) keeps upstream's alert.
+            const http::StatusCode code = details.httpResponseCode;
+            result.setVulcanNoResponse(
+                http::StatusLine(code).statusCategory() ==
+                    http::StatusLine::StatusCodeClass::Invalid ||
+                code == http::StatusCode::BadGateway ||
+                code == http::StatusCode::ServiceUnavailable ||
+                code == http::StatusCode::GatewayTimeout);
 
             // If we cannot be sure whether we up-loaded successfully eg. we got
             // a timeout then try to recover in DocBroker.
@@ -1063,6 +1174,9 @@ WopiStorage::handleUploadToStorageResponse(const WopiUploadDetails& details,
                 << details.uriAnonym << "]. Error: " << pexc.displayText()
                 << (pexc.nested() ? " (" + pexc.nested()->displayText() + ')' : ""));
         result.setResult(StorageBase::UploadResult::Result::FAILED);
+        // Vulcan: wsd could not read the host's answer, so it cannot
+        // tell whether the host stored the upload: as one it never answered.
+        result.setVulcanNoResponse(true);
     }
     catch (const BadRequestException& exc)
     {

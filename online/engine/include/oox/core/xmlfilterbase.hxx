@@ -262,6 +262,12 @@ public:
     sal_Int32 getNewChartUniqueId() { return ++mnChartCount; }
     sal_Int32 getNewOLEUniqueId() { return ++mnOLECount; }
 
+    /** Records that a chart of this export links the embedded package part rPath (its
+        workbook). False when an earlier chart of this export already linked that part, so that
+        one workbook serves one chart: Word reports a file whose charts share one as corrupt
+        (tdf#168977), and a duplicated slide's chart names its original's workbook. */
+    bool linkChartEmbeddingOnce(const OUString& rPath);
+
 protected:
     virtual css::uno::Reference< css::io::XInputStream >
         implGetInputStream( comphelper::SequenceAsHashMap& rMediaDesc ) const override;

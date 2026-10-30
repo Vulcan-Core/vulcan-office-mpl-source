@@ -102,18 +102,20 @@ void  ViewShell::GetMenuState( SfxItemSet &rSet )
         {
             if(pUndoManager->GetUndoActionCount() != 0)
             {
-                // If another view created the first undo action, prevent redoing it from this view.
-                const SfxUndoAction* pAction = pUndoManager->GetUndoAction();
-                if (pAction->GetViewShellId() != GetViewShellBase().GetViewShellId())
+                // Vulcan fork: per-view undo. Enabled exactly when THIS view has a change of
+                // its own it can take back now, labelled with that change; otherwise
+                // disabled. Never the SID_REPAIRPACKAGE "conflict" state.
+                const SfxViewUndoLookup aLookup = LookupPerViewUndo(*pUndoManager);
+                if (!aLookup.CanDo())
                 {
-                    rSet.Put(SfxUInt32Item(SID_UNDO, static_cast<sal_uInt32>(SID_REPAIRPACKAGE)));
+                    rSet.DisableItem(SID_UNDO);
                 }
                 else
                 {
                     // Set the necessary string like in
                     // sfx2/source/view/viewfrm.cxx ver 1.23 ln 1072 ff.
                     OUString aTmp = SvtResId(STR_UNDO) +
-                        pUndoManager->GetUndoActionComment();
+                        pUndoManager->GetUndoActionComment(aLookup.nOffset);
                     rSet.Put(SfxStringItem(SID_UNDO, aTmp));
                 }
             }
@@ -134,10 +136,11 @@ void  ViewShell::GetMenuState( SfxItemSet &rSet )
     if(pUndoManager->GetRedoActionCount() != 0)
     {
         // If another view created the first undo action, prevent redoing it from this view.
+        // Vulcan fork: disabled, never the SID_REPAIRPACKAGE "conflict" state.
         const SfxUndoAction* pAction = pUndoManager->GetRedoAction();
         if (pAction->GetViewShellId() != GetViewShellBase().GetViewShellId())
         {
-            rSet.Put(SfxUInt32Item(SID_REDO, static_cast<sal_uInt32>(SID_REPAIRPACKAGE)));
+            rSet.DisableItem(SID_REDO);
         }
         else
         {

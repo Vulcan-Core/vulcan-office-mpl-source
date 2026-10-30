@@ -708,43 +708,65 @@ std::string KitQueue::combineTextInput(const StringVector& tokens)
         const std::string queuedMessage(it.data(), it.size());
         StringVector queuedTokens = StringVector::tokenize(it.data(), it.size());
 
-        // If any messages of these types are present before the current ("textinput") message,
-        // no combination is possible.
-        if (queuedTokens.size() == 1 ||
-            (queuedTokens.equals(0, tokens, 0) &&
-             (queuedTokens.equals(1, "key") ||
-              queuedTokens.equals(1, "mouse") ||
-              queuedTokens.equals(1, "removetextcontext") ||
-              queuedTokens.equals(1, "windowkey"))))
+        if (queuedTokens.size() == 1)
+            return std::string();
+
+        // Other sessions' messages neither combine with nor order against
+        // this session's input; keep scanning past them.
+        if (!queuedTokens.equals(0, tokens, 0))
+        {
+            --i;
+            continue;
+        }
+
+        // Any same-session message that is not a combinable textinput is an
+        // ordering barrier. Combining across it would hoist the queued text
+        // to this message's position, i.e. reorder the input to AFTER the
+        // barrier message — e.g. past a queued "commandvalues" fetch, whose
+        // reply would then no longer reflect input the client had already
+        // sent before issuing the fetch. (The previous explicit barrier list
+        // of key/mouse/removetextcontext/windowkey let textinput leapfrog
+        // commandvalues, breaking read-your-writes for the vector renderer.)
+        // Pure viewport/presence chatter neither reads nor mutates the
+        // document, so combining across it cannot violate read-your-writes;
+        // treating it as a barrier would cost burst-combining exactly when
+        // the kit is loaded (typing near the viewport edge interleaves
+        // clientvisiblearea between keystrokes).
+        if (queuedTokens.equals(1, "clientvisiblearea") ||
+            queuedTokens.equals(1, "clientzoom") ||
+            queuedTokens.equals(1, "useractive") ||
+            queuedTokens.equals(1, "userinactive"))
+        {
+            --i;
+            continue;
+        }
+
+        if (!queuedTokens.equals(1, "textinput"))
             return std::string();
 
         std::string queuedId;
         std::string queuedText;
-        if (queuedTokens.equals(0, tokens, 0) &&
-            queuedTokens.equals(1, "textinput") &&
-            COOLProtocol::getTokenString(queuedTokens, "id", queuedId) &&
-            queuedId == id &&
-            COOLProtocol::getTokenString(queuedTokens, "text", queuedText))
-        {
-            // Remove the queued textinput message and combine it with the current one
-            _queue.erase(_queue.begin() + i);
+        if (!COOLProtocol::getTokenString(queuedTokens, "id", queuedId) ||
+            queuedId != id ||
+            !COOLProtocol::getTokenString(queuedTokens, "text", queuedText))
+            return std::string();
 
-            std::string newMsg;
-            newMsg.reserve(it.size() * 2);
-            newMsg.append(queuedTokens[0]);
-            newMsg.append(" textinput id=");
-            newMsg.append(id);
-            newMsg.append(" text=");
-            newMsg.append(queuedText);
-            newMsg.append(text);
+        // Remove the queued textinput message and combine it with the current one
+        _queue.erase(_queue.begin() + i);
 
-            LOG_TRC("Combined [" << queuedMessage << "] with current message to [" << newMsg
-                    << ']');
+        std::string newMsg;
+        newMsg.reserve(queuedMessage.size() + text.size());
+        newMsg.append(queuedTokens[0]);
+        newMsg.append(" textinput id=");
+        newMsg.append(id);
+        newMsg.append(" text=");
+        newMsg.append(queuedText);
+        newMsg.append(text);
 
-            return newMsg;
-        }
+        LOG_TRC("Combined [" << queuedMessage << "] with current message to [" << newMsg
+                << ']');
 
-        --i;
+        return newMsg;
     }
 
     return std::string();
@@ -802,39 +824,53 @@ std::string KitQueue::combineRemoveText(const StringVector& tokens)
         const std::string queuedMessage(it.data(), it.size());
         StringVector queuedTokens = StringVector::tokenize(it.data(), it.size());
 
-        // If any messages of these types are present before the current (removetextcontext)
-        // message, no combination is possible.
-        if (queuedTokens.size() == 1 ||
-            (queuedTokens.equals(0, tokens, 0) &&
-             (queuedTokens.equals(1, "key") ||
-              queuedTokens.equals(1, "mouse") ||
-              queuedTokens.equals(1, "textinput") ||
-              queuedTokens.equals(1, "windowkey"))))
+        if (queuedTokens.size() == 1)
+            return std::string();
+
+        // Other sessions' messages neither combine with nor order against
+        // this session's input; keep scanning past them.
+        if (!queuedTokens.equals(0, tokens, 0))
+        {
+            --i;
+            continue;
+        }
+
+        // Any same-session message that is not a combinable removetextcontext
+        // is an ordering barrier — combining across it would reorder the
+        // delete to after that message (see combineTextInput).
+        // Viewport/presence chatter is combinable-across, everything else
+        // same-session is an ordering barrier (see combineTextInput).
+        if (queuedTokens.equals(1, "clientvisiblearea") ||
+            queuedTokens.equals(1, "clientzoom") ||
+            queuedTokens.equals(1, "useractive") ||
+            queuedTokens.equals(1, "userinactive"))
+        {
+            --i;
+            continue;
+        }
+
+        if (!queuedTokens.equals(1, "removetextcontext"))
             return std::string();
 
         std::string queuedId;
         int queuedBefore = 0;
         int queuedAfter = 0;
-        if (queuedTokens.equals(0, tokens, 0) &&
-            queuedTokens.equals(1, "removetextcontext") &&
-            COOLProtocol::getTokenStringFromMessage(queuedMessage, "id", queuedId) &&
-            queuedId == id &&
-            COOLProtocol::getTokenIntegerFromMessage(queuedMessage, "before", queuedBefore) &&
-            COOLProtocol::getTokenIntegerFromMessage(queuedMessage, "after", queuedAfter))
-        {
-            // Remove the queued removetextcontext message and combine it with the current one
-            _queue.erase(_queue.begin() + i);
+        if (!COOLProtocol::getTokenStringFromMessage(queuedMessage, "id", queuedId) ||
+            queuedId != id ||
+            !COOLProtocol::getTokenIntegerFromMessage(queuedMessage, "before", queuedBefore) ||
+            !COOLProtocol::getTokenIntegerFromMessage(queuedMessage, "after", queuedAfter))
+            return std::string();
 
-            std::string newMsg = queuedTokens[0] + " removetextcontext id=" + id +
-                " before=" + std::to_string(queuedBefore + before) +
-                " after=" + std::to_string(queuedAfter + after);
+        // Remove the queued removetextcontext message and combine it with the current one
+        _queue.erase(_queue.begin() + i);
 
-            LOG_TRC("Combined [" << queuedMessage << "] with current message to [" << newMsg << "]");
+        std::string newMsg = queuedTokens[0] + " removetextcontext id=" + id +
+            " before=" + std::to_string(queuedBefore + before) +
+            " after=" + std::to_string(queuedAfter + after);
 
-            return newMsg;
-        }
+        LOG_TRC("Combined [" << queuedMessage << "] with current message to [" << newMsg << "]");
 
-        --i;
+        return newMsg;
     }
 
     return std::string();

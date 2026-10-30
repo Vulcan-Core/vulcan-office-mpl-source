@@ -13,7 +13,7 @@
  * Toolbar handler
  */
 
-/* global app $ window brandProductName DocUtil GraphicSelection _ */
+/* global app $ window brandProductName DocUtil GraphicSelection RenderManager _ VulcanPdfCanvas */
 
 window.L.Map.include({
 
@@ -137,8 +137,8 @@ window.L.Map.include({
 	},
 
 	downloadAs: function (name, format, options, id) {
-		if (this._fatal) {
-			return;
+		if (this._fatal || !app.socket.connected() || !app.idleHandler._active || (this.uiManager && this.uiManager.isUIBlocked())) {
+			return false;
 		}
 
 		id = id || 'export'; // not any special download, simple export
@@ -146,7 +146,7 @@ window.L.Map.include({
 		if ((id === 'print' && this['wopi'].DisablePrint) ||
 			(id === 'export' && this['wopi'].DisableExport)) {
 			this.hideBusy();
-			return;
+			return false;
 		}
 
 		if (format === undefined || format === null) {
@@ -174,6 +174,7 @@ window.L.Map.include({
 			'id=' + id + ' ' +
 			'format=' + format + ' ' +
 			'options=' + options);
+		return true;
 	},
 
 	print: function (options) {
@@ -247,7 +248,7 @@ window.L.Map.include({
 		}
 	},
 
-	save: function(dontTerminateEdit, dontSaveIfUnmodified, extendedData) {
+	save: function(dontTerminateEdit, dontSaveIfUnmodified, extendedData, beforeClose) {
 		this.fire('updatemodificationindicator', { status: 'SAVING' });
 
 		// Let the native host know a save round-trip has started so
@@ -273,6 +274,10 @@ window.L.Map.include({
 			msg += ' extendedData=' + extendedData;
 		}
 
+		if (beforeClose) {
+			msg += ' beforeClose=1';
+		}
+
 		app.socket.sendMessage(msg);
 	},
 
@@ -286,9 +291,31 @@ window.L.Map.include({
 		}
 	},
 
+	// Returns TRUE when the command was actually put on the wire (or handed to
+	// a surface that will put it there), FALSE when one of the silent-drop
+	// branches below ate it: read posture off the allowlist, a blocking
+	// dialog, a blocked UI. Every legacy caller ignores the return; the agent
+	// bridges (VulcanCalcBridge and siblings) read it, because "dispatched"
+	// acked over a command this function dropped on the floor is exactly the
+	// fabricated success the LE-1 probe measured — a phone-Calc WriteRange in
+	// the Viewing posture acked {cellsWritten:1} in 0-1ms while GoToCell and
+	// EnterString never left the browser.
 	sendUnoCommand: function (command, json, force) {
 		if (command.indexOf('.uno:') < 0 && command.indexOf('vnd.sun.star.script') < 0)
 			console.error('Trying to send uno command without prefix: "' + command + '"');
+
+		// Central command-usage telemetry: this is the single dispatch point
+		// for menubar/toolbar/notebookbar/shortcut uno commands. The recorder
+		// strips any '?' argument payload — command NAME only, plus the
+		// interaction surface and a coarse command family.
+		if (app.telemetry)
+			app.telemetry.recordUnoCommand(command);
+
+		// An edited scan's scan page takes text edits only: its insert tools
+		// (a picture, a shape, a text box) are refused there, with a chip
+		// saying why (VulcanPdfCanvas.refusesCommand).
+		if (typeof VulcanPdfCanvas !== 'undefined' && VulcanPdfCanvas.refusesCommand(command))
+			return false;
 
 		if ((command.startsWith('.uno:Sidebar') && !command.startsWith('.uno:SidebarShow')) ||
 			command.startsWith('.uno:CustomAnimation') || command.startsWith('.uno:ModifyPage') ||
@@ -303,7 +330,7 @@ window.L.Map.include({
 					app.socket.sendMessage('uno .uno:SidebarShow');
 
 					this.sidebar.setupTargetDeck(command);
-					return;
+					return true;
 				}
 			}
 		}
@@ -316,9 +343,64 @@ window.L.Map.include({
 			'.uno:ToolbarMode?Mode:string=notebookbar_online.ui', '.uno:ToolbarMode?Mode:string=Default',
 			'.uno:ExportToEPUB', '.uno:ExportToPDF', '.uno:ExportDirectToPDF', '.uno:MoveKeepInsertMode', '.uno:ShowRuler',
 			'.uno:Navigator', '.uno:GotoPage',
+			// VULCAN (Lane W): web view and its reflow width.
+			//
+			// 🔴 WITHOUT THESE TWO THE WHOLE REFLOW FEATURE IS DEAD IN THE
+			// POSTURE IT EXISTS FOR. The branch below is
+			// `(isEditMode() || isAllowedInReadOnly) && ...` and it drops
+			// anything else on the floor SILENTLY -- no error, no log, no
+			// message on the wire. Phone Writer opens in the READ posture
+			// behind an edit FAB (that is what `allowedReadonlyMenus` and the
+			// View menu's readonly gating are for), so a reader tapping
+			// 'Reflow to screen width' would have watched nothing happen, in
+			// exactly the way `.uno:PrintLayout` produced nothing before it.
+			//
+			// Both are view-only. BrowseWidth is a layout hint in twips and
+			// writes no content; BrowseView changes which layout mode the view
+			// renders in, and SwView::ExecViewOptions brackets it in a
+			// save/restore of the document's modified flag.
+			'.uno:BrowseView', '.uno:BrowseWidth',
 			// Selecting does not change the document, so a viewer may use it.
 			// Copy goes through the clipboard path and never reaches here.
-			'.uno:SelectAll'];
+			'.uno:SelectAll',
+			// VULCAN: CELL/RANGE ADDRESSING IN READ POSTURE.
+			//
+			// Same class as SelectAll directly above: GoToCell moves the cell
+			// cursor / marks a block and writes nothing — a viewer can already
+			// do both by tapping and dragging the grid (mouse events never
+			// pass through this gate). Without it, every range-addressed verb
+			// of the Calc agent bridge was dead in the Viewing posture, and
+			// dead in the worst way: `selectRange()` (GoToCell ToPoint) was
+			// dropped HERE, silently, while the `gettextselection` that
+			// follows it rides the socket directly — so Vulcan_ReadRange
+			// answered with the CURRENT selection's text under the name of
+			// the range it was asked for (measured: D2 asked, A8's "405"
+			// returned), and a multi-cell range hung to its 8s timeout
+			// because a 1x1 selection can never shape-match a 5x5 question.
+			'.uno:GoToCell',
+			// VULCAN: TAPPING A LINK IN READ POSTURE.
+			//
+			// 🔴 TWO GATES, ONE OF THEM MISSED. MouseControl's
+			// `vulcanOpenLinkOnReadTap` sends this, and its own first line is
+			// `if (app.map.isEditMode()) return;` -- so it fires ONLY in the
+			// read posture, which is precisely the posture the branch below
+			// drops anything not on this list in. Silently: no error, no log,
+			// nothing on the wire. The feature could not work once, on any
+			// build, in the only posture it runs in.
+			//
+			// The comment at that call site reasons carefully about
+			// `ReadOnlyDoc = TRUE` in svx.sdi -- and that is a real gate, just
+			// a DIFFERENT one. It is the ENGINE's read-only dispatch filter,
+			// on the far side of a socket this message was never put on.
+			// Clearing the far gate says nothing about the near one, which is
+			// the same shape of mistake as [reflow's] BrowseView above.
+			//
+			// `scripts/phone-linktap-check.mjs` records this behaviour as
+			// failing and attributes it to the fixture. It is not the fixture.
+			//
+			// Opening a link mutates nothing, and the engine already declares
+			// it read-only-safe, so allowing it here adds no write surface.
+			'.uno:OpenHyperlinkOnCursor'];
 		if (app.isCommentEditingAllowed()) {
 			allowedCommands.push('.uno:InsertAnnotation','.uno:DeleteCommentThread', '.uno:DeleteAnnotation', '.uno:DeleteNote',
 				'.uno:DeleteComment', '.uno:ReplyComment', '.uno:ReplyToAnnotation', '.uno:PromoteComment', '.uno:ResolveComment',
@@ -360,17 +442,42 @@ window.L.Map.include({
 		}
 
 		if (this.uiManager.isUIBlocked())
-			return;
+			return false;
+		// VULCAN: a half-typed cell is committed (.uno:AcceptFormula) under a
+		// modeless dialog such as Find & Replace, as Enter in the cell would be.
+		// Dropped, the drain's commit held the move on every re-ask
+		// (VulcanEditState.onlyModelessDialogsOpen).
+		var commitUnderModeless = command === '.uno:AcceptFormula'
+			&& window.VulcanEditState
+			&& window.VulcanEditState.onlyModelessDialogsOpen(this);
 		if ((this.dialog.hasOpenedDialog() || (this.jsdialog && this.jsdialog.hasDialogOpened()))
-			&& !command.startsWith('.uno:ToolbarMode') && !force) {
+			&& !command.startsWith('.uno:ToolbarMode') && !force && !commitUnderModeless) {
 			console.debug('Cannot execute: ' + command + ' when dialog is opened.');
 			this.dialog.blinkOpenDialog();
-		} else if ((this.isEditMode() || isAllowedInReadOnly) && !this.messageNeedsToBeRedirected(command)) {
+			return false;
+		} else if (this.isEditMode() || isAllowedInReadOnly) {
+			// Same order as ever: redirection is only consulted for a command
+			// the posture would let through. A redirected command was
+			// re-dispatched through this very function; the redirect IS the
+			// send.
+			if (this.messageNeedsToBeRedirected(command))
+				return true;
+			if (command === '.uno:Undo')
+				this.fire('beforeundocommand');
 			app.socket.sendMessage('uno ' + command + (json ? ' ' + JSON.stringify(json) : ''));
+			// A vector view gets no invalidation for a history command; it
+			// re-requests its parts (see RenderManager.noteHistoryCommandSent).
+			if (command === '.uno:Undo' || command === '.uno:Redo')
+				RenderManager.noteHistoryCommandSent();
 			// user interaction turns off the following of other users
 			if (map.userList && map._docLayer && map._docLayer._viewId)
 				map.userList.followUser(map._docLayer._viewId, /* do instant scroll */ false);
+			return true;
 		}
+		// The read-posture drop. Kept silent for legacy callers (a disabled
+		// toolbar button in the read posture should not console-spam), but no
+		// longer UNKNOWABLE: the return value carries the fact.
+		return false;
 	},
 
 	toggleCommandState: function (unoState) {
@@ -745,7 +852,7 @@ window.L.Map.include({
 		if (window.ThisIsAMobileApp) {
 			productName = window.MobileAppName;
 		} else {
-			productName = (typeof brandProductName !== 'undefined') ? brandProductName : 'Collabora Online Development Edition (unbranded)';
+			productName = (typeof brandProductName !== 'undefined') ? brandProductName : 'Vulcan Office';
 		}
 
 		map.uiManager.showYesNoButton(id + '-box', productName, '', _('OK'), null, null, null, true);
@@ -848,7 +955,67 @@ window.L.Map.include({
 	},
 
 	onFormulaBarFocus: function() {
-		if (window.mode.isSmallScreenDevice() === true) {
+		if (window.mode.isSmallScreenDevice() === true &&
+		    document.documentElement.classList.contains('vulcan-mobile-chrome')) {
+			// Google-Sheets phone chrome (docs/mobile-redesign/02 §2/§3): the
+			// top bar keeps ✓/undo/redo untouched; ✕/✓ appear inside the
+			// bottom-docked formula bar instead. The marker class lets §13-CALC
+			// css collapse the sheet-tab strip while editing so the bar sits
+			// directly above the keyboard.
+			this.formulabar.show('cancelformula');
+			this.formulabar.show('acceptformula');
+			document.documentElement.classList.add('vulcan-formula-editing');
+			// GAP 6 / EX-7: Google shows NO app top bar during a cell edit.
+			// Ours is drawn by the HOST (SPEC-one-topbar; the fork's own
+			// #toolbar-row is already 0px here, §13.2 — so no CSS rule in
+			// this repo can reclaim those px), and the only way to ask for
+			// them is the marker emitPosture already derives its Chrome
+			// field from. Stamping it IS the request, on the SAME channel
+			// immersive read uses rather than a second one.
+			//
+			// CALC ONLY, gated on an explicit doctype term so it is
+			// substitutable: Writer's edit posture keeps its chrome (✓ Done
+			// and the keyboard own the two ends of the screen), and the
+			// §13-WRITER immersion rule reading this same marker is itself
+			// scoped to body[data-doctype='text'], so a Calc stamp cannot
+			// reach it. Inlined at both call sites rather than factored
+			// into a file-level helper: these two methods are lifted and
+			// run standalone by the mocha extraction rigs, where a
+			// module-scope function is a ReferenceError.
+			if (this.getDocType && this.getDocType() === 'spreadsheet') {
+				document.documentElement.classList.add('vulcan-chrome-hidden');
+				if (this.uiManager && this.uiManager.emitPosture)
+					this.uiManager.emitPosture();
+				// The smart toolbars are TOLD the mode, never derive it
+				// (VulcanSmartToolbarMemory 'WHO CALLS modeChanged'): this
+				// is the arrival at FULL EDIT, so the symbol rail opens at
+				// pane 0 unless the trip started inside FULL EDIT too.
+				// Stamped here, in the same task as the class above, because
+				// a reset landing a task later would race a bar's own
+				// restore for the same slot.
+				if (window.VulcanSmartToolbarMemory)
+					window.VulcanSmartToolbarMemory.modeChanged('full-edit');
+				// VO-P-0016 — THE TRANSITION SEAM, and it belongs here for
+				// the same reason the stamp above does. The style rail's
+				// membership keys on the mode (M-0006's text verbs while
+				// editing, RU-34's fourteen sheet verbs otherwise), but its
+				// only trigger is `commandstatechanged`. Entering FULL EDIT
+				// is the synchronous class write a few lines up, with no
+				// guaranteed state event behind it, so without this call the
+				// rail would show the SHEET set for the opening frames of
+				// every edit and swap under the user's finger whenever core
+				// next spoke. TOLD, not derived — the same criterion
+				// VulcanSmartToolbarMemory sets out, and the reason a
+				// VulcanEscape.publish() subscriber is the wrong seam.
+				// refreshRail() is idempotent on the set it already shows.
+				if (this.calcFormatRow && this.calcFormatRow.refreshRail)
+					this.calcFormatRow.refreshRail();
+			}
+			// A live cell edit is a rung on the back ladder (SPEC-back-escape
+			// §4.1 R2), and there is no map event for fx focus, so the host's
+			// depth mirror is refreshed from here.
+			if (window.VulcanEscape) window.VulcanEscape.publish();
+		} else if (window.mode.isSmallScreenDevice() === true) {
 			var mobileTopBar = this.mobileTopBar;
 			mobileTopBar.showItem('undo', false);
 			mobileTopBar.showItem('redo', false);
@@ -866,7 +1033,63 @@ window.L.Map.include({
 	onFormulaBarBlur: function() {
 		var map = this;
 
-		if (window.mode.isSmallScreenDevice() && this.isEditMode()) {
+		if (window.mode.isSmallScreenDevice() &&
+		    document.documentElement.classList.contains('vulcan-mobile-chrome')) {
+			// Counterpart of the vulcan-mobile-chrome branch in
+			// onFormulaBarFocus above (top-bar undo/redo were never hidden).
+			map.formulabar.hide('cancelformula');
+			map.formulabar.hide('acceptformula');
+			// This runs on every route out of a cell edit, including the
+			// one nothing else covers: committing with the soft keyboard's
+			// return key moves the cell cursor, and _onCellCursorMsg fires
+			// 'editorgotfocus' on a cursor move, which lands here through
+			// Map._onEditorGotFocus. So the live-edit marker class can never
+			// be left stranded while a cell sits merely selected.
+			document.documentElement.classList.remove('vulcan-formula-editing');
+			// Every route out of an edit lands here (see the list above), so
+			// this is the ONE clear site for the Return-verb door latch.
+			if (window.VulcanCalcReturnKey) window.VulcanCalcReturnKey.clear();
+			// GAP 6's counterpart, and it is what makes the ask safe: the
+			// same "every route out lands here" property clears the header
+			// request, so it can never be left hidden over a document
+			// nobody is editing. The marker is cleared and the posture
+			// RE-EMITTED — the class alone is inert until a message carries
+			// it out of the frame.
+			if (map.getDocType && map.getDocType() === 'spreadsheet') {
+				document.documentElement.classList.remove('vulcan-chrome-hidden');
+				if (map.uiManager && map.uiManager.emitPosture)
+					map.uiManager.emitPosture();
+				// The other half of the smart-toolbar law: leaving FULL EDIT
+				// forgets the symbol rail's pane. The font bar is NOT reset
+				// with it — since D-0027 it declares all three modes, so the
+				// law's survives() answers true here and its place is held
+				// (RU-35 / M-0027 leg 3c: the reference keeps the offset
+				// across leaving edit). The destination is READ off the
+				// monotone parent —
+				// which this method must never remove, see the ruling below —
+				// rather than assumed to be EDIT-READY: the same 'every route
+				// out lands here' property means a cursor move that engaged
+				// no cell also arrives, and that one lands in FULL VIEW.
+				if (window.VulcanSmartToolbarMemory)
+					window.VulcanSmartToolbarMemory.modeChanged(
+						document.documentElement.classList.contains('vulcan-calc-edit-ready')
+							? 'edit-ready'
+							: 'full-view');
+				// VO-P-0016 — the counterpart of the seam in
+				// onFormulaBarFocus, and it runs AFTER the class removal a
+				// few lines up so refreshRail() reads the mode the user is
+				// arriving IN. Leaving a live edit swaps M-0006's text verbs
+				// back for the fourteen sheet verbs (RU-34: the same set
+				// whatever is selected); without this the bar keeps the
+				// editing seven until core next broadcasts a state.
+				if (map.calcFormatRow && map.calcFormatRow.refreshRail)
+					map.calcFormatRow.refreshRail();
+			}
+			// The counterpart publish for the R2 rung moved to the tail of
+			// this function: it must run AFTER blurField, or the celledit
+			// rung still reads fx.hasFocus() true, the (depth, top) pair
+			// dedupes, and the host keeps ✓ over a dead edit.
+		} else if (window.mode.isSmallScreenDevice() && this.isEditMode()) {
 			var mobileTopBar = map.mobileTopBar;
 			mobileTopBar.showItem('cancelformula', false);
 			mobileTopBar.showItem('acceptformula', false);
@@ -885,15 +1108,150 @@ window.L.Map.include({
 
 		map.formulabar.blurField();
 		$('#addressInput input').blur();
+
+		// The settled-state publish, LAST — after blurField, so the celledit
+		// rung reads dead and the host face flips to the chevron (a publish
+		// before the field blurs deduped into silence: measured zero
+		// EscapeDepth updates across a whole ✓ interaction). publish()
+		// self-gates on the phone chrome; elsewhere this is a no-op.
+		if (window.VulcanEscape) window.VulcanEscape.publish();
 	},
 
 	formulabarBlur: function() {
-		if (!this.uiManager.isAnyDialogOpen())
-			this.focus();
+		if (this.uiManager.isAnyDialogOpen())
+			return;
+		// VULCAN: ON A PHONE, A COMMIT DROPS THE KEYBOARD. Every accept or
+		// cancel of a cell edit funnels through here (docdispatcher
+		// 'acceptformula'/'cancelformula': the formula bar's ✓/✕, the host
+		// header's Done via the VulcanEscape celledit rung, and closeapp's
+		// exit save). The stock bare focus() re-focused the hidden editable
+		// -- which on an iPhone can never blur again (TextInput.blur() is
+		// platform-gated) -- so the keyboard sat over half the grid with no
+		// dismissal affordance at all: the host's swipe-down cannot reach
+		// into the iframe, and the native shell hides the iOS accessory
+		// bar. Google Sheets' grammar is commit -> keyboard down, selection
+		// stays (SPEC-sheets §3.1). The return key's commit-and-advance
+		// never routes through here, so serial data entry keeps its
+		// keyboard. Desktop keeps the stock refocus so typing continues.
+		if (window.mode.isSmallScreenDevice()) {
+			this.focus(false);
+			if (this._textInput && this._textInput.dismissSoftKeyboard)
+				this._textInput.dismissSoftKeyboard();
+			return;
+		}
+		this.focus();
 	},
 
 	formulabarFocus: function() {
 		this.formulabar.focusField();
+	},
+
+	// ONE exit for a phone-Calc cell-edit session (R7 hunt #6/#7). Every
+	// route out of a live edit lands here: ✓/✕ (docdispatcher
+	// acceptformula/cancelformula), the host ✓ Done and closeapp/idle exit
+	// saves (both dispatch acceptformula), and the cursor-move commit
+	// (Map._onEditorGotFocus, dismissKeyboard false — commit-and-advance
+	// keeps typing). Order is the contract:
+	//   1. the cursor mirror drops BEFORE any DOM change. The chrome
+	//      teardown's layout collapse fires map 'resize', and CalcTileLayer's
+	//      resize handler re-arms the whole edit chrome off
+	//      app.file.textCursor.visible — a client mirror stale-true until
+	//      core's 'cursorvisible: false' lands ~50ms later — through
+	//      TextInput.showCursor's formula-bar coupling (the measured 7ms
+	//      zombie re-arm). With the mirror cleared the guard reads false; if
+	//      core KEEPS the edit (invalid formula), its own cursorvisible:true
+	//      re-arms the chrome — the fail-safe direction.
+	//   2. the rail's function face clears with the session, so the next cell
+	//      never opens on the last cell's suggestions. (Core's own hidetip
+	//      route in CanvasTileLayer covers the mid-edit convergence; this
+	//      covers the exits — one seam, and a late hidetip frame lands on an
+	//      already-empty face.)
+	//   3. chrome + blur, with the escape depth published LAST (inside the
+	//      blur handler, after blurField) so the host face flips to chevron.
+	// Off the phone chrome this is exactly the old two-call exit sequence.
+	vulcanEndCellEditSession: function (opts) {
+		var dismissKeyboard = !opts || opts.dismissKeyboard !== false;
+		if (window.mode.isSmallScreenDevice() &&
+		    document.documentElement.classList.contains('vulcan-mobile-chrome') &&
+		    this.formulabar) {
+			app.setCursorVisibility(false);
+			if (this._textInput)
+				this._textInput.hideCursor();
+			this.fire('vulcancalcfunctions', { names: [] });
+		}
+		this.onFormulaBarBlur();
+		if (dismissKeyboard)
+			this.formulabarBlur();
+		// VULCAN: the edit ended with the keyboard kept (the Return
+		// commit-and-advance, a tap on another cell): quick entry holds it
+		// (TextInput.vulcanHoldQuickEntry, B-0099/B-0100/B-0102).
+		else if (this._textInput && this._textInput.vulcanHoldQuickEntry)
+			this._textInput.vulcanHoldQuickEntry();
+	},
+
+	// ── EDIT-READY: the third phone-Calc state, and its ONLY two writers ──
+	//
+	// html.vulcan-calc-edit-ready means "the Calc cell unit is engaged — AT
+	// LEAST edit-ready". It is the monotone PARENT of the live edit, not its
+	// sibling: vulcan-formula-editing is the inner bit, and both are present
+	// in FULL EDIT. That nesting is what buys the grammar for nothing —
+	//   * commit (FULL EDIT -> EDIT-READY) needs NO new code, because
+	//     dropping vulcan-formula-editing at onFormulaBarBlur IS the
+	//     transition;
+	//   * the escape ladder is well-formed for free at depth 2 / 1 / 0, so a
+	//     back out of a double-tap edit lands in EDIT-READY (Sheets'
+	//     behaviour) rather than jumping to FULL VIEW.
+	//
+	// 🔴 onFormulaBarBlur MUST NOT remove this class. A symmetric removal
+	// there is the "helpful" edit that breaks the grammar: it would send
+	// every commit to FULL VIEW instead of EDIT-READY, and it would fire on
+	// the Return commit-and-advance of a serial data-entry run as well.
+	//
+	// These are kept beside onFormulaBarFocus/Blur so the whole Calc state
+	// machine lives in one file, and the three-part guard is written INLINE
+	// at both sites rather than factored into a module-level helper for the
+	// reason onFormulaBarFocus already gives above: these methods are lifted
+	// and run standalone by the mocha extraction rigs, where a module-scope
+	// function is a ReferenceError.
+	//
+	// 🔴 ORDER IS THE CONTRACT: mutate the class, THEN publish. Never the
+	// reverse. VulcanEscape.publish() stamps data-vulcan-top-level BEFORE its
+	// dedupe return and then dedupes on the (depth, top, overlays) triple, so
+	// a publish that runs first writes a stale attribute AND poisons the
+	// dedupe — the corrected value is never re-sent. That exact bug is
+	// already recorded for the celledit rung at the tail of onFormulaBarBlur:
+	// a publish before the field blurred deduped into silence, measured zero
+	// EscapeDepth updates across a whole ✓ interaction.
+	vulcanEnterCalcEditReady: function () {
+		if (!window.mode.isSmallScreenDevice()) return;
+		if (!document.documentElement.classList.contains('vulcan-mobile-chrome')) return;
+		if (!this.getDocType || this.getDocType() !== 'spreadsheet') return;
+		document.documentElement.classList.add('vulcan-calc-edit-ready');
+		// Arrival at EDIT-READY, told to the bars in the same task as the
+		// class (VulcanSmartToolbarMemory 'WHO CALLS modeChanged').
+		if (window.VulcanSmartToolbarMemory)
+			window.VulcanSmartToolbarMemory.modeChanged('edit-ready');
+		if (window.VulcanEscape) window.VulcanEscape.publish();
+	},
+
+	// The single remover, reached from the 'editready' escape rung's pop() —
+	// i.e. the host's ✓ face or its back chevron while EDIT-READY is topmost.
+	// It clears the marker and NOTHING ELSE: it does not drop the cell
+	// selection (Sheets keeps it after ✓, and a pop that also deselected
+	// would be a second, invisible mutation with no marker to describe it).
+	vulcanExitCalcEditReady: function () {
+		if (!window.mode.isSmallScreenDevice()) return;
+		if (!document.documentElement.classList.contains('vulcan-mobile-chrome')) return;
+		if (!this.getDocType || this.getDocType() !== 'spreadsheet') return;
+		document.documentElement.classList.remove('vulcan-calc-edit-ready');
+		// Back to FULL VIEW: the font bar goes off screen, and since D-0027 it
+		// KEEPS its place — it declares FULL VIEW too, so survives() is true
+		// and the law never reaches its forget arm. The next trip into
+		// sheet-edit opens the bar where the user left it (RU-35 / M-0027
+		// leg 3c). Only a reload starts it over.
+		if (window.VulcanSmartToolbarMemory)
+			window.VulcanSmartToolbarMemory.modeChanged('full-view');
+		if (window.VulcanEscape) window.VulcanEscape.publish();
 	},
 
 	formulabarSetDirty: function() {

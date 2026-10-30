@@ -25,7 +25,30 @@ class CalcGridSection extends CanvasSectionObject {
         this.sectionProperties = {
             docLayer: app.map._docLayer,
             strokeStyle: getComputedStyle(document.body).getPropertyValue('--color-calc-grid'),
-			tsManager: null
+			tsManager: null,
+
+			// Vulcan phone: draw the grid at 1 CSS px instead of 1 DEVICE px.
+			//
+			// Canvas units in a section are DEVICE pixels -- CanvasSectionContainer
+			// never calls ctx.scale(), it multiplies every size by app.dpiScale --
+			// so the hairline below is literally one device pixel, i.e. a THIRD of
+			// a CSS pixel on a DPR-3 phone. The header rules framing that grid draw
+			// at CanvasSectionObject.getLineWidth() = app.roundedDpiScale = a full
+			// CSS pixel, so the chrome renders 3x heavier than the data it frames
+			// and the sheet stops reading as tabular data. Google Sheets draws both
+			// at 1 CSS px, with the grid the quieter of the two by COLOUR (#c0c0c0
+			// vs the header's own rules), not by sub-pixel thinness.
+			//
+			// Phone gate: global.js stamps html.vulcan-mobile-chrome iff
+			// !desktopChrome && mode.isSmallScreenDevice(), and isTablet() is
+			// DEFINED as !isSmallScreenDevice() -- so desktop and tablet fail both
+			// halves, keep vulcanPhoneGrid false, and drawHairLine below collapses
+			// to the original fillRect with no change in geometry. Same pair
+			// Control.Header._isVulcanPhoneHeader() and CellSelectionHandleSection
+			// use.
+			vulcanPhoneGrid:
+				!!window.mode.isSmallScreenDevice() &&
+				document.documentElement.classList.contains('vulcan-mobile-chrome'),
         };
 	}
 
@@ -41,6 +64,18 @@ class CalcGridSection extends CanvasSectionObject {
 		var tsManager = this.sectionProperties.tsManager;
 		this.context.strokeStyle = this.sectionProperties.strokeStyle;
 		this.context.lineWidth = 1.0;
+
+		// Thickness of one grid rule, in DEVICE px (see the constructor note).
+		// ROUNDED, not raw app.dpiScale: at a fractional DPR (2.625 / 2.75 are
+		// common Android values) a 2.75-device-px rect antialiases its trailing
+		// edge, and the coverage of that edge changes with every scroll delta --
+		// the grid shimmers through a fling. Whole device pixels on integer
+		// coordinates cannot. This is exactly what getLineWidth() already does
+		// for the headers, so grid and headers now round the same way.
+		var hairWidth = 1;
+		if (this.sectionProperties.vulcanPhoneGrid)
+			hairWidth = Math.max(1, Math.round(app.dpiScale));
+
 		var scale = 1.0;
 		if (tsManager._inZoomAnim && tsManager._zoomFrameScale)
 			scale = tsManager._zoomFrameScale;
@@ -110,7 +145,31 @@ class CalcGridSection extends CanvasSectionObject {
 			var drawHairLine = function(ctx: CanvasRenderingContext2D,
 						    x1: number, y1: number, x2: number, y2: number) {
 				// https://bugzilla.mozilla.org/show_bug.cgi?id=1857185
-				ctx.fillRect(x1, y1, x2 - x1, y2 - y1);
+				var w = x2 - x1;
+				var h = y2 - y1;
+
+				// Widen only the axis the CALLER made exactly one device pixel
+				// thick: the vertical site passes (xcoord - 1, .., xcoord, ..)
+				// and the horizontal one (.., pos - 1, .., pos). Grow away from
+				// x2/y2, which is the cell boundary, so the rule keeps the
+				// device-pixel edge it already sat on rather than creeping into
+				// the neighbouring cell.
+				//
+				// Exact `=== 1` rather than `<= hairWidth` on purpose. In RTL
+				// xTransform mirrors min and max, so the horizontal call's WIDTH
+				// is negative (fillRect accepts that and draws leftwards); a
+				// magnitude test would clamp it to hairWidth and delete every
+				// horizontal rule on an RTL sheet.
+				//
+				// Both coordinates are already integers -- every call site wraps
+				// its position in Math.floor -- so an integer hairWidth keeps the
+				// rect on exact device-pixel boundaries with no antialiasing.
+				// Off the phone hairWidth is 1 and both branches restore the
+				// original x1/w and y1/h byte for byte.
+				if (w === 1) { x1 = x2 - hairWidth; w = hairWidth; }
+				if (h === 1) { y1 = y2 - hairWidth; h = hairWidth; }
+
+				ctx.fillRect(x1, y1, w, h);
 			};
 
 			this.context.fillStyle = this.sectionProperties.strokeStyle;

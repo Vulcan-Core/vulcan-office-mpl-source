@@ -18,7 +18,7 @@ msgstr ""
 #. App name - 50 chars limit
 #: descriptions/google-play.html%2Bhtml.body.h3:5-1
 msgid "Collabora Office: LibreOffice, OpenOffice & more"
-msgstr "Collabora Office: LibreOffice, OpenOffice & hơn"
+msgstr "Vulcan Office: Vulcan Office, OpenOffice & hơn"
 
 #. Short description - 80 chars limit
 #: descriptions/google-play.html%2Bhtml.body.p:9-1
@@ -26,7 +26,7 @@ msgid ""
 "LibreOffice based editor for Microsoft Office, LibreOffice and OpenOffice "
 "docs."
 msgstr ""
-"Trình chỉnh sửa dựa trên LibreOffice cho tài liệu Microsoft Office, LO và OO."
+"Trình chỉnh sửa dựa trên Vulcan Office cho tài liệu Microsoft Office, LO và OO."
 
 #. Long description
 #: descriptions/google-play.html%2Bhtml.body.p:13-1
@@ -36,8 +36,8 @@ msgid ""
 "and now it's on Android, enhancing your possibilities to work on mobile and "
 "for collaboration."
 msgstr ""
-"Collabora Office là chương trình soạn thảo văn bản, bảng tính và trình bày "
-"dựa trên LibreOffice, bộ ứng dụng văn phòng mã nguồn mở phổ biến nhất thế "
+"Vulcan Office là chương trình soạn thảo văn bản, bảng tính và trình bày "
+"dựa trên Vulcan Office, bộ ứng dụng văn phòng mã nguồn mở phổ biến nhất thế "
 "giới - và hiện có trên Android, nâng cao khả năng làm việc trên thiết bị di "
 "động và cộng tác của bạn."
 
@@ -98,10 +98,10 @@ msgid ""
 "Windows, Mac, and Linux. This, combined with a new front-end based on "
 "Collabora Online, reads and saves documents similarly to LibreOffice desktop."
 msgstr ""
-"Collabora Office dành cho Android sử dụng công cụ tương tự như LibreOffice "
+"Vulcan Office dành cho Android sử dụng công cụ tương tự như Vulcan Office "
 "dành cho Windows, Mac và Linux. Điều này, kết hợp với giao diện người dùng "
-"mới dựa trên Collabora Online, đọc và lưu tài liệu tương tự như máy tính để "
-"bàn LibreOffice."
+"mới dựa trên Vulcan Office, đọc và lưu tài liệu tương tự như máy tính để "
+"bàn Vulcan Office."
 
 #. Long description
 #: descriptions/google-play.html%2Bhtml.body.p:48-1
@@ -111,7 +111,7 @@ msgid ""
 "developing Android support since 2012, with the help of Google Summer of "
 "Code students Andrzej Hunt, Iain Billet and Kaishu Sahu."
 msgstr ""
-"Các kỹ sư Collabora Tor Lillqvist, Tomaž Vajngerl, Michael Meeks, Miklos "
+"Các kỹ sư Vulcan Office Tor Lillqvist, Tomaž Vajngerl, Michael Meeks, Miklos "
 "Vajna, Jan Holešovský, Mert Tümer, Rashesh Padia và Skyler Grey đã phát "
 "triển hỗ trợ Android từ năm 2012, với sự trợ giúp của các sinh viên Google "
 "Summer of Code Andrzej Hunt, Iain Billet và Kaishu Sahu."

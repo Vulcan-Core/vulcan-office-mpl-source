@@ -43,11 +43,12 @@ describe(['tagmobile', 'tagnextcloud'], 'Insert objects via insertion wizard.', 
 		cy.cGet('.mobile-wizard.ui-text').should('be.visible');
 		// Push insert table button
 		cy.cGet('.inserttablecontrols button').should('be.visible').click();
-		// Table is inserted with the markers shown
-		cy.cGet('.table-column-resize-marker').should('exist');
-		// The marker can render before the table cells are in the document
-		// model, so a bare ctrl+a/copy sequence selects nothing.
+		// Drain core before checking the perimeter or selecting; the table
+		// update can lag the insertion command.
 		helper.processToIdle(this.win);
+		// Phone Writer keeps the desktop perimeter hidden after insertion.
+		cy.cGet('.table-column-resize-marker, .table-row-resize-marker, .table-select-marker, .table-add-col-row-marker')
+			.should('not.exist');
 		helper.typeIntoDocument('{ctrl}a');
 		helper.copy();
 		// Two rows
@@ -67,10 +68,11 @@ describe(['tagmobile', 'tagnextcloud'], 'Insert objects via insertion wizard.', 
 		cy.cGet('.inserttablecontrols #cols .spinfieldcontrols .plus').click();
 		// Push insert table button
 		cy.cGet('.inserttablecontrols button').should('be.visible').click();
-		// Table is inserted with the markers shown
-		cy.cGet('.table-column-resize-marker').should('exist');
-		// Same insert-then-select race as 'Insert default table'.
+		// Same insert-then-update race as 'Insert default table'.
 		helper.processToIdle(this.win);
+		// Phone Writer keeps the desktop perimeter hidden after insertion.
+		cy.cGet('.table-column-resize-marker, .table-row-resize-marker, .table-select-marker, .table-add-col-row-marker')
+			.should('not.exist');
 		helper.typeIntoDocument('{ctrl}a');
 		helper.copy();
 		// Three rows

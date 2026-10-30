@@ -224,6 +224,30 @@ class ViewLayoutNewBase extends ViewLayoutBase {
 			resultingRectangle.pX1 === Number.POSITIVE_INFINITY ||
 			resultingRectangle.pY1 === Number.POSITIVE_INFINITY
 		) {
+			// Equality guard on a handler that writes a value it also reads.
+			//
+			// The retry below only means something if the snap is an actual
+			// change: it sets one axis to 0 and re-runs THIS function against
+			// the same rectangle lists, the same anchor size and the same other
+			// axis. If the axis is already 0 that second pass is bit-identical
+			// to the one that just failed, so it fails again and queues a
+			// third, once per layouting frame, for as long as the document is
+			// open. Nothing in the retry can break the tie, because the retry
+			// is the only thing it changes.
+			//
+			// Losing the retry in that state costs no coverage. Everything that
+			// can turn a non-intersecting view into an intersecting one -- the
+			// rectangles being (re)built, or the canvas changing size -- drives
+			// this function itself: ViewLayoutFileBased.reset() ->
+			// updateViewData() -> commitVisibleAreaAndRequestTiles(), reached
+			// from the 'resize' and 'zoomend' bindings and from
+			// CanvasTileLayer._syncTileContainerSize (CanvasTileLayer.js:4139).
+			const axisOffset =
+				snapAxis === 'x'
+					? this.scrollProperties.viewX
+					: this.scrollProperties.viewY;
+			if (axisOffset === 0) return;
+
 			app.layoutingService.appendLayoutingTask(() => {
 				if (snapAxis === 'x') this.scrollProperties.viewX = 0;
 				else this.scrollProperties.viewY = 0;

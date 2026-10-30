@@ -54,13 +54,12 @@ describe(['tagmobile', 'tagnextcloud', 'tagproxy'], 'Delete Objects', function()
 		cy.cGet('.mobile-wizard.ui-text').should('be.visible');
 		// Push insert table button
 		cy.cGet('.inserttablecontrols button').should('be.visible').click();
-		// Table is inserted with the markers shown
-		cy.cGet('.table-column-resize-marker').should('exist');
-		// The .table-column-resize-marker can render before the table is
-		// fully in the document model, so the immediate ctrl+a may select
-		// nothing and the copy ends in "fallback copy fail". Drain core
-		// first so the document model is settled.
+		// Drain core before checking the perimeter or selecting; the table
+		// update can lag the insertion command.
 		helper.processToIdle(this.win);
+		// Phone Writer keeps the desktop perimeter hidden after insertion.
+		cy.cGet('.table-column-resize-marker, .table-row-resize-marker, .table-select-marker, .table-add-col-row-marker')
+			.should('not.exist');
 		helper.typeIntoDocument('{ctrl}a');
 		helper.copy();
 		// Two rows
@@ -68,20 +67,21 @@ describe(['tagmobile', 'tagnextcloud', 'tagproxy'], 'Delete Objects', function()
 		// Four cells
 		cy.cGet('#copy-paste-container td').should('have.length', 4);
 
-		//delete
-		cy.cGet('.table-select-marker').then(function(item) {
-			const boundingRectangle = item[0].getBoundingClientRect();
-			const x = boundingRectangle.left + boundingRectangle.width / 2;
-			const y = boundingRectangle.top + boundingRectangle.height / 2;
-			cy.cGet('#document-canvas').rightclick(x, y);
-		});
-
-		cy.cGet('.menu-entry-icon.tabledeletemenu').parent()
-			.click()
-			.cGet('.menu-entry-icon.deletetable').parent()
+		// Delete through the deliberate Table surface, not a perimeter handle.
+		mobileHelper.openMobileWizard();
+		cy.cGet('body').contains('.ui-tab', 'Table')
+			.should('be.visible')
 			.click();
+		cy.cGet('#vulcan-table-table-delete-button')
+			.should('be.visible')
+			.click();
+		helper.processToIdle(this.win);
 
-		cy.cGet('.table-column-resize-marker').should('not.exist');
+		cy.cGet('.table-column-resize-marker, .table-row-resize-marker, .table-select-marker, .table-add-col-row-marker')
+			.should('not.exist');
+		cy.getFrameWindow()
+			.its('app.map.context.contexts')
+			.should('not.include', 'Table');
 	});
 
 	it('Delete Fontwork', function() {

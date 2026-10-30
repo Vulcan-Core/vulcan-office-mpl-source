@@ -172,6 +172,16 @@ void PDFWriterImpl::implWriteBitmapEx( const Point& i_rPoint, const Size& i_rSiz
     bool bUseJPGCompression = !i_rContext.m_bOnlyLosslessCompression;
     if ( bIsPng || ( aSizePixel.Width() < 32 ) || ( aSizePixel.Height() < 32 ) )
         bUseJPGCompression = false;
+    // Never JPEG for a bilevel picture (a two-entry palette: a fax or a
+    // black-and-white scan the importer kept bilevel): the 1-bit Flate the
+    // bitmap path writes is lossless and usually smaller.
+    if ( bUseJPGCompression && aBitmap.getPixelFormat() == vcl::PixelFormat::N8_BPP )
+    {
+        BitmapScopedReadAccess pBilevelAccess(aBitmap);
+        if ( pBilevelAccess && pBilevelAccess->HasPalette()
+             && pBilevelAccess->GetPaletteEntryCount() == 2 )
+            bUseJPGCompression = false;
+    }
 
     auto   pStrm=std::make_shared<SvMemoryStream>();
     AlphaMask aAlphaMask;
@@ -290,6 +300,70 @@ void PDFWriterImpl::playMetafile( const GDIMetaFile& i_rMtf, vcl::PDFExtOutDevDa
         {
             const MetaAction*    pAction = aMtf.GetAction( i );
             const MetaActionType nType = pAction->GetType();
+
+            // Editable scanned PDFs: the text of a hidden-ink OCR line comes
+            // bracketed (VclMetafileProcessor2D, only when the export asks
+            // for invisible text). Inside the bracket text is written in
+            // render mode 3 (drawLayout) and nothing else draws, including
+            // the stroke, fill and gradient sequences the COMMENT case
+            // would paint on its own; state
+            // actions (font, colour, map mode, clip, push/pop) still play.
+            if( nType == MetaActionType::COMMENT )
+            {
+                const OString& rComment = static_cast<const MetaCommentAction*>(pAction)->GetComment();
+                if( rComment == "VULCAN_INVISIBLE_TEXT_BEGIN" )
+                {
+                    ++m_nInvisibleTextDepth;
+                    i++;
+                    continue;
+                }
+                if( rComment == "VULCAN_INVISIBLE_TEXT_END" )
+                {
+                    if( m_nInvisibleTextDepth > 0 )
+                        --m_nInvisibleTextDepth;
+                    i++;
+                    continue;
+                }
+            }
+            if( m_nInvisibleTextDepth > 0 )
+            {
+                bool bSkip = false;
+                switch( nType )
+                {
+                    case MetaActionType::PIXEL: case MetaActionType::POINT:
+                    case MetaActionType::LINE: case MetaActionType::RECT:
+                    case MetaActionType::ROUNDRECT: case MetaActionType::ELLIPSE:
+                    case MetaActionType::ARC: case MetaActionType::PIE:
+                    case MetaActionType::CHORD: case MetaActionType::POLYGON:
+                    case MetaActionType::POLYLINE: case MetaActionType::POLYPOLYGON:
+                    case MetaActionType::GRADIENT: case MetaActionType::GRADIENTEX:
+                    case MetaActionType::HATCH: case MetaActionType::Transparent:
+                    case MetaActionType::FLOATTRANSPARENT: case MetaActionType::EPS:
+                    case MetaActionType::BMP: case MetaActionType::BMPSCALE:
+                    case MetaActionType::BMPSCALEPART: case MetaActionType::BMPEX:
+                    case MetaActionType::BMPEXSCALE: case MetaActionType::BMPEXSCALEPART:
+                    case MetaActionType::MASK: case MetaActionType::MASKSCALE:
+                    case MetaActionType::MASKSCALEPART: case MetaActionType::TEXTLINE:
+                    case MetaActionType::WALLPAPER:
+                    // Every other comment too: the COMMENT case below draws
+                    // XPATHSTROKE_SEQ_BEGIN, XPATHFILL_SEQ_BEGIN and
+                    // XGRAD_SEQ_BEGIN sequences itself (DrawPolyLine,
+                    // DrawPolyPolygon, DrawGradient) and then skips to their
+                    // END. Dropping the BEGIN here leaves only the sequence's
+                    // replacement actions, which are drawing actions and are
+                    // dropped above, and its state actions, which still play.
+                    case MetaActionType::COMMENT:
+                        bSkip = true;
+                        break;
+                    default:
+                        break;
+                }
+                if( bSkip )
+                {
+                    i++;
+                    continue;
+                }
+            }
 
             switch( nType )
             {

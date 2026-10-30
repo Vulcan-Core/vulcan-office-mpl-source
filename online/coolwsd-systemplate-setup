@@ -8,7 +8,7 @@ test $# -eq 2 || { echo "Usage: $0 <chroot template directory for system libs to
 # First parameter is the pathname where this script will create the "systemplate" tree
 CHROOT=$1
 
-# Second parameter is the instdir directory of the LibreOffice installation to be used
+# Second parameter is the instdir directory of the Vulcan Office engine installation to be used
 INSTDIR=$2
 
 test -d "$INSTDIR" || { echo "$0: No such directory: $INSTDIR"; exit 1; }

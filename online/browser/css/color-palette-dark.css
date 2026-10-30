@@ -1,5 +1,5 @@
 [data-theme='dark'] {
-	/*LibreOffice Colors: https://wiki.documentfoundation.org/Marketing/Branding#Colors
+	/*Stock engine palette colors
 	----------------------------------[to do]*/
 	--blue1-txt-primary-color: 3, 105, 163;
 	--green0-txt-primary-color: 16, 104, 2; /*green1 lacks contrast against white*/
@@ -80,6 +80,9 @@
 	--color-grid-helper-line-solid: #e6e6e6;
 	--color-grid-helper-line-dashed: #191919;
 	--color-smart-guides-helper-line: #f36d4f;
+	--color-shape-handle-fill: #ffffff;
+	--color-shape-handle-stroke: #8f8f8f;
+	--color-shape-selection-frame: #a6a6a6;
 
 	--color-quickfind-border: #444;
 	--scrollbar-color: #c0bfbc transparent;

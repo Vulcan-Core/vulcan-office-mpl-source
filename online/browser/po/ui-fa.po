@@ -5065,7 +5065,7 @@ msgid ""
 "Unlinking citations will prevent Collabora Online from updating citations "
 "and bibliography in this document."
 msgstr ""
-"لغو پیوند نقل‌قول‌ها باعث می‌شود که Collaboran Online نتواند نقل‌قول‌ها و "
+"لغو پیوند نقل‌قول‌ها باعث می‌شود که Vulcan Officen Online نتواند نقل‌قول‌ها و "
 "کتاب‌شناسی را در این سند به‌روزرسانی کند."
 
 #: src/control/HRuler.ts:321
@@ -6894,7 +6894,7 @@ msgstr "{coolversion} جدید را کاوش کنید"
 #: welcome/welcome.html%2Bhtml.body.div.div.div.div.h2:27-7
 #: welcome/welcome.html%2Bhtml.body.div.div.div.div.h2:38-7
 msgid "Collabora Online Development Edition"
-msgstr "نسخه توسعه آنلاین Collabora"
+msgstr "نسخه توسعه آنلاین Vulcan Office"
 
 #: welcome/welcome.html%2Bhtml.body.div.div.div.div.p:28-7
 #, fuzzy
@@ -6924,7 +6924,7 @@ msgid ""
 msgstr ""
 "<a target=\"_blank\" href=\"https://www.collaboraonline.com/"
 "code-26-04-release-notes/\">یادداشت های انتشار</a> را بررسی کنید و همه چیز "
-"را در مورد: جدیدترین توسعه آنلاین Collabora بیاموزید نسخه، با هدف کاربران "
+"را در مورد: جدیدترین توسعه آنلاین Vulcan Office بیاموزید نسخه، با هدف کاربران "
 "خانگی و تیم های کوچک."
 
 #: welcome/welcome.html%2Bhtml.body.div.div.div.div.h1:48-7

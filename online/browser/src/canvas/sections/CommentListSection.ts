@@ -1106,6 +1106,91 @@ export class CommentSection extends CanvasSectionObject {
 		});
 	}
 
+	/*
+		THE phone read route for a comment, shared by all three editors.
+
+		On a small screen there is no comment card in the document at all:
+		Comment.onInitialize appends sectionProperties.container to
+		#document-container only when !isSmallScreenDevice(), because the phone
+		surface for a comment is the mobile wizard. JSDialog.rootCommentControl
+		-> _createComment (Widget.Comment.ts:17-23) re-parents that same
+		container into the sheet and calls show() on it, and
+		createCommentStructure already has a Writer, an Impress AND a Calc arm
+		(createCommentStructureWriter / Impress / Calc), so the wizard is the
+		one surface that can already render a comment for every doctype.
+
+		The consequence, and the reason this method exists: on a phone
+		"select the comment" and "let the user read the comment" are different
+		acts. select() only adds .annotation-active to a detached DOM node and
+		repositions a card nobody can see, so every on-canvas affordance has to
+		perform the second act explicitly. Three call sites did not:
+		  - Calc:    Comment.onMouseUp fell through to onMouseEnter + onClick;
+		  - Writer:  nothing on the canvas was tappable at all;
+		  - Impress: CommentMarkerSubSection.onClick stopped at selectById.
+
+		Unifying on the wizard rather than inventing a phone-only card is
+		deliberate: the host "..." -> Comments entry already drives exactly
+		this surface (Map.WOPI.js Vulcan_OpenComments -> dispatch
+		'comment_wizard'), it is the surface Control.MobileTopBar's comment
+		button toggles, and it is the only one whose reply/edit/resolve
+		controls are already wired for touch. A second card would have had to
+		reimplement all of it and would then disagree with the "..." menu.
+
+		Returns false on desktop and tablet, so callers can keep their
+		unchanged desktop path in the else.
+	*/
+	public openCommentOnPhone (annotation: Comment): boolean {
+		if (!(<any>window).mode.isSmallScreenDevice())
+			return false;
+		if (!annotation || !annotation.sectionProperties.data)
+			return false;
+		// A comment that has not been saved yet is already being authored in
+		// the mobile modal; re-opening the wizard on top of it would close
+		// that editor and lose the text.
+		if (annotation.sectionProperties.data.id === 'new')
+			return false;
+		if (cool.Comment.isAnyEdit())
+			return false;
+
+		app.map._docLayer._openCommentWizard(annotation);
+
+		// _openCommentWizard sets window.commentWizard but knows nothing about
+		// the phone top bar, so without this the bar's comment button stays
+		// unselected and its next tap re-opens instead of closing (the
+		// 'comment_wizard' action toggles on window.commentWizard, which is
+		// now true). mobileTopBar only exists on a small screen.
+		if (this.map.mobileTopBar)
+			this.map.mobileTopBar.selectItem('comment_wizard', true);
+
+		return true;
+	}
+
+	// The comment anchored to the currently selected Calc cell, if any. Used
+	// by the cell context menu so its comment entries act on the same note the
+	// engine enabled them for.
+	public getCalcCommentAtCursor (): Comment | null {
+		if (app.map._docLayer._docType !== 'spreadsheet')
+			return null;
+		if (this.sectionProperties.calcCurrentComment)
+			return this.sectionProperties.calcCurrentComment;
+
+		const cursor = app.calc ? app.calc.cellCursorRectangle : null;
+		if (!cursor)
+			return null;
+
+		for (let i = 0; i < this.sectionProperties.commentList.length; i++) {
+			const comment = this.sectionProperties.commentList[i];
+			const rectangles = comment.sectionProperties.data.rectangles;
+			if (!rectangles || !rectangles.length)
+				continue;
+			if (parseInt(comment.sectionProperties.data.tab) !== app.map._docLayer._selectedPart)
+				continue;
+			if (rectangles[0].containsPoint(cursor.center))
+				return comment;
+		}
+		return null;
+	}
+
 	public save (annotation: any): void {
 		var comment;
 		if (annotation.sectionProperties.data.id === 'new') {
@@ -1206,6 +1291,17 @@ export class CommentSection extends CanvasSectionObject {
 	}
 
 	public reply (annotation: any): void {
+		// Telemetry: reply started — bucketed thread depth only, no content.
+		if (app.telemetry) {
+			let threadDepth = 1;
+			try {
+				threadDepth = 1 + (annotation.sectionProperties.children
+					? annotation.sectionProperties.children.length : 0);
+			} catch (e) { /* best-effort */ }
+			app.telemetry.record('comment_reply', {
+				thread_depth_bucket: VulcanTelemetryService.bucketThreadDepth(threadDepth),
+			});
+		}
 		if (cool.Comment.isAnyEdit()) {
 			this.navigateAndFocusComment(cool.Comment.isAnyEdit());
 			return;
@@ -2104,9 +2200,19 @@ export class CommentSection extends CanvasSectionObject {
 						annotation.focusLost();
 						if (app.map._docLayer._docType === 'spreadsheet')
 							annotation.show();
+						// A refused sheet switch puts the caret back in the draft after
+						// its autosave went out. The comment that replaces
+						// the draft takes the caret and what was typed since.
+						const draftHeldFocus = autoSavedComment.sectionProperties.data.id === 'new'
+							&& autoSavedComment.sectionProperties.container.contains(document.activeElement);
 						if (autoSavedComment.sectionProperties.data.id === 'new')
 							this.removeItem(autoSavedComment.sectionProperties.data.id);
 						annotation.edit();
+						if (draftHeldFocus) {
+							annotation.sectionProperties.nodeModifyText.innerHTML = app.LOUtil.sanitize(
+								autoSavedComment.sectionProperties.nodeModifyText.innerHTML);
+							annotation.focus();
+						}
 						if(this.shouldCollapse())
 							annotation.setCollapsed();
 						CommentSection.autoSavedComment = null;
@@ -2162,6 +2268,14 @@ export class CommentSection extends CanvasSectionObject {
 					modifiedObj = obj.comment;
 				}
 				const oldParent = modified.getParentCommentId();
+				// A refused sheet switch puts the caret back in the comment after
+				// its autosave went out. update() redraws the box from
+				// core's copy when that differs from what it drew last, which drops
+				// what was typed since and moves the caret to the start.
+				const ownAutosave = CommentSection.autoSavedComment === modified;
+				const typedHTML = ownAutosave && modified.sectionProperties.container.contains(document.activeElement)
+					? modified.sectionProperties.nodeModifyText.innerHTML : null;
+				const drawn = modified.sectionProperties.lastContentRaw;
 				modified.setData(modifiedObj);
 				modified.update();
 				if (oldParent !== null && modified.isRootComment()) {
@@ -2180,6 +2294,16 @@ export class CommentSection extends CanvasSectionObject {
 					if (app.map._docLayer._docType === 'spreadsheet')
 						modified.show();
 					modified.edit();
+					// onSaveComment stopped the autosave on blur; the comment is
+					// open again, so what is typed from now on autosaves too.
+					if (ownAutosave)
+						modified.sectionProperties.commentContainerRemoved = false;
+					// If update() redrew the box under the caret, the box takes back
+					// what was typed, with the caret at its end.
+					if (typedHTML !== null && modified.sectionProperties.lastContentRaw !== drawn) {
+						modified.sectionProperties.nodeModifyText.innerHTML = app.LOUtil.sanitize(typedHTML);
+						modified.focus();
+					}
 					if(this.shouldCollapse())
 						modified.setCollapsed();
 				}
@@ -2643,7 +2767,23 @@ export class CommentSection extends CanvasSectionObject {
 		}
 
 		let horizontalScroll = app.activeDocument.fileSize.x;
-		if (availableSpace < this.sectionProperties.commentWidth && !this.isCollapsed)
+		// VULCAN (page canvas: presentation / drawing): the comment rail widens
+		// the scrollable document only when it is NEEDED — there are comments to
+		// show and the canvas is too narrow to fit the rail beside the page.
+		// commentWidth is DEVICE px (every other reader divides it by dpiScale);
+		// fileSize.cX is CSS px — add them in one unit, or a Retina view reserves
+		// a doubled rail: "a lot of extra space on the right" at 100%. Writer
+		// keeps its stock arithmetic (its text-width helpers expect the rail).
+		const vulcanCanvasDoc =
+			app.map._docLayer._docType === 'presentation' ||
+			app.map._docLayer._docType === 'drawing';
+		if (vulcanCanvasDoc) {
+			const railCss = this.sectionProperties.commentWidth / app.dpiScale;
+			const hasComments = this.sectionProperties.commentList.length > 0;
+			if (hasComments && availableSpace < railCss && !this.isCollapsed)
+				horizontalScroll = (app.activeDocument.fileSize.cX + railCss) * app.pixelsToTwips * app.dpiScale;
+		}
+		else if (availableSpace < this.sectionProperties.commentWidth && !this.isCollapsed)
 			horizontalScroll = (app.activeDocument.fileSize.cX + this.sectionProperties.commentWidth) * app.pixelsToTwips * app.dpiScale;
 
 		const checkY = lastY + app.activeDocument.activeLayout.viewedRectangle.pY1;

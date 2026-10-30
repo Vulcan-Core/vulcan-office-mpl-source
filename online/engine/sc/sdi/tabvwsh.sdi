@@ -263,6 +263,10 @@ interface TableEditView
     SID_UNDO            [ ExecMethod = ExecuteUndo; StateMethod = GetUndoState; ]
     SID_REDO            [ ExecMethod = ExecuteUndo; StateMethod = GetUndoState; ]
 
+    // Vulcan fork: agent write-batch undo bracketing (see ExecuteUndo).
+    SID_VULCAN_BEGIN_UNDO_BATCH [ ExecMethod = ExecuteUndo; ]
+    SID_VULCAN_END_UNDO_BATCH   [ ExecMethod = ExecuteUndo; ]
+
     SID_OPT_LOCALE_CHANGED  [ ExecMethod = Execute; ]
 
     SID_READONLY_MODE   [ StateMethod = GetState; ]

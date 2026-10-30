@@ -20,6 +20,7 @@
 #include <vector>
 #include <libxml/xmlwriter.h>
 #include <sfx2/docfile.hxx>
+#include <sfx2/kit/helper.hxx>
 #include <sfx2/linkmgr.hxx>
 #include <svx/svdundo.hxx>
 #include <editeng/outlobj.hxx>
@@ -46,6 +47,8 @@
 
 #include <svl/itemset.hxx>
 #include <svx/annotation/ObjectAnnotationData.hxx>
+
+#include <comphelper/kit.hxx>
 
 using namespace ::sd;
 using namespace ::com::sun::star;
@@ -234,6 +237,23 @@ void SdPage::SetPresentationLayout(std::u16string_view rLayoutName,
 
             if (pSheet)
                 pObj->SetStyleSheet(pSheet, true);
+        }
+    }
+
+    // A layout change can alter a non-current slide through its master page.
+    // Its thumbnail is rendered as a separate tiled part, so invalidate that
+    // part explicitly instead of relying on the current slide repaint.
+    if (comphelper::COKit::isActive() && !IsMasterPage()
+        && GetPageKind() == PageKind::Standard)
+    {
+        SdDrawDocument& rDocument
+            = static_cast<SdDrawDocument&>(getSdrModelFromSdrPage());
+        if (DrawDocShell* pDocShell = rDocument.GetDocSh())
+        {
+            const auto* pTiledDocument
+                = dynamic_cast<const vcl::ITiledRenderable*>(pDocShell->GetModel().get());
+            KitHelper::notifyPartInvalidationAllViews(pTiledDocument,
+                                                      (GetPageNum() - 1) / 2);
         }
     }
 }

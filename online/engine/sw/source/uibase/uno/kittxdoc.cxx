@@ -19,6 +19,7 @@
 
 #include <unotxdoc.hxx>
 
+#include <algorithm>
 #include <map>
 #include <utility>
 #include <vector>
@@ -34,8 +35,12 @@
 #include <xmloff/odffields.hxx>
 #include <sfx2/kit/helper.hxx>
 
+#include <IDocumentLayoutAccess.hxx>
+#include <IDocumentLinksAdministration.hxx>
 #include <IDocumentMarkAccess.hxx>
 #include <IDocumentRedlineAccess.hxx>
+#include <IDocumentState.hxx>
+#include <IDocumentUndoRedo.hxx>
 #include <doc.hxx>
 #include <docsh.hxx>
 #include <fmtrfmrk.hxx>
@@ -43,6 +48,7 @@
 #include <section.hxx>
 #include <shellio.hxx>
 #include <unocrsr.hxx>
+#include <unocrsrhelper.hxx>
 #include <wrtsh.hxx>
 #include <txtrfmrk.hxx>
 #include <ndtxt.hxx>
@@ -55,11 +61,11 @@
 #include <unocontentcontrol.hxx>
 #include <rootfrm.hxx>
 #include <pagefrm.hxx>
+#include <sortedobjs.hxx>
+#include <anchoredobject.hxx>
 #include <com/sun/star/text/XTextContent.hpp>
 
-#include <com/sun/star/text/XPageCursor.hpp>
 #include <com/sun/star/text/XTextEmbeddedObjectsSupplier.hpp>
-#include <com/sun/star/text/XTextViewCursorSupplier.hpp>
 #include <com/sun/star/chart2/XInternalDataProvider.hpp>
 #include <com/sun/star/chart2/XChartDocument.hpp>
 #include <com/sun/star/chart/XChartDocument.hpp>
@@ -406,6 +412,55 @@ void GetLayout(tools::JsonWriter& rJsonWriter, SwDocShell* pDocShell)
         auto pPage = pFrame->DynCastPageFrame();
         auto aPage = rJsonWriter.startStruct();
         rJsonWriter.put("isInvalidContent", pPage->IsInvalidContent());
+    }
+}
+
+void UnionContentExtent(const SwFrame& rFrame, SwRect& rExtent)
+{
+    rExtent.Union(rFrame.getFrameArea());
+    // A table's indents, and a paragraph's negative ones, put its print area outside its frame.
+    SwRect aPrintArea(rFrame.getFramePrintArea());
+    aPrintArea += rFrame.getFrameArea().Pos();
+    rExtent.Union(aPrintArea);
+    if (const SwSortedObjs* pObjs = rFrame.GetDrawObjs())
+        for (const SwAnchoredObject* pObj : *pObjs)
+            rExtent.Union(pObj->GetObjRect());
+    if (!rFrame.IsLayoutFrame() || rFrame.IsTabFrame())
+        return;
+    for (const SwFrame* pLower = static_cast<const SwLayoutFrame&>(rFrame).Lower(); pLower;
+         pLower = pLower->GetNext())
+        UnionContentExtent(*pLower, rExtent);
+}
+
+/// Implements getCommandValues(".uno:ContentExtent"): per page, [top, bottom, left, right] in
+/// twips, where left and right bound the body text, the tables and the objects on that page.
+void GetContentExtent(tools::JsonWriter& rJsonWriter, SwDocShell* pDocShell)
+{
+    rJsonWriter.put("commandName", ".uno:ContentExtent");
+    auto aCommandValues = rJsonWriter.startNode("commandValues");
+    auto aPages = rJsonWriter.startArray("pages");
+    SwWrtShell* pWrtShell = pDocShell->GetWrtShell();
+    if (!pWrtShell)
+        return;
+    for (const SwFrame* pFrame = pWrtShell->GetLayout()->Lower(); pFrame; pFrame = pFrame->GetNext())
+    {
+        const SwPageFrame* pPage = pFrame->DynCastPageFrame();
+        if (!pPage)
+            continue;
+        SwRect aExtent;
+        if (const SwLayoutFrame* pBody = pPage->FindBodyCont())
+            UnionContentExtent(*pBody, aExtent);
+        // At-page, at-paragraph and at-character objects; as-character ones are the paragraph's.
+        if (const SwSortedObjs* pObjs = pPage->GetSortedObjs())
+            for (const SwAnchoredObject* pObj : *pObjs)
+                aExtent.Union(pObj->GetObjRect());
+        if (aExtent.IsEmpty())
+            continue;
+        auto aPage = rJsonWriter.startAnonArray();
+        rJsonWriter.putSimpleValue(pPage->getFrameArea().Top());
+        rJsonWriter.putSimpleValue(pPage->getFrameArea().Bottom());
+        rJsonWriter.putSimpleValue(aExtent.Left());
+        rJsonWriter.putSimpleValue(aExtent.Right());
     }
 }
 
@@ -869,94 +924,298 @@ void GetDocStructureDocProps(tools::JsonWriter& rJsonWriter, const SwDocShell* p
     }
 }
 
-// This class temporarily hides / shows redlines in the document, based on timestamp: when a redline
-// is newer than the date, it is "hidden" (the text looks as if that redline were rejected); and
-// otherwise the redline is "shown" (the text looks as if the redline is accepted). This allows to
-// obtain textBefore / textAfter context attributes for a given redline as it was when the redline
-// was created. The state of redlines is restored to original in dtor.
-class HideNewerShowOlder
+// The textBefore / textAfter of a redline show the text around it as it was when that redline was
+// made: every Insert / Delete redline as old as it or older reads as accepted, and every newer one
+// as rejected. The read used to put the document itself into that state - hiding and showing those
+// redlines with SwRangeRedline::Show / Hide / ShowOriginal, i.e. MoveToSection / MoveFromSection -
+// and restore it afterwards. That round trip is not exactly reversible: it moved redline
+// boundaries, rewrote formatting inside deletions and could leave a layout that ran away, and every
+// live agent edit reads the redlines first, so the user's open document changed silently and
+// autosave kept it. The text is now read from the document as it is, skipping the
+// redlines that were missing at that time, and nothing in the document changes.
+
+// Whether rRedline's text was missing at rLimit, in the states the old hide / show put it in: an
+// accepted deletion (as old as the limit or older) is gone, and a rejected insertion (newer) is not
+// there yet - unless the oldest change in its stack is not an insertion, whose text rejecting it
+// leaves. No other redline type changes the text.
+bool IsAbsentAt(const SwRangeRedline& rRedline, const DateTime& rLimit)
+{
+    const SwRedlineData& rData = rRedline.GetRedlineData();
+    const bool bNewer = rLimit < rData.GetTimeStamp();
+    switch (rData.GetType())
+    {
+        case RedlineType::Delete:
+            return !bNewer;
+        case RedlineType::Insert:
+            return bNewer
+                   && rRedline.GetType(rRedline.GetStackCount() - 1) == RedlineType::Insert;
+        default:
+            return false;
+    }
+}
+
+// The start node of the text a cursor at rNode stays in, as SwUnoCursor::IsSelOvr keeps it: the
+// body, a table cell, a footnote, a header or footer, or a frame. Sections don't bound it.
+const SwStartNode& GetTextAreaStart(const SwNode& rNode)
+{
+    const SwStartNode* pStart = rNode.StartOfSectionNode();
+    while (pStart->IsSectionNode())
+        pStart = pStart->StartOfSectionNode();
+    return *pStart;
+}
+
+// Moves rPos to the end of the closest content node before its own, but not before node nFirst.
+bool GoToPrevContentEnd(SwPosition& rPos, SwNodeOffset nFirst)
+{
+    const SwNodes& rNodes = rPos.GetNodes();
+    for (SwNodeOffset n = rPos.GetNodeIndex() - 1; n >= nFirst; --n)
+    {
+        if (SwContentNode* pNode = rNodes[n]->GetContentNode())
+        {
+            rPos.AssignEndIndex(*pNode);
+            return true;
+        }
+    }
+    return false;
+}
+
+// Moves rPos to the start of the closest content node after its own, but not after node nLast.
+bool GoToNextContentStart(SwPosition& rPos, SwNodeOffset nLast)
+{
+    const SwNodes& rNodes = rPos.GetNodes();
+    for (SwNodeOffset n = rPos.GetNodeIndex() + 1; n <= nLast; ++n)
+    {
+        if (SwContentNode* pNode = rNodes[n]->GetContentNode())
+        {
+            rPos.AssignStartIndex(*pNode);
+            return true;
+        }
+    }
+    return false;
+}
+
+// The text of [rStart, rEnd] as XTextRange::getString reads it.
+OUString GetRangeText(const SwPosition& rStart, const SwPosition& rEnd)
+{
+    OUString aText;
+    if (rStart < rEnd)
+    {
+        SwPaM aPam(rStart, rEnd);
+        SwUnoCursorHelper::GetTextFromPam(aPam, aText);
+    }
+    return aText;
+}
+
+// The Insert / Delete redlines of a table, in its order: the only ones whose text can be missing at
+// a time (IsAbsentAt). They never overlap each other, so they are sorted by end as well as by start.
+// A paragraph-attribute redline can overlap them - one made on a paragraph later deleted lies inside
+// that deletion - which is why the walks below look only at these.
+using TextRedlines = std::vector<const SwRangeRedline*>;
+
+TextRedlines GetTextRedlines(const SwRedlineTable& rTable)
+{
+    TextRedlines aRedlines;
+    for (const SwRangeRedline* pRedline : rTable)
+    {
+        const RedlineType eType = pRedline->GetRedlineData().GetType();
+        if (eType == RedlineType::Insert || eType == RedlineType::Delete)
+            aRedlines.push_back(pRedline);
+    }
+    return aRedlines;
+}
+
+// Reads up to nSteps steps of text back from rFrom as the text was at rLimit. A step is a code
+// point, or the boundary between two paragraphs, as XTextCursor::goLeft moves; the walk stays in the
+// body, cell, footnote, header, footer or frame that holds rFrom. A redline missing at rLimit
+// (IsAbsentAt) is skipped whole: neither its characters nor a paragraph boundary inside it takes a
+// step or reads as anything, as if it had been removed and the paragraphs around it joined. Each
+// redline the walk reaches is looked at once, so a read costs O(nSteps + log n) plus the redlines it
+// passes, not O(table).
+OUString ReadTextBefore(const TextRedlines& rRedlines, const SwPosition& rFrom,
+                        const DateTime& rLimit, sal_uInt16 nSteps)
+{
+    const SwNodeOffset nFirst = GetTextAreaStart(rFrom.GetNode()).GetIndex() + 1;
+    SwPosition aPos(rFrom);
+    std::vector<std::pair<SwPosition, SwPosition>> aSkipped; // missing stretches, last one first
+    // The walk reaches rRedlines[nNext - 1] next: the last one that starts before rFrom.
+    size_t nNext = std::partition_point(rRedlines.begin(), rRedlines.end(),
+                                        [&rFrom](const SwRangeRedline* p)
+                                        { return *p->Start() < rFrom; })
+                   - rRedlines.begin();
+    for (sal_uInt16 nLeft = nSteps; nLeft;)
+    {
+        // One that ends at or after aPos has been reached: skip it whole if it was missing then,
+        // read through it otherwise.
+        if (nNext > 0 && !(*rRedlines[nNext - 1]->End() < aPos))
+        {
+            const SwRangeRedline& rRedline = *rRedlines[--nNext];
+            if (*rRedline.Start() < aPos && IsAbsentAt(rRedline, rLimit))
+            {
+                const SwPosition aSkipEnd(aPos);
+                aPos = *rRedline.Start();
+                // It may start on a table or section node: read on from the text before that.
+                const bool bInText
+                    = aPos.GetNodeIndex() >= nFirst
+                      && (aPos.GetNode().IsContentNode() || GoToPrevContentEnd(aPos, nFirst));
+                aSkipped.emplace_back(aPos, aSkipEnd);
+                if (!bInText)
+                    break;
+            }
+            continue;
+        }
+        // Step back through the paragraph, as far as the end of the next redline if it is in it.
+        const sal_Int32 nIndex = aPos.GetContentIndex();
+        sal_Int32 nStop = 0;
+        if (nNext > 0 && rRedlines[nNext - 1]->End()->GetNodeIndex() == aPos.GetNodeIndex())
+            nStop = rRedlines[nNext - 1]->End()->GetContentIndex();
+        const SwTextNode* pTextNode = aPos.GetNode().GetTextNode();
+        if (pTextNode && nIndex > nStop)
+        {
+            const OUString& rText = pTextNode->GetText();
+            sal_Int32 nNewIndex = nIndex;
+            while (nLeft && nNewIndex > nStop)
+            {
+                rText.iterateCodePoints(&nNewIndex, -1);
+                --nLeft;
+            }
+            aPos.SetContent(std::max(nNewIndex, nStop));
+        }
+        // At the start of the paragraph: the boundary with the one before is a step.
+        else if (GoToPrevContentEnd(aPos, nFirst))
+            --nLeft;
+        else
+            break; // the start of the text
+    }
+
+    OUStringBuffer aText;
+    SwPosition aPieceStart(aPos);
+    for (auto it = aSkipped.rbegin(); it != aSkipped.rend(); ++it)
+    {
+        aText.append(GetRangeText(aPieceStart, it->first));
+        aPieceStart = it->second;
+    }
+    aText.append(GetRangeText(aPieceStart, rFrom));
+    return aText.makeStringAndClear();
+}
+
+// Reads up to nSteps steps of text on from rFrom as the text was at rLimit; the forward counterpart
+// of ReadTextBefore, as XTextCursor::goRight moves.
+OUString ReadTextAfter(const TextRedlines& rRedlines, const SwPosition& rFrom,
+                       const DateTime& rLimit, sal_uInt16 nSteps)
+{
+    const SwNodeOffset nLast = GetTextAreaStart(rFrom.GetNode()).EndOfSectionIndex() - 1;
+    SwPosition aPos(rFrom);
+    std::vector<std::pair<SwPosition, SwPosition>> aSkipped; // missing stretches, first one first
+    // The walk reaches rRedlines[nNext] next: the first one that ends after rFrom.
+    size_t nNext = std::partition_point(rRedlines.begin(), rRedlines.end(),
+                                        [&rFrom](const SwRangeRedline* p)
+                                        { return !(rFrom < *p->End()); })
+                   - rRedlines.begin();
+    for (sal_uInt16 nLeft = nSteps; nLeft;)
+    {
+        // One that starts at or before aPos has been reached: skip it whole if it was missing
+        // then, read through it otherwise.
+        if (nNext < rRedlines.size() && !(aPos < *rRedlines[nNext]->Start()))
+        {
+            const SwRangeRedline& rRedline = *rRedlines[nNext++];
+            if (aPos < *rRedline.End() && IsAbsentAt(rRedline, rLimit))
+            {
+                const SwPosition aSkipStart(aPos);
+                aPos = *rRedline.End();
+                // It may end on a table or section node: read on from the text after that.
+                const bool bInText
+                    = aPos.GetNodeIndex() <= nLast
+                      && (aPos.GetNode().IsContentNode() || GoToNextContentStart(aPos, nLast));
+                aSkipped.emplace_back(aSkipStart, aPos);
+                if (!bInText)
+                    break;
+            }
+            continue;
+        }
+        // Step on through the paragraph, as far as the start of the next redline if it is in it.
+        const sal_Int32 nIndex = aPos.GetContentIndex();
+        sal_Int32 nStop = aPos.GetNode().GetContentNode()->Len();
+        if (nNext < rRedlines.size()
+            && rRedlines[nNext]->Start()->GetNodeIndex() == aPos.GetNodeIndex())
+            nStop = rRedlines[nNext]->Start()->GetContentIndex();
+        const SwTextNode* pTextNode = aPos.GetNode().GetTextNode();
+        if (pTextNode && nIndex < nStop)
+        {
+            const OUString& rText = pTextNode->GetText();
+            sal_Int32 nNewIndex = nIndex;
+            while (nLeft && nNewIndex < nStop)
+            {
+                rText.iterateCodePoints(&nNewIndex, 1);
+                --nLeft;
+            }
+            aPos.SetContent(std::min(nNewIndex, nStop));
+        }
+        // At the end of the paragraph: the boundary with the next one is a step.
+        else if (GoToNextContentStart(aPos, nLast))
+            --nLeft;
+        else
+            break; // the end of the text
+    }
+
+    OUStringBuffer aText;
+    SwPosition aPieceStart(rFrom);
+    for (const auto& [rSkipStart, rSkipEnd] : aSkipped)
+    {
+        aText.append(GetRangeText(aPieceStart, rSkipStart));
+        aPieceStart = rSkipEnd;
+    }
+    aText.append(GetRangeText(aPieceStart, aPos));
+    return aText.makeStringAndClear();
+}
+
+// The text of [rStart, rEnd], the range of rRedline, as it was at rLimit: the parts of the other
+// redlines missing then are left out. Only a paragraph-attribute redline has others inside it; any
+// other range reads whole.
+OUString ReadChangedText(const TextRedlines& rRedlines, const SwRangeRedline& rRedline,
+                         const SwPosition& rStart, const SwPosition& rEnd, const DateTime& rLimit)
+{
+    OUStringBuffer aText;
+    SwPosition aPieceStart(rStart);
+    // From the first one that ends after rStart, as long as they start before rEnd
+    for (auto it = std::partition_point(rRedlines.begin(), rRedlines.end(),
+                                        [&rStart](const SwRangeRedline* p)
+                                        { return !(rStart < *p->End()); });
+         it != rRedlines.end() && *(*it)->Start() < rEnd; ++it)
+    {
+        const SwRangeRedline& rOther = **it;
+        if (&rOther == &rRedline || !IsAbsentAt(rOther, rLimit))
+            continue;
+        aText.append(GetRangeText(aPieceStart, *rOther.Start()));
+        const SwPosition& rSkipEnd = std::min(*rOther.End(), rEnd);
+        if (aPieceStart < rSkipEnd)
+            aPieceStart = rSkipEnd;
+    }
+    aText.append(GetRangeText(aPieceStart, rEnd));
+    return aText.makeStringAndClear();
+}
+
+// Holds every view of the document inside one layout action. Each piece of text below is read
+// through SwWriter, which starts and ends an action of its own, and ending the outermost one runs a
+// layout pass; nested, those inner actions only count.
+class AllViewsActionGuard
 {
 public:
-    HideNewerShowOlder(DateTime limit, const SwRedlineTable& rTable)
-        : m_rTable(rTable)
-        , m_aRedlineShowStateRestore(collectRestoreData(m_rTable))
+    explicit AllViewsActionGuard(SwEditShell* pShell)
+        : m_pShell(pShell)
     {
-        for (auto pRedline : m_rTable)
-        {
-            const auto& data = pRedline->GetRedlineData();
-            if (data.GetType() != RedlineType::Insert && data.GetType() != RedlineType::Delete)
-                continue;
-            bool hide;
-            if (limit < data.GetTimeStamp())
-                hide = data.GetType() == RedlineType::Insert;
-            else // not later
-                hide = data.GetType() == RedlineType::Delete;
-
-            if (hide)
-                Hide(pRedline, m_rTable);
-            else
-                Show(pRedline, m_rTable);
-        }
+        if (m_pShell)
+            m_pShell->StartAllAction();
     }
-    void ImplDestroy()
+    ~AllViewsActionGuard()
     {
-        // I assume, that only the redlines explicitly handled in ctor would change their visible
-        // state; so here, only Insert / Delete redlines will be handled.
-        for (auto[pRedline, visible] : m_aRedlineShowStateRestore)
-        {
-            if (visible)
-                Show(pRedline, m_rTable);
-            else
-                Hide(pRedline, m_rTable);
-        }
+        if (m_pShell)
+            suppress_fun_call_w_exception(m_pShell->EndAllAction());
     }
-    ~HideNewerShowOlder() { suppress_fun_call_w_exception(ImplDestroy()); }
+    AllViewsActionGuard(const AllViewsActionGuard&) = delete;
+    AllViewsActionGuard& operator=(const AllViewsActionGuard&) = delete;
 
 private:
-    static std::unordered_map<SwRangeRedline*, bool>
-    collectRestoreData(const SwRedlineTable& rTable)
-    {
-        std::unordered_map<SwRangeRedline*, bool> aRedlineShowStateRestore;
-        for (auto pRedline : rTable)
-            aRedlineShowStateRestore[pRedline] = pRedline->IsVisible();
-        return aRedlineShowStateRestore;
-    }
-    static void Show(SwRangeRedline* pRedline, const SwRedlineTable& rTable)
-    {
-        if (pRedline->IsVisible())
-            return;
-        switch (pRedline->GetType())
-        {
-            case RedlineType::Insert:
-            case RedlineType::Delete:
-                pRedline->Show(0, rTable.GetPos(pRedline), true);
-                pRedline->Show(1, rTable.GetPos(pRedline), true);
-                break;
-            default:
-                assert(!"Trying to show a redline that is not expected to change visibility here");
-        }
-    }
-    static void Hide(SwRangeRedline* pRedline, const SwRedlineTable& rTable)
-    {
-        if (!pRedline->IsVisible())
-            return;
-        switch (pRedline->GetType())
-        {
-            case RedlineType::Insert:
-                pRedline->ShowOriginal(0, rTable.GetPos(pRedline));
-                pRedline->ShowOriginal(1, rTable.GetPos(pRedline));
-                break;
-            case RedlineType::Delete:
-                pRedline->Hide(0, rTable.GetPos(pRedline));
-                pRedline->Hide(1, rTable.GetPos(pRedline));
-                break;
-            default:
-                assert(!"Trying to hide a redline that is not expected to change visibility here");
-        }
-    }
-
-    const SwRedlineTable& m_rTable;
-    std::unordered_map<SwRangeRedline*, bool> m_aRedlineShowStateRestore;
+    SwEditShell* m_pShell;
 };
 
 /// Implements getCommandValues(".uno:ExtractDocumentStructures") for redlines
@@ -978,8 +1237,11 @@ void GetDocStructureTrackChanges(tools::JsonWriter& rJsonWriter, SwDocShell* pDo
             = nIndex > 0 ? o3tl::trim(param.substr(nIndex)) : std::u16string_view{};
         if (token == u"contextLen")
         {
+            // The walk counts steps unsigned, so a negative length would read 65535 of them where
+            // goLeft / goRight took none. 500 is the most any caller asks for
+            // (VulcanWriterBridge.fetchRedlines).
             if (!value.empty())
-                nContextLen = o3tl::toInt32(value);
+                nContextLen = std::clamp<sal_Int32>(o3tl::toInt32(value), 0, 500);
         }
         else if (token == u"startPageNumber")
         {
@@ -990,23 +1252,28 @@ void GetDocStructureTrackChanges(tools::JsonWriter& rJsonWriter, SwDocShell* pDo
 
     SwDoc& rDoc = *pDocShell->GetDoc();
     const SwRedlineTable& rTable = rDoc.getIDocumentRedlineAccess().GetRedlineTable();
-    uno::Reference<text::XTextCursor> xTextViewCursor;
-    uno::Reference<text::XPageCursor> xTextPageCursor;
-    if (bPageNumbers)
-    {
-        if (auto xSupplier = pDocShell->GetController().query<text::XTextViewCursorSupplier>())
-        {
-            xTextViewCursor.set(xSupplier->getViewCursor());
-            xTextPageCursor.set(xTextViewCursor, uno::UNO_QUERY);
-        }
-    }
+    // The step count XTextCursor::goLeft / goRight took it as.
+    const sal_uInt16 nContextSteps = static_cast<sal_uInt16>(nContextLen);
+    // Read from the layout the views show, without moving any view's cursor to the change.
+    const bool bWithPageNumbers
+        = bPageNumbers && rDoc.getIDocumentLayoutAccess().GetCurrentLayout();
 
+    const TextRedlines aTextRedlines = GetTextRedlines(rTable);
+    AllViewsActionGuard aLayoutAction(rDoc.GetEditShell());
     for (size_t i = 0; i < rTable.size(); ++i)
     {
-        rtl::Reference<SwXRedline> pSwXRedline(new SwXRedline(*rTable[i]));
+        SwRangeRedline& rRedline = *rTable[i];
+        rtl::Reference<SwXRedline> pSwXRedline(new SwXRedline(rRedline));
 
         auto TrackChangesNode
             = rJsonWriter.startNode(Concat2View("TrackChanges.ByIndex." + OString::number(i)));
+
+        // Vulcan: the stable, accept/reject-addressable redline id
+        // (.uno:AcceptTrackedChange resolves its arg against GetId()). The
+        // agent bridge reads ids from THIS filter because the
+        // .uno:AcceptTrackedChanges commandvalues serializer is dead under
+        // coolwsd's default DISABLE_REDLINE (redlining_as_comments=false).
+        rJsonWriter.put("id", rRedline.GetId());
 
         PropertyExtractor extractor{ pSwXRedline, rJsonWriter };
 
@@ -1016,60 +1283,38 @@ void GetDocStructureTrackChanges(tools::JsonWriter& rJsonWriter, SwDocShell* pDo
         extractor.extract<OUString>(UNO_NAME_REDLINE_DESCRIPTION, "description");
         extractor.extract<OUString>(UNO_NAME_REDLINE_COMMENT, "comment");
 
+        // A redline can start or end on a table or section node (UNO_NAME_REDLINE_START / END give
+        // no text range there), which has no text around it.
+        const SwPosition& rStart = *rRedline.Start();
+        const SwPosition& rEnd = *rRedline.End();
+        const bool bStartInText = rStart.GetNode().IsTextNode();
+        const bool bEndInText = rEnd.GetNode().IsTextNode();
+        if (bStartInText)
         {
-            // Set the text into a state according to current redline's timestamp: all older changes
-            // are shows as if accepted, all newer are shown as if rejected.
-            HideNewerShowOlder prepare(pSwXRedline->GetRedline()->GetTimeStamp(), rTable);
-            auto xStart = pSwXRedline->getPropertyValue(UNO_NAME_REDLINE_START)
-                              .query<css::text::XTextRange>();
-            if (xStart && !xStart->getText())
-                xStart.clear();
-            auto xEnd = pSwXRedline->getPropertyValue(UNO_NAME_REDLINE_END)
-                            .query<css::text::XTextRange>();
-            if (xEnd && !xEnd->getText())
-                xEnd.clear();
-            if (xStart)
+            if (bWithPageNumbers)
             {
-                auto xCursor = xStart->getText()->createTextCursorByRange(xStart);
-                xCursor->goLeft(nContextLen, /*bExpand*/ true);
-                if (xTextPageCursor)
-                {
-                    try
-                    {
-                        xTextViewCursor->gotoRange(xStart, false);
-                        rJsonWriter.put("startPageNumber", xTextPageCursor->getPage());
-                    }
-                    catch (const uno::Exception&)
-                    {
-                        DBG_UNHANDLED_EXCEPTION("sw.ui");
-                    }
-                }
-                rJsonWriter.put("textBefore", xCursor->getString());
+                SwPaM aStart(rStart);
+                rJsonWriter.put("startPageNumber", static_cast<sal_Int16>(aStart.GetPageNum()));
             }
-            if (xEnd)
-            {
-                auto xCursor = xEnd->getText()->createTextCursorByRange(xEnd);
-                xCursor->goRight(nContextLen, /*bExpand*/ true);
-                rJsonWriter.put("textAfter", xCursor->getString());
-            }
-            OUString changeText;
-            if (xStart && xEnd)
-            {
-                // Read the added / formatted text from the main XText
-                auto xCursor = xStart->getText()->createTextCursorByRange(xStart);
-                xCursor->gotoRange(xEnd, /*bExpand*/ true);
-                changeText = xCursor->getString();
-            }
-            if (changeText.isEmpty())
-            {
-                // It is unlikely that we get here: the change text will be obtained above,
-                // even for deletion change
-                if (auto xRedlineText = pSwXRedline->getPropertyValue(UNO_NAME_REDLINE_TEXT)
-                                            .query<css::text::XText>())
-                    changeText = xRedlineText->getString();
-            }
-            rJsonWriter.put("textChanged", changeText); // write unconditionally
+            rJsonWriter.put("textBefore", ReadTextBefore(aTextRedlines, rStart,
+                                                         rRedline.GetTimeStamp(), nContextSteps));
         }
+        if (bEndInText)
+            rJsonWriter.put("textAfter", ReadTextAfter(aTextRedlines, rEnd, rRedline.GetTimeStamp(),
+                                                       nContextSteps));
+        // The added / deleted / formatted text, as it was when the change was made
+        OUString changeText;
+        if (bStartInText && bEndInText)
+            changeText = ReadChangedText(aTextRedlines, rRedline, rStart, rEnd,
+                                         rRedline.GetTimeStamp());
+        if (changeText.isEmpty())
+        {
+            // A redline whose text a view hides in a section of its own reads it from there
+            if (auto xRedlineText = pSwXRedline->getPropertyValue(UNO_NAME_REDLINE_TEXT)
+                                        .query<css::text::XText>())
+                changeText = xRedlineText->getString();
+        }
+        rJsonWriter.put("textChanged", changeText); // write unconditionally
         // UNO_NAME_REDLINE_IDENTIFIER: OUString (the value of a pointer, not persistent)
         // UNO_NAME_REDLINE_MOVED_ID: sal_uInt32; 0 == not moved, 1 == moved, but don't have its pair, 2+ == unique ID
         // UNO_NAME_REDLINE_SUCCESSOR_DATA: cpo::uno::Sequence<beans::PropertyValue>
@@ -1271,8 +1516,28 @@ void GetDocStructureBodyText(tools::JsonWriter& rJsonWriter, SwDocShell* pDocShe
     }
     else
     {
-        SwWriter aWrt(aStream, *pDoc);
-        bWriteOk = !aWrt.Write(xWrt).IsError();
+        // A whole-document SwWriter is a save as far as SwWriter::Write is
+        // concerned: on success it calls ResetModified() and clears the
+        // links-updated flag. This is a read, so an unsaved edit made before
+        // it must stay unsaved-and-modified - otherwise idle/timed autosave
+        // never fires and the edit is discarded when the view closes (
+        // an agent replace followed by this read was silently lost). Keep the
+        // undo stack's unmodified marker where it was, too.
+        IDocumentState& rState = pDoc->getIDocumentState();
+        IDocumentUndoRedo& rUndo = pDoc->GetIDocumentUndoRedo();
+        IDocumentLinksAdministration& rLinks = pDoc->getIDocumentLinksAdministration();
+        const bool bWasModified = rState.IsModified();
+        const bool bLinksWereUpdated = rLinks.LinksUpdated();
+        rUndo.LockUndoNoModifiedPosition();
+        {
+            SwWriter aWrt(aStream, *pDoc);
+            bWriteOk = !aWrt.Write(xWrt).IsError();
+        }
+        rUndo.UnLockUndoNoModifiedPosition();
+        if (bWasModified && !rState.IsModified())
+            rState.SetModified();
+        if (bLinksWereUpdated && !rLinks.LinksUpdated())
+            rLinks.SetLinksUpdated(true);
     }
     if (bWriteOk)
     {
@@ -1435,6 +1700,7 @@ bool SwXTextDocument::supportsCommand(std::u16string_view rCommand)
             u"Bookmark",
             u"Field",
             u"Layout",
+            u"ContentExtent",
             u"ExtractDocumentStructure",
             u"ExtractLinkTargets" };
 
@@ -1537,6 +1803,10 @@ void SwXTextDocument::getCommandValues(tools::JsonWriter& rJsonWriter, std::stri
     else if (o3tl::starts_with(rCommand, ".uno:Layout"sv))
     {
         GetLayout(rJsonWriter, m_pDocShell);
+    }
+    else if (o3tl::starts_with(rCommand, ".uno:ContentExtent"sv))
+    {
+        GetContentExtent(rJsonWriter, m_pDocShell);
     }
 }
 

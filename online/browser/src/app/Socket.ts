@@ -10,9 +10,41 @@
  */
 /* eslint-disable @typescript-eslint/no-empty-function */
 
+// Bound kit churn after three failed loads. Production also saw recoveries after
+// three failures, which need a fourth attempt; this policy makes those recoveries
+// require explicit Retry rather than continuing automatic attempts indefinitely.
+const MAX_CONSECUTIVE_LOAD_FAILURES = 3;
+
+// After a dropped socket's immediate reconnect fails, retry on a backoff whose
+// ceiling doubles from 1 s to 30 s, each wait jittered between half the ceiling
+// and the ceiling. Nothing used to retry at all.
+const RECONNECT_RETRY_BASE_MS = 1000;
+const RECONNECT_RETRY_MAX_MS = 30000;
+// A WebSocket handshake younger than this is left to finish. An older one is
+// presumed hung, and the next reconnect trigger may replace it.
+const HANDSHAKE_PATIENCE_MS = 10000;
+
+// the notice for a save the WOPI host never answered (_onSaveUnanswered):
+// its snackbar key, and how long it stays up.
+const SAVE_UNANSWERED_KEY = 'vulcan-save-unanswered';
+const SAVE_UNANSWERED_NOTICE_MS = 10000;
+
 class Socket {
 	private ProtocolVersionNumber: string = '0.1';
 	private ReconnectCount: number = 0;
+	// Consecutive FAILED document loads for this client. Deliberately NOT ReconnectCount:
+	// that one guards only the `docunloading` wait-and-retry, and it is reset by
+	// `progress: ready`, which WSD sends once the broker is obtained — BEFORE the load is
+	// requested. A document that fails to load every single time therefore resets it on
+	// every attempt and can never accumulate it. This counter is reset only where a
+	// document genuinely loads, so an always-failing load cannot hide from it.
+	private _consecutiveLoadFailures: number = 0;
+	// The attempt (its _connectCount) whose server close already spent the
+	// budget. Its queued load-error frame can drain after that close, even after
+	// input has started the next attempt, and must not spend it again. 0: none
+	// (attempts count from 1).
+	private _loadFailureClosedAttempt: number = 0;
+	private _loadFailureGiveUpNotified: boolean = false;
 	private WasShownLimitDialog: boolean = false;
 	public WSDServer: WSDServerInfo = {
 		Id: '',
@@ -29,6 +61,27 @@ class Socket {
 	// rest of the session.
 	private _forceLegacyWsUrl: boolean = false;
 	private _connectCount: number = 0;
+	private _connectStartedAt: number = 0;
+	private _reconnectRetries: number = 0;
+	private _reconnectRetryTimer: TimeoutHdl | undefined;
+	// The first load's handshake watchdog (_armInitialHandshakeWatchdog).
+	private _initialHandshakeTimer: TimeoutHdl | undefined;
+	// Reconnect handshakes replaced while still connecting since a document
+	// last loaded: by the watchdog, or by input once past their patience.
+	private _hungHandshakes: number = 0;
+	// How long the handshake in flight may take before anything replaces it:
+	// HANDSHAKE_PATIENCE_MS, or the watchdog's grown patience on a reconnect.
+	private _handshakePatience: number = HANDSHAKE_PATIENCE_MS;
+	// The reload interval a 'close: recycling' armed in this.timer. The
+	// socket's close clears idleHandler._serverRecycling, so this handle is what
+	// still says the recycle owns reconnecting.
+	private _recycleTimer: ReturnType<typeof setInterval> | undefined;
+	// takes down the notice _onSaveUnanswered put up.
+	private _saveUnansweredTimer: TimeoutHdl | undefined;
+	// a reload the server ordered (_onCloseMsg) while the frame did not
+	// hold the keyboard; until its document is back, reactivating it leaves the
+	// caret where it is.
+	private _reloadLeavesCaret: boolean = false;
 
 	/// Whether Trace Event recording is enabled or not. ("Enabled" here means whether it can be
 	/// turned on (and off again), not whether it is on.)
@@ -81,6 +134,11 @@ class Socket {
 		this.timer = undefined;
 		this.socket = undefined;
 		this.traceEvents = new TraceEvents(this);
+
+		// Retries back off to 30 s. Coming back online or into view should not
+		// wait that out.
+		window.addEventListener('online', () => this._retryReconnect());
+		document.addEventListener('visibilitychange', () => this._retryReconnect());
 
 		if (
 			window.Worker &&
@@ -185,6 +243,18 @@ class Socket {
 	}
 
 	public sendMessage(msg: MessageInterface): void {
+		const isTokenReset = typeof msg === 'string' && msg.startsWith('resetaccesstoken ');
+		// Renewals update docParams separately. A closed socket will use those
+		// values on its scheduled reconnect; do not start another reconnect here.
+		// CONNECTING must keep the renewal queued: its URL already holds the old token.
+		if (isTokenReset) {
+			// A failed connection can leave an older reset in the queue. Never
+			// replay it over a newer token, including one received while closed.
+			this._msgQueue = this._msgQueue.filter((queued) =>
+				typeof queued !== 'string' || !queued.startsWith('resetaccesstoken '));
+			if (!this.socket || this.socket.readyState >= 2) return;
+		}
+
 		if (!this.socket) {
 			console.error('sendMessage() called with non-existent socket!');
 			return;
@@ -201,7 +271,16 @@ class Socket {
 			// Avoid communicating when we're inactive.
 			if (typeof msg !== 'string') return;
 
-			if (!msg.startsWith('useractive') && !msg.startsWith('userinactive')) {
+			// resetaccesstoken rides through too: a dimmed view's coolwsd
+			// session has to keep taking the host's renewals, or its token
+			// dies while the user is in another tab and their first save on
+			// return is a 401 (App_TokenExpired). Without the exemption the
+			// renewal was logged here and dropped, and the host never knew.
+			if (
+				!msg.startsWith('useractive') &&
+				!msg.startsWith('userinactive') &&
+				!msg.startsWith('resetaccesstoken')
+			) {
 				window.app.console.log(
 					'Ignore outgoing message due to inactivity: "' + msg + '"',
 				);
@@ -209,7 +288,8 @@ class Socket {
 			}
 		}
 
-		if (this._map.uiManager && this._map.uiManager.isUIBlocked()) return;
+		// Busy UI blocks document commands, but token maintenance must continue.
+		if (!isTokenReset && this._map.uiManager && this._map.uiManager.isUIBlocked()) return;
 
 		const socketState = this.socket.readyState;
 		if (socketState === 2 || socketState === 3) {
@@ -287,9 +367,21 @@ class Socket {
 	}
 
 	public connect(socket: SockInterface): void {
+		// Focus/activity can call connect directly, bypassing reconnect scheduling.
+		if (this._stopAfterLoadFailures()) return;
+		// Every mousemove, touchmove, key and focus lands here while the view is
+		// inactive. Replacing the handshake in flight on each one meant a slow
+		// link never finished one; the attempt already running is the reconnect.
+		if (this._handshakeInFlight()) return;
 		const map = this._map;
 		map.options.docParams['permission'] = app.getPermission();
 		if (this.socket) {
+			// A reconnect's handshake replaced while still connecting hung,
+			// whatever replaces it. Counted only when the watchdog fired, the
+			// patience never grew for a member who kept working: input replaced
+			// the handshake first, from its patience on.
+			if (this._reconnecting && this.socket.readyState === 0)
+				this._hungHandshakes++;
 			this.close();
 		}
 		if (socket && (socket.readyState === 1 || socket.readyState === 0)) {
@@ -309,7 +401,7 @@ class Socket {
 							'{productname}',
 							typeof brandProductName !== 'undefined'
 								? brandProductName
-								: 'Collabora Online Development Edition (unbranded)',
+								: 'Vulcan Office',
 						) + e,
 					cmd: 'socket',
 					kind: 'failed',
@@ -331,6 +423,11 @@ class Socket {
 		this.socket.binaryType = 'arraybuffer';
 
 		this._connectCount++;
+		this._connectStartedAt = Date.now();
+		this._handshakePatience = HANDSHAKE_PATIENCE_MS;
+		if (this._reconnecting) this._armHandshakeWatchdog(this.socket);
+		else if (!this._map._docLoadedOnce && this.ReconnectCount === 0)
+			this._armInitialHandshakeWatchdog(this.socket);
 		this._faultInjection();
 		this.resetTokenExpiryTimer();
 
@@ -397,6 +494,10 @@ class Socket {
 		window.app.console.debug('_onSocketOpen:');
 		app.idleHandler._serverRecycling = false;
 		app.idleHandler._documentIdle = false;
+
+		// Telemetry load milestone; also resolves a pending reconnect attempt
+		// as successful.
+		if (app.telemetry) app.telemetry.noteWebSocketConnected();
 
 		// Always send the protocol version number.
 		// TODO: Move the version number somewhere sensible.
@@ -466,6 +567,7 @@ class Socket {
 		msg += ' darkBackground=' + darkBackground;
 		this._map.uiManager.initDarkBackgroundUI(darkBackground);
 
+		msg += ' vulcanPhoneChrome=' + (window.vulcanPhoneChrome === true);
 		msg += ' accessibilityState=' + window.getAccessibilityState();
 
 		msg += ' clientvisiblearea=' + window.makeClientVisibleArea();
@@ -476,7 +578,8 @@ class Socket {
 		}
 		this._msgQueue = [];
 
-		app.idleHandler._activate();
+		const allowFocusGrab = this._reconnectMayGrabFocus();
+		app.idleHandler._activate(allowFocusGrab);
 	}
 
 	private _onSocketClose(event: CloseEvent): void {
@@ -541,6 +644,9 @@ class Socket {
 				errorType = 'websocketproxyfailure';
 				errorMsg = window.errorMessages.websocketproxyfailure;
 			}
+			// Telemetry: class only, never the message text.
+			if (app.telemetry)
+				app.telemetry.record('error_shown', { error_class: errorType });
 			this._map.fire('error', {
 				msg: errorMsg,
 				cmd: 'socket',
@@ -594,8 +700,21 @@ class Socket {
 		// We don't want them back on re-connection.
 		this._delayedMessages = [];
 
-		if (isActive && this._reconnecting) {
+		// A reconnect that opened (a kit took the load) and that the server
+		// closed before its document loaded is a failed load, error frame or not,
+		// or the retry timer would repeat it forever. A transport drop is not:
+		// the browser reports 1006, with no close frame, when the Wi-Fi or a
+		// proxy dropped the connection, and the server may be fine. Counting
+		// those took a lossy link to the Retry card within seconds; they retry
+		// on the backoff, which tops out at 30 s.
+		if (isActive && this._reconnecting && !Socket._isTransportDrop(event)) {
+			this._consecutiveLoadFailures++;
+			this._loadFailureClosedAttempt = this._connectCount;
+			// This dialog says it through the wait (see _showReconnecting).
+			this._hideReconnecting();
 			// Don't show this before first transparently trying to reconnect.
+			// Its AlertDialog closes every open dialog, so a transport drop,
+			// which keeps retrying by itself, does not show it.
 			this._map.fire('error', {
 				msg: _(
 					'Well, this is embarrassing, we cannot connect to your document. Please try again.',
@@ -615,27 +734,11 @@ class Socket {
 		// "close: idle" from the server.
 		// Without the timeout, we'd immediately reconnect (because the
 		// "close: idle" was not processed yet).
-		setTimeout(() => {
-			if (!this._reconnecting) {
-				this._reconnecting = true;
-				this._scheduleReconnect();
-			}
-		}, 1 /* ms */);
+		setTimeout(() => this._reconnectAfterClose(), 1 /* ms */);
 
 		if (this._map.isEditMode()) {
 			this._map.setPermission('view');
 		}
-
-		if (
-			!this._map['wopi'].DisableInactiveMessages &&
-			app.sectionContainer &&
-			!app.sectionContainer.testing
-		)
-			this._map.uiManager.showSnackbar(
-				window.mode.isCODesktop()
-					? _('The connection to the document has been lost.')
-					: _('The server has been disconnected.'),
-			);
 	}
 
 	// Simulate error conditions for testing via the
@@ -666,11 +769,277 @@ class Socket {
 		}
 	}
 
-	private _scheduleReconnect(): void {
+	/**
+	 * The reconnect decision after a socket close, named so it is reachable from a
+	 * test. Inline inside the setTimeout it could only be exercised by standing up
+	 * the whole of _onSocketClose, which is exactly why this path went uncapped.
+	 */
+	private _reconnectAfterClose(): void {
+		if (this._stopAfterLoadFailures()) return;
+		if (!this._reconnecting) {
+			this._reconnecting = true;
+			// No user gesture drives this one either, so it leaves the caret alone.
+			this._scheduleReconnect(false);
+			return;
+		}
+		// The reconnect itself failed. Nothing used to retry it: the view sat
+		// view-only until the user touched it.
+		clearTimeout(this._reconnectRetryTimer);
+		// Say so for the whole wait: a drop (1006) shows no error dialog, so the
+		// view looked loaded while it was view-only and dropped what the user
+		// typed.
+		this._showReconnecting();
+		const ceiling = Math.min(
+			RECONNECT_RETRY_MAX_MS,
+			RECONNECT_RETRY_BASE_MS * Math.pow(2, this._reconnectRetries++),
+		);
+		// Jittered, so a fleet that dropped together does not retry together.
+		this._reconnectRetryTimer = setTimeout(
+			() => this._retryReconnect(),
+			ceiling / 2 + (Math.random() * ceiling) / 2,
+		);
+	}
+
+	/**
+	 * Retry a reconnect whose last attempt failed: the backoff timer, 'online'
+	 * and the tab coming into view all land here. It acts only while a reconnect
+	 * is outstanding and nothing is connected or handshaking. An idle-closed
+	 * document, a recycling server and a fatal error keep their own handling, a
+	 * hidden tab waits until it is seen, and _scheduleReconnect still applies
+	 * the load-failure cap.
+	 */
+	private _retryReconnect(): void {
+		if (!this._reconnecting || this._map._fatal) return;
+		if (app.idleHandler._documentIdle || app.idleHandler._serverRecycling)
+			return;
+		// _serverRecycling is gone once the recycled socket closes; the
+		// recycle's own 5-10 s interval is still the one reconnecting.
+		if (this._recycleIntervalLive()) return;
+		if (document.visibilityState === 'hidden') return;
+		if (this.connected() || this._handshakeInFlight()) return;
+		clearTimeout(this._reconnectRetryTimer);
+		// No user gesture here, so this reactivation leaves the caret alone. A
+		// retry that connects still makes the upstream grab once, from
+		// _onSocketOpen.
+		this._scheduleReconnect(false);
+	}
+
+	private _handshakeInFlight(): boolean {
+		return (
+			!!this.socket &&
+			this.socket.readyState === 0 &&
+			Date.now() - this._connectStartedAt < this._handshakePatience
+		);
+	}
+
+	/**
+	 * A reconnect handshake that hangs (a frozen task never answers the
+	 * upgrade) is replaced once it is past its patience. Nothing else would:
+	 * the backoff arms only from a close, and a passive viewer gives no input.
+	 * The patience starts at HANDSHAKE_PATIENCE_MS and doubles with each
+	 * handshake found hung, up to RECONNECT_RETRY_MAX_MS, and each wait adds up
+	 * to half of it again as jitter (30-45 s at the cap). The patience is the
+	 * handshake's own: input, focus, 'online' and the tab coming into view
+	 * leave it alone for as long (_handshakeInFlight), so a slow link's
+	 * handshake gets long enough to finish for a member who keeps working, not
+	 * only for one who is watching. Only a handshake still connecting is
+	 * replaced: one that answered, or that the client closed for a frame the
+	 * server ended it with, is left to that frame's own handling.
+	 */
+	private _armHandshakeWatchdog(handshake: SockInterface): void {
+		clearTimeout(this._reconnectRetryTimer);
+		const patience = Math.min(
+			RECONNECT_RETRY_MAX_MS,
+			HANDSHAKE_PATIENCE_MS * Math.pow(2, this._hungHandshakes),
+		);
+		// What _handshakeInFlight reads, for input, focus, 'online' and
+		// visibility as for this watchdog.
+		this._handshakePatience = patience;
+		// The 100 ms margin makes _handshakeInFlight see it as hung.
+		this._reconnectRetryTimer = setTimeout(
+			() => {
+				if (handshake.readyState !== 0) return;
+				this._retryReconnect();
+			},
+			patience + 100 + (Math.random() * patience) / 2,
+		);
+	}
+
+	/**
+	 * The first load's handshake gets the same patience as a reconnect's. A
+	 * network that holds the upgrade without answering it (a filtering proxy:
+	 * one customer's state network held about one in three on 2026-10-16)
+	 * never closes the socket, so _onSocketClose's initial-load retries and its
+	 * legacy-URL fallback never ran, and the document sat loading until the
+	 * host gave up at 105 s. Past its patience the handshake is closed and
+	 * handed to _onSocketClose as the transport drop it is, which spends one of
+	 * those retries. The patience grows as a reconnect's does, so a slow link
+	 * still finishes one.
+	 */
+	private _armInitialHandshakeWatchdog(handshake: SockInterface): void {
+		clearTimeout(this._initialHandshakeTimer);
+		const patience = Math.min(
+			RECONNECT_RETRY_MAX_MS,
+			HANDSHAKE_PATIENCE_MS * Math.pow(2, this._hungHandshakes),
+		);
+		this._handshakePatience = patience;
+		this._initialHandshakeTimer = setTimeout(() => {
+			if (handshake !== this.socket || handshake.readyState !== 0) return;
+			if (this._map._docLoadedOnce || this.ReconnectCount > 0) return;
+			this._hungHandshakes++;
+			this.close();
+			this._onSocketClose({
+				code: 1006,
+				wasClean: false,
+				reason: '',
+			} as CloseEvent);
+		}, patience + 100);
+	}
+
+	/**
+	 * A close the browser made up because the connection died (1006: no close
+	 * frame arrived), as opposed to one the server sent. wsd closes a session
+	 * it failed or refused with a close frame (1001, 1008), so its failures
+	 * are never this, even when the TCP teardown after that frame then fails
+	 * and the browser reports wasClean false with the server's code.
+	 */
+	private static _isTransportDrop(event: CloseEvent): boolean {
+		return event.code === 1006;
+	}
+
+	// Still the live this.timer: replaced (docunloading, a reload-after-close)
+	// or cleared (connected, `progress: ready`, manualReconnect) means it stood
+	// down.
+	private _recycleIntervalLive(): boolean {
+		return (
+			this._recycleTimer !== undefined && this._recycleTimer === this.timer
+		);
+	}
+
+	// A fatal load-error frame spends the budget, unless its own attempt's
+	// server close already did: wsd sends the frame and closes at once, and the
+	// native close can run before the slurped frame drains, even after input
+	// has started the next attempt. `frameAttempt` is the attempt the frame
+	// came from (a slurped frame's vulcanAttempt), passed down from _onMessage
+	// rather than kept on the socket: the handler's own hideBusy() re-enters
+	// _onMessage (UIManager's busy-popup fadeout) before this runs.
+	private _countLoadErrorFrame(frameAttempt: number | undefined): void {
+		const attempt =
+			frameAttempt !== undefined ? frameAttempt : this._connectCount;
+		// `> 0` also reads a receiver built without field initializers (the
+		// mocha rigs' Object.create) as no close having counted.
+		if (
+			this._loadFailureClosedAttempt > 0 &&
+			attempt === this._loadFailureClosedAttempt
+		)
+			return;
+		this._consecutiveLoadFailures++;
+	}
+
+	private _stopAfterLoadFailures(): boolean {
+		if (this._consecutiveLoadFailures >= MAX_CONSECUTIVE_LOAD_FAILURES) {
+			this._giveUpAfterLoadFailures();
+			return true;
+		}
+		return false;
+	}
+
+	private _giveUpAfterLoadFailures(): void {
+		// The error path and already-queued close callbacks can both reach this.
+		if (this._loadFailureGiveUpNotified) return;
+		this._loadFailureGiveUpNotified = true;
+		if (app.telemetry) {
+			app.telemetry.noteReconnectGiveUp();
+			app.telemetry.record('error_shown', {
+				error_class: 'loadfailuregiveup',
+			});
+		}
+		// Same channel the storage-failure path uses, so the host's existing
+		// App_LoadingStatus handler paints the Cancel/Retry card without new plumbing.
+		this._map.fire('postMessage', {
+			msgId: 'App_LoadingStatus',
+			args: {
+				Status: 'Failed',
+				Reason: 'loadfailuregiveup',
+			},
+		});
+	}
+
+	/**
+	 * Whether a reactivation no gesture in this frame drove (the socket's
+	 * opening, an unloading document's retry) may make the desktop Calc grab
+	 * (IdleHandler._activate). Not for a reload the server ordered while the
+	 * frame did not hold the keyboard (_onCloseMsg), until its document is back.
+	 * Not for any reconnect while the frame does not hold the keyboard now: the
+	 * person types in the host page (the agent composer), and after a
+	 * dropped connection the grab took that caret mid-word.
+	 */
+	private _reconnectMayGrabFocus(): boolean {
+		if (this._reloadLeavesCaret) return false;
+		return !this._reconnecting || document.hasFocus();
+	}
+
+	private _scheduleReconnect(allowFocusGrab: boolean = true): void {
+		// Initial-load close callbacks do not pass through _reconnectAfterClose.
+		if (this._stopAfterLoadFailures()) return;
 		app.idleHandler._active = false;
-		if (!app.idleHandler._documentIdle)
+		if (app.telemetry) app.telemetry.noteReconnectScheduled();
+		app.idleHandler._activate(allowFocusGrab);
+		// After the attempt _activate starts: a wait the server ended is
+		// over once there is a next attempt (see _showReconnecting).
+		this._showReconnecting();
+	}
+
+	/**
+	 * "Reconnecting..." for a loaded document, from its first close until the
+	 * reconnect's document is back, or an error frame or the server's close
+	 * says why not (_hideReconnecting). A snackbar with no timeout: it has no
+	 * overlay and never takes focus, on a phone too, where the router sends
+	 * snackbars to the desktop dialog layer, not the wizard. The busy popup was
+	 * a dimmed modal over the document (a wizard sheet on a phone) that blocked
+	 * the input that retries, and its fadeouts focused the frame. Each close,
+	 * wait and retry, and the reload's progress, asks again, which does nothing
+	 * while it is up. Before a document has loaded it is the loading bar, as
+	 * before.
+	 */
+	private _showReconnecting(): void {
+		if (app.idleHandler._documentIdle) return;
+		if (!this._map._docLayer) {
 			this._map.showBusy(_('Reconnecting...'), false);
-		app.idleHandler._activate();
+			return;
+		}
+		// A fatal error says what happened; nothing is reconnecting.
+		if (this._map._fatal) return;
+		// The server closed this attempt: the "cannot connect" dialog says so
+		// through its wait. The next attempt asks again.
+		if (
+			this._loadFailureClosedAttempt > 0 &&
+			this._loadFailureClosedAttempt === this._connectCount
+		)
+			return;
+		if (!app.sectionContainer || app.sectionContainer.testing) return;
+		// On a phone the "cannot connect" dialog is a wizard sheet at the bottom
+		// of the frame, where the card goes: the card came back over it at the
+		// next attempt, covered its Close button and swallowed the tap. The
+		// dialog says it while it is open; once the member closes it, the next
+		// close, wait or retry asks again.
+		const wizard = this._map.uiManager.mobileWizard;
+		if (
+			wizard &&
+			wizard._getContentForWindowId(
+				this._map.uiManager.generateModalId('cool_alert'),
+			)
+		)
+			return;
+		this._map.uiManager.showStickySnackbar(
+			'reconnecting',
+			_('Reconnecting...'),
+		);
+	}
+
+	private _hideReconnecting(): void {
+		if (this._map.uiManager)
+			this._map.uiManager.dismissSnackbar('reconnecting');
 	}
 
 	private _onSocketError(evt: Event): void {
@@ -699,6 +1068,9 @@ class Socket {
 		const delayMS = Math.max(Math.min(predictedTiles, 50), 1);
 
 		if (!this._slurpQueue) this._slurpQueue = [];
+		// Only the current socket's onmessage is live (close() detaches the old
+		// one's), so this frame belongs to the latest attempt.
+		e.vulcanAttempt = this._connectCount;
 		this._slurpQueue.push(e);
 		this._queueSlurpEventEmission(delayMS);
 	}
@@ -716,31 +1088,11 @@ class Socket {
 
 	private _sessionExpiredWarning(): void {
 		clearTimeout(this._accessTokenExpireTimeout);
-		let expirymsg = window.errorMessages.sessionexpiry;
-		if (
-			parseInt(this._map.options.docParams.access_token_ttl as string) -
-				Date.now() <=
-			0
-		) {
-			expirymsg = window.errorMessages.sessionexpired;
-		}
-		const dateTime = new Date(
-			parseInt(this._map.options.docParams.access_token_ttl as string),
-		);
-		const dateOptions: Intl.DateTimeFormatOptions = {
-			year: 'numeric',
-			month: 'short',
-			day: 'numeric',
-			hour: '2-digit',
-			minute: '2-digit',
-		};
-		const timerepr = dateTime.toLocaleDateString(String.locale, dateOptions);
-		this._map.fire('warn', { msg: expirymsg.replace('{time}', timerepr) });
-
-		// Notify the host so it can refresh the token programmatically.
 		const remainingMs =
 			parseInt(this._map.options.docParams.access_token_ttl as string) -
 			Date.now();
+		// Let the host renew the token without a session-expiry popup, including
+		// when the token has already expired.
 		this._map.fire('postMessage', {
 			msgId: 'App_TokenExpiring',
 			args: {
@@ -748,7 +1100,7 @@ class Socket {
 			},
 		});
 
-		// If user still doesn't refresh the session, warn again periodically.
+		// Repeat the host notification while renewal is outstanding.
 		// Cap at 10 retries (~20 minutes, i.e. ~5 minutes after the access_token
 		// expires) so we don't spam the host indefinitely.
 		this._accessTokenExpireWarningCount++;
@@ -1050,6 +1402,13 @@ class Socket {
 			return;
 		}
 
+		// Vulcan Office: a reconnect's status still in the slurp queue when its
+		// socket dropped is from an attempt that is gone. Taken as the document
+		// being back, it took "Reconnecting..." down, cleared the backoff the
+		// drop had armed and ended the reconnect on a dead socket, so nothing
+		// retried until the member gave input. The drop's own retry stands.
+		if (this._reconnecting && this._map._docLayer && !this.connected()) return;
+
 		if (!this._map._docLayer) {
 			Util.ensureValue(command.type);
 			// initialize and append text input before doc layer
@@ -1070,6 +1429,32 @@ class Socket {
 			}
 
 			// first status message, we need to create the document layer
+			//
+			// THE TILE GEOMETRY MUST DIVIDE BY THE SCALE THE CANVAS WILL
+			// RENDER AT. docstate.ts seeds app.dpiScale with the RAW
+			// devicePixelRatio at bundle eval; the phone tile-dpi clamp
+			// (VulcanTilePerf.TILE_DPI_CAP — dpr 3 -> 2) is stamped by the
+			// CanvasSectionContainer CONSTRUCTOR, which runs inside
+			// map.addLayer(docLayer) BELOW — i.e. AFTER the division a few
+			// lines down. On a dpr-3 phone the docLayer's tileWidthTwips was
+			// therefore divided by 3 while every tile is rasterised and
+			// displayed at 2: each tile covered two-thirds the twips it
+			// claimed, and the whole document rendered rawDpr/TILE_DPI_CAP =
+			// 1.5x wider than every analytic twips<->css conversion computes.
+			// MEASURED on build #2 (evidence rows WR-1/WR-2): a granted
+			// 4700-twip Writer reflow that VulcanWriterReflow's arithmetic
+			// read as 376 CSS px ("fits") painted ~564 CSS px on a 392 px
+			// viewport — 44% of horizontal overflow, headings cut mid-word —
+			// and the phone fit-zoom landed two rungs lower than the same
+			// document fits on an unclamped context. Apply the same clamp
+			// rule here, before the division; the constructor's later stamp
+			// is then idempotent. Desktop and tablet: clampTileDpi returns
+			// the raw value and this is a no-op.
+			app.dpiScale = VulcanTilePerf.clampTileDpi(
+				window.devicePixelRatio,
+				VulcanTilePerf.isVulcanPhoneChrome(),
+			);
+			app.roundedDpiScale = Math.round(app.dpiScale);
 			let tileWidthTwips = this._map.options.tileWidthTwips;
 			let tileHeightTwips = this._map.options.tileHeightTwips;
 			if (this._map.options.zoom !== this._map.options.defaultZoom) {
@@ -1112,14 +1497,38 @@ class Socket {
 			if (!window.mode.isSmallScreenDevice())
 				this._map.uiManager.initializeNotebookbarInCore();
 
+			// The document is back.
+			this._hideReconnecting();
 			// close all the popups otherwise document textArea will not get focus
-			this._map.uiManager.closeAll();
+			// The snackbar is not one: the "Reconnecting..." just taken down
+			// would be closed again, with focus moved back to what had it when
+			// it opened.
+			// Vulcan Office: no gesture in this frame drives this
+			// close either. While the frame does not hold the keyboard (the
+			// person types in the host page, in the agent composer), the close
+			// leaves focus where it is: it gave focus back to what had it when
+			// each dialog opened (JSDialog.focusToLastElement), and the rest of
+			// the word typed there landed in the document, as at the reload's
+			// close (_onCloseMsg).
+			this._map.uiManager.closeAll(
+				/* leaveSnackbar */ true,
+				/* focusHandled */ !document.hasFocus(),
+			);
 			this._map.setPermission(app.file.permission);
 			window.migrating = false;
 			this._map.uiManager.initializeSidebar();
 			this._map.uiManager.refreshTheme();
 		}
 
+		// The one place the counter may be cleared: a document actually loaded. Clearing it
+		// anywhere earlier (as `progress: ready` does for ReconnectCount) is what made the
+		// existing cap unreachable.
+		this._consecutiveLoadFailures = 0;
+		this._loadFailureGiveUpNotified = false;
+		this._reconnectRetries = 0;
+		this._hungHandshakes = 0;
+		this._reloadLeavesCaret = false;
+		clearTimeout(this._reconnectRetryTimer);
 		this._map.fire('docloaded', { status: true });
 		if (this._map._docLayer) {
 			this._map._docLayer._onMessage(textMsg);
@@ -1200,7 +1609,16 @@ class Socket {
 			const message = this._delayedMessages.shift();
 			Util.ensureValue(message);
 			try {
-				docLayer._onMessage(message.msg);
+				// Delayed messages predate the docLayer, so the slurp-time
+				// filter never saw them; offer it first for the same reason
+				// as the tail of _onMessage (a late invalidatetiles: would
+				// otherwise die in the docLayer's "should be filterd during
+				// slurp" branch, its payload dropped).
+				const evt = {
+					textMsg: message.msg,
+				} as unknown as SlurpMessageEvent;
+				if (!docLayer.filterSlurpedMessage(evt))
+					docLayer._onMessage(message.msg);
 			} catch (e) {
 				// unpleasant - but stops this one problem
 				// event stopping an unknown number of others.
@@ -1292,7 +1710,8 @@ class Socket {
 			this._onCloseMsg(textMsg);
 			return;
 		} else if (textMsg.startsWith('error:')) {
-			if (this._onErrorMsg(textMsg, command)) return;
+			const frameAttempt = (e as SlurpMessageEvent).vulcanAttempt;
+			if (this._onErrorMsg(textMsg, command, frameAttempt)) return;
 		} else if (textMsg.startsWith('fontsmissing:')) {
 			this._onFontsMissing(textMsg, command);
 		} else if (textMsg.startsWith('info:') && command.errorCmd === 'socket') {
@@ -1451,6 +1870,19 @@ class Socket {
 		if (!this._map._docLayer || this._handlingDelayedMessages) {
 			this._delayMessage(textMsg);
 		} else {
+			// Messages slurped before the docLayer existed (the load window)
+			// were never offered to filterSlurpedMessage (_slurpMessage only
+			// filters when a docLayer is present), so early slurp-filtered
+			// types — calc emits invalidatetiles: in its initial load burst —
+			// reach this tail instead. Offer the filter now: the docLayer's
+			// own _onMessage branch for these just logs "Message should be
+			// filterd during slurp" and DROPS the payload. When the docLayer
+			// existed at slurp time such messages never get here, so for
+			// steady-state traffic this is one startsWith per message.
+			if (
+				this._map._docLayer.filterSlurpedMessage(e as SlurpMessageEvent)
+			)
+				return;
 			this._map._docLayer._onMessage(textMsg, (e as SlurpMessageEvent).image);
 		}
 	}
@@ -1656,6 +2088,7 @@ class Socket {
 		app.idleHandler._active = false;
 		this.close();
 		clearTimeout(this.timer);
+		this._recycleTimer = undefined;
 		setTimeout(function () {
 			try {
 				app.idleHandler._activate();
@@ -1665,15 +2098,107 @@ class Socket {
 		}, timeout);
 	}
 
-	private _showDocumentConflictPopUp(errorDetail?: string): void {
-		const buttonList: { id: string; text: string }[] = [];
+	// Vulcan: wsd marks a savefailed frame vulcanunanswered=1 when the
+	// WOPI host never answered the save (a PutFile timeout) and advertises the
+	// save handshake. The host may well have stored it, and wsd sends it
+	// again for the host to judge. Upstream's "Document cannot be saved, please
+	// check your permissions." modal is false there (in it sat under the
+	// conflict dialog), so this says what is true, in a notice that blocks
+	// nothing and never takes focus: the keyed snackbar, taken down without
+	// moving focus (a plain snackbar's timeout gives focus back to the frame,
+	// which takes the host's caret). The host still hears that the save failed,
+	// marked vulcanUnanswered so it can tell this from a real failure (
+	// its save pill keeps "Saving" for the retry instead of "Not saved";
+	// Map.WOPI.js _noteStorageState). Without the token (an older wsd, or a
+	// host without the handshake) the modal stays.
+	private _onSaveUnanswered(command: ServerCommand): void {
+		const notice = _(
+			'Saving is taking longer than expected. Your edits are still in the editor and will be saved again.',
+		);
+		if (app.telemetry)
+			app.telemetry.record('error_shown', {
+				error_class: 'savefailed_unanswered',
+			});
+		this._map.uiManager.showStickySnackbar(SAVE_UNANSWERED_KEY, notice);
+		clearTimeout(this._saveUnansweredTimer);
+		this._saveUnansweredTimer = setTimeout(() => {
+			this._saveUnansweredTimer = undefined;
+			this._map.uiManager.dismissSnackbar(SAVE_UNANSWERED_KEY);
+		}, SAVE_UNANSWERED_NOTICE_MS);
+		this._map.fire('postMessage', {
+			msgId: 'Action_Save_Resp',
+			args: {
+				success: false,
+				cmd: command.errorCmd,
+				result: command.errorKind,
+				errorMsg: notice,
+				Phase: 'storage',
+				vulcanUnanswered: true,
+			},
+		});
+	}
+
+	// @keepsSave: wsd marked the frame vulcankeepssave=1 (the WOPI host has the
+	// handshake and has not just refused a save without keeping it).
+	private _showDocumentConflictPopUp(
+		errorDetail?: string,
+		keepsSave: boolean = false,
+	): void {
+		const buttonList: { id: string; text: string; has_default?: boolean }[] =
+			[];
 		const callbackList: { id: string; func_: (() => void) | null }[] = [];
 
-		buttonList.push({ id: 'cancel-conflict-popup', text: _('Cancel') });
-		callbackList.push({ id: 'cancel-conflict-popup', func_: null });
+		// Vulcan: the choices say what happens to the edits.
+		if (keepsSave) {
+			// Our WOPI host refuses a save made on a moved head and keeps its
+			// bytes as a version (or combines them with the newer version and
+			// keeps a backup), and the fork then reloads (handleDocumentConflict,
+			// reloadResolved). So the first button is a real save, the toolbar's
+			// own (never 'savetostorage force=1', which sends no timestamp and
+			// can overwrite the newer version): the host's verdict decides what
+			// follows. A refusal it kept reloads; a 200 means storage had not
+			// moved after all and the edits are in the document; a refusal it
+			// could not keep brings this dialog back without the promise. There
+			// is no Cancel: it only put off the same refusal to the next
+			// autosave while the person kept typing into a document about to
+			// reload. Once pressed the modal closes; the guard keeps a double
+			// click from sending a second save before it does.
+			let saveSent = false;
+			buttonList.push({
+				id: 'save-edits-as-version',
+				text: _('Save my edits as a version, then reload'),
+				has_default: true,
+			});
+			callbackList.push({
+				id: 'save-edits-as-version',
+				func_: () => {
+					if (saveSent) return;
+					saveSent = true;
+					this._map.save(
+						false /* An explicit save should terminate cell edit */,
+						false /* An explicit save should save it again */,
+					);
+				},
+			});
+		} else {
+			// Nothing would keep a save sent from here: the host just refused
+			// one without keeping it (it could not write the copy, or another
+			// editor holds the document), or it has no handshake. A save would
+			// get the same answer and this dialog again, so none is offered,
+			// and the person can go on editing: the edits stay in this editor
+			// and the next save tries again.
+			buttonList.push({
+				id: 'keep-editing',
+				text: _('Keep editing'),
+				has_default: true,
+			});
+			callbackList.push({ id: 'keep-editing', func_: null });
+		}
 
-		buttonList.push({ id: 'discard-button', text: _('Discard') });
-		buttonList.push({ id: 'overwrite-button', text: _('Overwrite') });
+		buttonList.push({
+			id: 'discard-button',
+			text: _('Discard my edits and reload'),
+		});
 
 		callbackList.push({
 			id: 'discard-button',
@@ -1682,12 +2207,11 @@ class Socket {
 			}.bind(this),
 		});
 
-		callbackList.push({
-			id: 'overwrite-button',
-			func_: function (this: Socket) {
-				this.sendMessage('savetostorage force=1');
-			}.bind(this),
-		});
+		// Vulcan: no "Overwrite" button. Since the vulcanConflictResolution
+		// handshake (#6356), a stale-based write parks server-side as a
+		// conflicted copy and can never become the current revision, so a
+		// force-save ('savetostorage force=1') just loops back into this
+		// same conflict popup.
 
 		if (!this._map['wopi'].UserCanNotWriteRelative) {
 			buttonList.push({ id: 'save-to-new-file', text: _('Save to new file') });
@@ -1703,11 +2227,18 @@ class Socket {
 			});
 		}
 
-		const title = _('Document has been changed');
-		const message = _(
-			'Document has been changed in storage. What would you like to do with your unsaved changes?',
-		);
+		const title = _('This document changed while you were editing');
+		const message = keepsSave
+			? _(
+					'A newer version of this document was saved while you had unsaved edits. Saving keeps a copy of your edits in Version history, then opens the newer version. Discarding opens the newer version without your edits.',
+				)
+			: _(
+					'A newer version of this document was saved while you had unsaved edits. Your edits are not saved anywhere yet: they are only in this editor. Keep editing to hold on to them while saving is tried again, or discard them to open the newer version.',
+				);
 
+		// Opened while the person types in the host page (the agent
+		// composer), it takes no focus: the next keys typed there would land in
+		// the dialog, and an Enter or a Space would press a button in it.
 		this._map.uiManager.showModalWithCustomButtons(
 			'document-conflict-popup',
 			title,
@@ -1716,6 +2247,7 @@ class Socket {
 			buttonList,
 			callbackList,
 			errorDetail,
+			/* focusHandled */ !document.hasFocus(),
 		);
 	}
 
@@ -1815,6 +2347,10 @@ class Socket {
 					msgId: 'Action_Save_Resp',
 					args: {
 						success: true,
+						// Routes this ack to the Action_SaveAs/export entry
+						// in Map.WOPI's funnel — untagged it would be misread
+						// as the kit ack of a pending Action_Save.
+						cmd: 'saveas',
 						fileName: decodeURIComponent(command.filename),
 					},
 				});
@@ -1830,12 +2366,14 @@ class Socket {
 	private _onCoolServerMsg(textMsg: string): boolean {
 		// This must be the first message, unless we reconnect.
 		let oldVersion = '';
+		let oldHash = '';
 		let sameFile = true;
 		// Check if we are reconnecting.
 		if (this.WSDServer && this.WSDServer.Id) {
 			// Yes we are reconnecting.
 			// If our connection was lost and is ready again, we will not need to refresh the page.
 			oldVersion = this.WSDServer.Version;
+			oldHash = this.WSDServer.Hash;
 
 			window.app.console.assert(
 				this._map.options.wopiSrc === window.wopiSrc,
@@ -1856,7 +2394,12 @@ class Socket {
 		) as WSDServerInfo;
 
 		if (oldVersion && sameFile) {
-			if (this.WSDServer.Version !== oldVersion) {
+			// The hash is the build's, so an image change reloads too: this
+			// page's script was served by the build it last spoke to.
+			if (
+				this.WSDServer.Version !== oldVersion ||
+				this.WSDServer.Hash !== oldHash
+			) {
 				let reloadMessage = _(
 					'Server is now reachable. We have to refresh the page now.',
 				);
@@ -1890,7 +2433,7 @@ class Socket {
 						'{productname}',
 						typeof brandProductName !== 'undefined'
 							? brandProductName
-							: 'Collabora Online Development Edition (unbranded)',
+							: 'Vulcan Office',
 					);
 					msg = msg.replace('{0}', window.expectedServerId);
 					msg = msg.replace('{1}', window.routeToken);
@@ -1959,7 +2502,11 @@ class Socket {
 		const perm = textMsg.substring('perm:'.length).trim();
 
 		// Never make the permission more permissive than it originally was.
+		// One exception: readonly imposed by a failed WOPI lock (canTryLock)
+		// is transient, and 'perm: edit' is wsd granting an attemptlock retry.
 		if (!app.isReadOnly()) app.setPermission(perm);
+		else if (perm === 'edit' && this._map.options.canTryLock)
+			app.setPermission(perm);
 
 		if (this._map._docLayer) this._map.setPermission(app.file.permission);
 
@@ -2011,6 +2558,21 @@ class Socket {
 	// 'lastmodtime: ' message.
 	private _onLastModTimeMsg(textMsg: string): void {
 		const time = textMsg.substring(textMsg.indexOf(' ') + 1);
+		// wsd broadcasts lastmodtime: at the end of every successful storage
+		// upload (DocumentBroker::handleUploadToStorageSuccessful) and
+		// otherwise only at session join. No affirmative upload-success
+		// commandresult exists on the wire, so this is the storage-success
+		// signal: Map.WOPI's funnel forwards it only while a host save is
+		// awaiting its storage verdict and otherwise just marks storage
+		// clean (save-contract.md §4, incl. the in-flight-upload residual).
+		this._map.fire('postMessage', {
+			msgId: 'Action_Save_Resp',
+			args: {
+				success: true,
+				result: 'uploaded',
+				Phase: 'storage',
+			},
+		});
 		this._map.updateModificationIndicator(time);
 	}
 
@@ -2034,6 +2596,20 @@ class Socket {
 	// 'commandresult: ' message.
 	private _onCommandResultMsg(textMsg: string): void {
 		const commandresult = JSON.parse(textMsg.substring(textMsg.indexOf('{')));
+		// Telemetry: save/load outcomes — success boolean and command word
+		// only; the error message text never leaves the frame.
+		if (
+			app.telemetry &&
+			(commandresult['command'] === 'savetostorage' ||
+				commandresult['command'] === 'save' ||
+				commandresult['command'] === 'load')
+		) {
+			app.telemetry.record('command_result', {
+				command: String(commandresult['command']),
+				success: commandresult['success'] !== false,
+				had_error: !!commandresult['errorMsg'],
+			});
+		}
 		if (
 			commandresult['command'] === 'savetostorage' ||
 			commandresult['command'] === 'save'
@@ -2042,6 +2618,12 @@ class Socket {
 				success: commandresult['success'],
 				result: commandresult['result'],
 				errorMsg: commandresult['errorMsg'],
+				// `commandresult: command=save` frames are DocumentBroker's
+				// broadcastSaveResult — the STORAGE-side verdict, distinct
+				// from the kit's unocommandresult jail ack (which reaches the
+				// host untagged via Control.Toolbar). Map.WOPI's funnel routes
+				// on this tag (see save-contract.md).
+				Phase: 'storage',
 			};
 
 			this._map.fire('postMessage', {
@@ -2099,6 +2681,15 @@ class Socket {
 	// 'close: ' message.
 	private _onCloseMsg(textMsg: string): void {
 		textMsg = textMsg.substring('close: '.length);
+		// Telemetry: kit/server-initiated close taxonomy. The leading token is
+		// a fixed protocol constant (ownertermination|idle|oom|shuttingdown|
+		// docdisconnected|recycling|documentconflict|…) — never user text.
+		if (app.telemetry)
+			app.telemetry.record('kit_disconnect', {
+				reason: (textMsg.split(/[\s:]/)[0] || 'unknown')
+					.toLowerCase()
+					.slice(0, 32),
+			});
 		const postMsgData: any = {};
 		let showMsgAndReload = false;
 		// This is due to document owner terminating the session
@@ -2129,6 +2720,7 @@ class Socket {
 				if (this.connected()) {
 					// We're connected: cancel timer and dialog.
 					clearTimeout(this.timer);
+					this._recycleTimer = undefined;
 					return;
 				}
 
@@ -2138,6 +2730,7 @@ class Socket {
 					window.app.console.warn('Cannot load document.');
 				}
 			}, timeoutMs);
+			this._recycleTimer = this.timer;
 		} else if (textMsg.startsWith('documentconflict')) {
 			showMsgAndReload = true;
 		} else if (textMsg.startsWith('versionrestore:')) {
@@ -2153,6 +2746,17 @@ class Socket {
 			showMsgAndReload = true;
 		}
 
+		// Vulcan Office (R7): the server sent this close; it is
+		// no gesture in this frame. When the frame does not hold the keyboard
+		// (the person is typing in the host page, in the agent composer), nothing
+		// here may move focus into it: closing the dialogs below would give focus
+		// back to what had it when each opened (JSDialog.focusToLastElement), and
+		// the reload's reactivation grabs it on desktop Calc. In a
+		// documentconflict reload took the composer's caret, and the rest of the
+		// word typed there landed in the document. A frame that holds the
+		// keyboard keeps upstream's focus handling.
+		const leaveCaret = !document.hasFocus();
+
 		if (showMsgAndReload) {
 			if (this._map._docLayer) {
 				this._map._docLayer.removeAllViews();
@@ -2163,11 +2767,14 @@ class Socket {
 
 			// Reload the document
 			app.idleHandler._active = false;
+			// Read by _onSocketOpen, until the reloaded document is back.
+			this._reloadLeavesCaret = leaveCaret;
+			const allowFocusGrab = !leaveCaret;
 			clearTimeout(this.timer);
 			this.timer = setInterval(() => {
 				try {
 					// Activate and cancel timer and dialogs.
-					app.idleHandler._activate();
+					app.idleHandler._activate(allowFocusGrab);
 					this._map.uiManager.documentNameInput.hideLoadingAnimation();
 				} catch (error) {
 					window.app.console.warn('Cannot activate map');
@@ -2176,7 +2783,7 @@ class Socket {
 		}
 
 		// Close any open dialogs first.
-		this._map.uiManager.closeAll();
+		this._map.uiManager.closeAll(/* leaveSnackbar */ false, leaveCaret);
 
 		if (textMsg === 'idle' || textMsg === 'oom') {
 			app.idleHandler._dim();
@@ -2198,10 +2805,74 @@ class Socket {
 
 	// 'error: ' message.
 	// returns true if the caller need to exit immediately.
-	private _onErrorMsg(textMsg: string, command: ServerCommand): boolean {
+	private _onErrorMsg(
+		textMsg: string,
+		command: ServerCommand,
+		frameAttempt?: number,
+	): boolean {
 		const errorMessages = window.errorMessages;
 		let msg = '';
 		let passwordType: string = '';
+		if (
+			textMsg.startsWith('error:') &&
+			command.errorCmd === 'transformdocumentstructure'
+		) {
+			// VULCAN (R6-10): the only client-socket sender of
+			// `transformdocumentstructure` is the Impress agent bridge
+			// (VulcanImpressBridge.slideTransform), and IT owns the outcome:
+			// the host tool that dispatched the verb receives the rejection
+			// and decides what the user sees against canvas reality. Left
+			// unconsumed, this frame fell through to the docLayer's generic
+			// dialog — "The server encountered a(n) <kind> error while
+			// parsing the transformdocumentstructure command" — a modal
+			// blaming the user's turn for a wire-internal failure, shown even
+			// when the edit later landed by another lane. Route it to the
+			// bridge's pending transform instead; telemetry, not a toast.
+			if (app.telemetry)
+				app.telemetry.record('error_shown', {
+					error_class: 'transformdocumentstructure_' + (command.errorKind ?? 'unknown'),
+				});
+			window.app.console.error(
+				'transformdocumentstructure refused by server: kind=' +
+					command.errorKind,
+			);
+			this._map.fire('vulcantransformerror', {
+				kind: command.errorKind ? command.errorKind : 'unknown',
+				errorDetail: command.errorDetail,
+			});
+			return true; // consumed: the bridge ack carries the outcome.
+		}
+		if (textMsg.startsWith('error:') && command.errorCmd === 'save') {
+			// wsd refuses `save` on a session without storage write permission
+			// (ClientSession.cpp `!isWritable()` -> `error: cmd=save
+			// kind=savefailed`). This errorCmd was unrouted: no ack reached
+			// the host (its pending save burned the full timeout) and the
+			// frame fell through to the docLayer's generic "error while
+			// parsing the save command" dialog. Fail the save fast and
+			// attributably instead (save-contract.md, finding 26).
+			this._map.hideBusy();
+			if (app.telemetry)
+				app.telemetry.record('error_shown', {
+					error_class: 'savefailed_readonly',
+				});
+			this._map.fire('postMessage', {
+				msgId: 'Action_Save_Resp',
+				args: {
+					success: false,
+					cmd: 'save',
+					result: command.errorKind ? command.errorKind : 'savefailed',
+					errorMsg: errorMessages.storage.savefailed,
+					// The save never ran in core: a kit-phase terminal
+					// failure, not a storage-upload verdict.
+					Phase: 'core',
+				},
+			});
+			this._map.fire('warn', {
+				msg: errorMessages.storage.savefailed,
+				errorDetail: command.errorDetail,
+			});
+			return true; // consumed: suppress the generic parse-error dialog.
+		}
 		if (
 			(textMsg.startsWith('error:') &&
 				(command.errorCmd === 'storage' || command.errorCmd === 'saveas')) ||
@@ -2213,12 +2884,22 @@ class Socket {
 					msgId: 'Action_Save_Resp',
 					args: {
 						success: false,
+						cmd: command.errorCmd,
 						result: command.errorKind,
+						Phase: 'storage',
 					},
 				});
 			}
 
 			this._map.hideBusy();
+			if (
+				command.errorCmd === 'storage' &&
+				command.errorKind === 'savefailed' &&
+				command.vulcanUnanswered
+			) {
+				this._onSaveUnanswered(command);
+				return true; // caller should exit immediately.
+			}
 			let storageError: string | undefined = undefined;
 			if (command.errorKind === 'savediskfull') {
 				storageError = errorMessages.storage.savediskfull;
@@ -2238,14 +2919,32 @@ class Socket {
 				// better we do it first so that another error message doesn't override this one
 				// upon socket close.
 				this.close();
+				this._hideReconnecting();
 			} else if (command.errorKind === 'documentconflict') {
 				console.error(
 					'Document conflict: storage copy changed underneath unsaved edits.',
 					'\nTechnical details: ' + command.errorDetail,
 				);
+				// Ack a pending host-initiated Action_Save instead of letting
+				// the host burn its timeout; Map.WOPI's _postMessage funnel
+				// drops this when no Notify save is pending.
+				this._map.fire('postMessage', {
+					msgId: 'Action_Save_Resp',
+					args: {
+						success: false,
+						cmd: command.errorCmd,
+						result: command.errorKind,
+						errorMsg: _('Document has been changed in storage.'),
+						Phase: 'storage',
+					},
+				});
 				if (this._map.isReadOnlyMode())
 					return true; // caller should exit immediately.
-				else this._showDocumentConflictPopUp(command.errorDetail);
+				else
+					this._showDocumentConflictPopUp(
+						command.errorDetail,
+						!!command.vulcanKeepsSave,
+					);
 
 				return true; // caller should exit immediately.
 			}
@@ -2270,6 +2969,7 @@ class Socket {
 					cmd: command.errorCmd,
 					result: command.errorKind,
 					errorMsg: storageError,
+					Phase: 'storage',
 				};
 
 				this._map.fire('postMessage', {
@@ -2284,6 +2984,7 @@ class Socket {
 			command.errorCmd === 'internal'
 		) {
 			this._map.hideBusy();
+			this._hideReconnecting();
 			this._map._fatal = true;
 			if (command.errorKind === 'diskfull') {
 				this._map.fire('error', {
@@ -2311,10 +3012,23 @@ class Socket {
 
 			return true; // caller should exit immediately.
 		} else if (textMsg.startsWith('error:') && command.errorCmd === 'load') {
+			// A frame queued from an attempt that input has since replaced: that
+			// attempt is gone, and the one in progress is not closed, muted or
+			// reported for it. A failed load still spends the budget, once.
+			if (frameAttempt !== undefined && frameAttempt !== this._connectCount) {
+				const kind = command.errorKind || '';
+				if (!/^(passwordrequired|wrongpassword|docunloading)/.test(kind))
+					this._countLoadErrorFrame(frameAttempt);
+				this._stopAfterLoadFailures();
+				return true;
+			}
 			this._map.hideBusy();
 			this.close();
 
 			const errorKind = command.errorKind ? command.errorKind : '';
+			// From here the error says what happened, except that the document
+			// is still unloading, which this reconnect waits out and retries.
+			if (!errorKind.startsWith('docunloading')) this._hideReconnecting();
 			let passwordNeeded = false;
 			if (errorKind.startsWith('passwordrequired')) {
 				passwordNeeded = true;
@@ -2331,12 +3045,14 @@ class Socket {
 				passwordNeeded = true;
 				msg = _('Wrong password provided. Please try again.');
 			} else if (errorKind.startsWith('faileddocloading')) {
+				this._countLoadErrorFrame(frameAttempt);
 				this._map._fatal = true;
 				this._map.fire('error', {
 					msg: errorMessages.faileddocloading,
 					errorDetail: command.errorDetail,
 				});
 			} else if (errorKind.startsWith('docloadtimeout')) {
+				this._countLoadErrorFrame(frameAttempt);
 				this._map._fatal = true;
 				this._map.fire('error', { msg: errorMessages.docloadtimeout });
 			} else if (errorKind.startsWith('docunloading')) {
@@ -2346,15 +3062,25 @@ class Socket {
 				clearTimeout(this.timer);
 				if (this.ReconnectCount++ >= 10) {
 					this._map.fire('error', { msg: errorMessages.docunloadinggiveup });
+					if (app.telemetry) {
+						app.telemetry.noteReconnectGiveUp();
+						app.telemetry.record('error_shown', {
+							error_class: 'docunloadinggiveup',
+						});
+					}
 					// Give up.
 					return true; // caller should exit immediately.
 				}
 
+				// A reload the server ordered while the frame did not hold the
+				// keyboard, or a reconnect while it does not hold it at the tick,
+				// waits out the unloading document without the grab.
 				this.timer = setInterval(
-					function () {
+					() => {
 						try {
 							// Activate and cancel timer and dialogs.
-							app.idleHandler._activate();
+							const allowFocusGrab = this._reconnectMayGrabFocus();
+							app.idleHandler._activate(allowFocusGrab);
 						} catch (error) {
 							window.app.console.warn('Cannot activate map');
 						}
@@ -2364,10 +3090,13 @@ class Socket {
 				); // Quadratic back-off.
 
 				if (this.ReconnectCount > 1) {
-					this._map.showBusy(errorMessages.docunloadingretry, false);
+					if (this._reconnecting && this._map._docLayer)
+						this._showReconnecting();
+					else this._map.showBusy(errorMessages.docunloadingretry, false);
 				}
 			} else {
 				// Any other load error (io, network, etc.)
+				this._countLoadErrorFrame(frameAttempt);
 				this._map._fatal = true;
 				this._map.fire('error', {
 					msg: errorMessages.faileddocloading,
@@ -2379,6 +3108,9 @@ class Socket {
 				this._askForDocumentPassword(passwordType, msg);
 				return true; // caller should exit immediately.
 			}
+			// close() detaches onclose, so fatal error processing must notify the
+			// host itself rather than relying on a later native close callback.
+			this._stopAfterLoadFailures();
 		} else if (
 			textMsg.startsWith('error:') &&
 			command.errorCmd === 'dialogevent' &&
@@ -2418,33 +3150,13 @@ class Socket {
 			msg += fontsMissingObj.fontsmissing[i];
 		}
 
-		if (
-			this._map.welcome &&
-			!this._map.welcome.isGuest() &&
-			this._map.welcome.shouldWelcome() &&
-			window.autoShowWelcome
-		) {
-			setTimeout(
-				function (this: Socket) {
-					this._map.uiManager.showInfoModal(
-						'fontsmissing',
-						_('Missing Fonts'),
-						msg,
-						null,
-						_('Close'),
-					);
-				}.bind(this),
-				60000,
-			);
-		} else {
-			this._map.uiManager.showInfoModal(
-				'fontsmissing',
-				_('Missing Fonts'),
-				msg,
-				null,
-				_('Close'),
-			);
-		}
+		this._map.uiManager.showInfoModal(
+			'fontsmissing',
+			_('Missing Fonts'),
+			msg,
+			null,
+			_('Close'),
+		);
 	}
 
 	// 'info: ' message.
@@ -2462,7 +3174,7 @@ class Socket {
 				'{productname}',
 				typeof brandProductName !== 'undefined'
 					? brandProductName
-					: 'Collabora Online Development Edition (unbranded)',
+					: 'Vulcan Office',
 			);
 			this._map.fire('infobar', {
 				msg: textMsg,
@@ -2593,16 +3305,27 @@ class Socket {
 		info.statusType = info.id;
 		info.background = info.type == 'bg';
 
+		// A loaded document's reconnect says it in the card through its reload
+		// as through its waits. Map.showBusy raises the busy popup there, a
+		// modal over the document (a wizard sheet on a phone) whose fadeout
+		// moves focus into the frame.
+		const reconnecting = this._reconnecting && !!this._map._docLayer;
 		if (info.id == 'find' || info.id == 'connect' || info.id == 'ready') {
-			this._map.showBusy(
-				window.ThisIsAMobileApp ? _('Loading...') : _('Connecting...'),
-				true,
-			);
+			if (reconnecting) this._showReconnecting();
+			else
+				this._map.showBusy(
+					window.ThisIsAMobileApp ? _('Loading...') : _('Connecting...'),
+					true,
+				);
 			if (info.id == 'ready') {
 				// We're connected: cancel timer and dialog.
 				this.ReconnectCount = 0;
 				clearTimeout(this.timer);
+				this._recycleTimer = undefined;
 			}
+		} else if (info.id == 'start' && reconnecting && !info.background) {
+			// The document's own load (Map._onUpdateProgress: Map.showBusy).
+			this._showReconnecting();
 		} else if (info.id == 'start' || info.id == 'setvalue') {
 			this._map.fire('statusindicator', info);
 		} else if (info.id == 'finish') {

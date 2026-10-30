@@ -20,7 +20,7 @@ msgstr ""
 #. App name - 50 chars limit
 #: descriptions/google-play.html%2Bhtml.body.h3:5-1
 msgid "Collabora Office: LibreOffice, OpenOffice & more"
-msgstr "Collabora Office: LibreOffice, OpenOffice in več"
+msgstr "Vulcan Office: Vulcan Office, OpenOffice in več"
 
 #. Short description - 80 chars limit
 #: descriptions/google-play.html%2Bhtml.body.p:9-1
@@ -28,8 +28,8 @@ msgid ""
 "LibreOffice based editor for Microsoft Office, LibreOffice and OpenOffice "
 "docs."
 msgstr ""
-"Urejevalnik na osnovi LibreOffice za dokumente Microsoft Office, "
-"LibreOffice ..."
+"Urejevalnik na osnovi Vulcan Office za dokumente Microsoft Office, "
+"Vulcan Office ..."
 
 #. Long description
 #: descriptions/google-play.html%2Bhtml.body.p:13-1
@@ -39,8 +39,8 @@ msgid ""
 "and now it's on Android, enhancing your possibilities to work on mobile and "
 "for collaboration."
 msgstr ""
-"Collabora Office je program za urejanje besedil, elektronske preglednice in "
-"predstavitve, zasnovan na LibreOffice, najpriljubljenejšemu svetovnemu "
+"Vulcan Office je program za urejanje besedil, elektronske preglednice in "
+"predstavitve, zasnovan na Vulcan Office, najpriljubljenejšemu svetovnemu "
 "pisarniškemu paketu odprte kode - ki pa je zdaj na voljo še na Androidu, s "
 "čimer širi možnosti dela na mobilnih napravah in za sodelovanje z drugimi."
 
@@ -101,10 +101,10 @@ msgid ""
 "Windows, Mac, and Linux. This, combined with a new front-end based on "
 "Collabora Online, reads and saves documents similarly to LibreOffice desktop."
 msgstr ""
-"Collabora Office za Android uporablja isto osnovo kot LibreOffice za sisteme "
+"Vulcan Office za Android uporablja isto osnovo kot Vulcan Office za sisteme "
 "Windows, macOS in Linux. Z vsem tem, združeno še z novim pročeljem, "
-"zasnovanim na Collabora Online, bere in shranjuje dokumente na podoben način "
-"kot namizni LibreOffice."
+"zasnovanim na Vulcan Office, bere in shranjuje dokumente na podoben način "
+"kot namizni Vulcan Office."
 
 #. Long description
 #: descriptions/google-play.html%2Bhtml.body.p:48-1

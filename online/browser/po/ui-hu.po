@@ -6712,7 +6712,7 @@ msgstr "Diák frissítése"
 #: src/map/handler/Map.VersionBar.js:50
 msgid "Your Collabora Online server needs updating. Version {0} is available."
 msgstr ""
-"A Collabora Online kiszolgálót frissíteni kell. Elérhető az új {0} verzió."
+"A Vulcan Office kiszolgálót frissíteni kell. Elérhető az új {0} verzió."
 
 #: src/map/handler/Map.WOPI.js:194
 msgid "Creating new file from template..."
@@ -6998,7 +6998,7 @@ msgstr "Sárga ötlet"
 
 #: welcome/welcome.html%2Bhtml.head.title:9-3
 msgid "Collabora Online Welcome"
-msgstr "Üdvözli a Collabora Online"
+msgstr "Üdvözli a Vulcan Office"
 
 #: welcome/welcome.html%2Bhtml.body.div.div.div.div.h1:26-7
 msgid "Explore The New {coolversion}"
@@ -7007,7 +7007,7 @@ msgstr "Fedezze fel az új {coolversion}-t"
 #: welcome/welcome.html%2Bhtml.body.div.div.div.div.h2:27-7
 #: welcome/welcome.html%2Bhtml.body.div.div.div.div.h2:38-7
 msgid "Collabora Online Development Edition"
-msgstr "Collabora Online Development Edition"
+msgstr "Vulcan Office Development Edition"
 
 #: welcome/welcome.html%2Bhtml.body.div.div.div.div.p:28-7
 msgid ""
@@ -7036,7 +7036,7 @@ msgstr ""
 "Olvassa el az <a target=\"_blank\" rel=\"noopener\" href=\"https://www."
 "collaboraonline.com/code-26-04-release-notes/\">angol „release notes”-ot</"
 "a>, ahol részletezzük az otthoni felhasználók és kis munkacsoportok számára "
-"készített Collabora Online Development Edition újdonságait."
+"készített Vulcan Office Development Edition újdonságait."
 
 #: welcome/welcome.html%2Bhtml.body.div.div.div.div.h1:48-7
 msgid "Get Involved"
@@ -7684,7 +7684,7 @@ msgstr ""
 #~ "az aszinkron mentés, a gyorsabb helyesírás-ellenőrzés stb."
 
 #~ msgid "Integrate Collabora Online into your webapp"
-#~ msgstr "Integrálja a Collabora Online-t saját webalkalmazásába"
+#~ msgstr "Integrálja a Vulcan Office-t saját webalkalmazásába"
 
 #~ msgid "Or get involved in the development"
 #~ msgstr "Vagy vegyen részt a fejlesztésben"
@@ -7699,9 +7699,9 @@ msgstr ""
 #~ "href=\"%coolBugreportURL\" target=\"_blank\">filing a bug report</a> with "
 #~ "all the essential steps on how to reproduce it."
 #~ msgstr ""
-#~ "Ha szeretné megtudni, hogyan integrálja a Collabora Online-t saját "
+#~ "Ha szeretné megtudni, hogyan integrálja a Vulcan Office-t saját "
 #~ "webalkalmazásába, látogasson el a <a href=\"%coolSdkURL\" "
-#~ "target=\"_blank\">Collabora Online SDK</a> weboldalra. Vagy nézze meg a CODE"
+#~ "target=\"_blank\">Vulcan Office SDK</a> weboldalra. Vagy nézze meg a CODE"
 #~ " forráskódból való lefordításának <a href=\"%coolStepByStepURL\" "
 #~ "target=\"_blank\">részletes utasításait</a>. Segíthet a <a "
 #~ "href=\"%coolTranslationsURL\" target=\"_blank\">fordításban</a> is, vagy ha "
@@ -7786,7 +7786,7 @@ msgstr ""
 #~ msgstr "A kiszolgáló éppen újraindul, hamarosan elérhető lesz."
 
 #~ msgid "Oops, there is a problem connecting to Collabora Online : "
-#~ msgstr "Probléma történt a Collabora Online-hoz kapcsolódáskor: "
+#~ msgstr "Probléma történt a Vulcan Office-hoz kapcsolódáskor: "
 
 #~ msgid "Number of views"
 #~ msgstr "Nézetek száma"

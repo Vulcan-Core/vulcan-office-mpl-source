@@ -53,6 +53,7 @@
 
 #include <strings.hrc>
 #include <utility>
+#include <algorithm>
 
 using namespace ::com::sun::star;
 
@@ -487,6 +488,12 @@ bool SwUndoInsert::IsIndependent(const SwUndoInsert& rOther) const
     return m_nNode != rOther.m_nNode;
 }
 
+std::optional<sw::UndoFootprint> SwUndoInsert::GetFootprint() const
+{
+    // An append (the node-inserting constructor) adds a node: every later node index moves.
+    return sw::UndoFootprint{ m_nNode, m_nNode, !m_bIsAppend };
+}
+
 class SwUndoReplace::Impl
     : private SwUndoSaveContent
 {
@@ -510,6 +517,13 @@ public:
 
     OUString const& GetOld() const { return m_sOld; }
     OUString const& GetIns() const { return m_sIns; }
+
+    std::optional<sw::UndoFootprint> GetFootprint() const
+    {
+        const bool bNeutral = !m_bSplitNext && m_nSttNd == m_nEndNd && m_nOffset == SwNodeOffset(0)
+                              && SwUndo::IsHistoryNodeNeutral(m_pHistory.get());
+        return sw::UndoFootprint{ m_nSttNd, std::max(m_nSttNd, m_nEndNd), bNeutral };
+    }
 };
 
 SwUndoReplace::SwUndoReplace(SwPaM const& rPam,
@@ -521,6 +535,11 @@ SwUndoReplace::SwUndoReplace(SwPaM const& rPam,
 
 SwUndoReplace::~SwUndoReplace()
 {
+}
+
+std::optional<sw::UndoFootprint> SwUndoReplace::GetFootprint() const
+{
+    return m_pImpl->GetFootprint();
 }
 
 void SwUndoReplace::UndoImpl(::sw::UndoRedoContext & rContext)

@@ -11,7 +11,8 @@
 
 namespace cool {
 	/// Walk a JSON primitive tree and collect the checksums of every
-	/// image-bearing primitive seen. Recurses into the children container.
+	/// image-bearing primitive seen. Recurses into the children container,
+	/// and into a transparence's mask, which can draw images too.
 	export class VectorBitmapWalker {
 		private _checksums: Set<number>;
 
@@ -33,6 +34,12 @@ namespace cool {
 			if (GraphicResource.is(primitive))
 				this._checksums.add(primitive.checksum);
 			if (primitive.children) this.walkPrimitives(primitive.children);
+			// Only a transparence carries a mask subtree there; a
+			// unifiedTransparence uses the same field for a number.
+			if (primitive.type === TransparencePrimitive.type) {
+				const mask = (primitive as TransparencePrimitive).transparence;
+				if (mask) this.walkPrimitives(mask);
+			}
 		}
 	}
 }

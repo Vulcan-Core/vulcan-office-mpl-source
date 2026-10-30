@@ -163,6 +163,13 @@ class SvxZoomSliderItem;
 // #i59082# assign macro to shape
 #define SID_ASSIGNMACRO                 (SC_VIEW_START + 95)
 
+// Vulcan fork: agent write-batch undo bracketing (the Calc port of the
+// Impress FuTransformDocumentStructure list-action bracket, sd drviews2.cxx).
+// Begin opens ONE list action on the DOCUMENT undo manager, tagged with the
+// requesting view's id; End closes it. See ScTabViewShell::ExecuteUndo.
+#define SID_VULCAN_BEGIN_UNDO_BATCH     (SC_VIEW_START + 96)
+#define SID_VULCAN_END_UNDO_BATCH       (SC_VIEW_START + 97)
+
 // "Zoom / Synchronize sheets" in options dialog
 #define SID_SC_OPT_SYNCZOOM             TypedWhichId<SfxBoolItem>(SC_VIEW_START + 98)
 
@@ -565,6 +572,10 @@ static_assert(SID_PREVIEW_END < SID_KEYFUNC_START, "calc slots ids trampling inf
 
 #define SID_SC_SETTEXT          (SID_NEW_SLOTS+46)
 #define SID_RANGE_ADDRESS       TypedWhichId<SfxStringItem>(SID_NEW_SLOTS+47)
+// Vulcan fork: apply a number format CODE, written in en-US, to the selection
+// (the agent's FormatRange NumberFormat). See ScFormatShell::ExecuteNumFormat.
+// Not SC_VIEW_START + 100: that is SC_MESSAGE_START (FID_INPUTLINE_STATUS).
+#define SID_VULCAN_NUMBER_FORMAT_CODE (SID_NEW_SLOTS+48)
 #define SID_NUMBER_FORMAT       TypedWhichId<SfxStringItem>(SID_NEW_SLOTS+49)
 
 #define SID_OLE_SELECT          (SID_NEW_SLOTS+50)

@@ -26,7 +26,7 @@ msgid ""
 "LibreOffice based editor for Microsoft Office, LibreOffice and OpenOffice "
 "docs."
 msgstr ""
-"LibreOffice yebna ɣef umaẓrag n Microsoft Office, LibreOffice akked "
+"Vulcan Office yebna ɣef umaẓrag n Microsoft Office, Vulcan Office akked "
 "OpenOffice."
 
 #. Long description
@@ -37,8 +37,8 @@ msgid ""
 "and now it's on Android, enhancing your possibilities to work on mobile and "
 "for collaboration."
 msgstr ""
-"Collabora Office d amaẓrag n uḍris, Tafelwit taliktṛunant, akked wahil n "
-"tihawt yebnan ɣef LibreOffice, Awurmahil n waɣbalu yeldin yettwasnen akk deg "
+"Vulcan Office d amaẓrag n uḍris, Tafelwit taliktṛunant, akked wahil n "
+"tihawt yebnan ɣef Vulcan Office, Awurmahil n waɣbalu yeldin yettwasnen akk deg "
 "umaḍal - arnu tura atan ɣef Android, ad yesnerni iẓubaẓ-ik·im n uxeddim deg "
 "uziraz akked umahil n tdukli."
 
@@ -100,9 +100,9 @@ msgid ""
 "Windows, Mac, and Linux. This, combined with a new front-end based on "
 "Collabora Online, reads and saves documents similarly to LibreOffice desktop."
 msgstr ""
-"Collabora i Android iseqdac yiwen n umsedday n LibreOffice i Windows, Mac, "
-"akked Linux. s ugrudem n useqdac amaynut i yebnan ɣef Collabora uẓeṭṭa, "
-"taɣuri akked usekles n yisemliyen yettemcabi ɣer LibreOffice n tnarit."
+"Vulcan Office i Android iseqdac yiwen n umsedday n Vulcan Office i Windows, Mac, "
+"akked Linux. s ugrudem n useqdac amaynut i yebnan ɣef Vulcan Office uẓeṭṭa, "
+"taɣuri akked usekles n yisemliyen yettemcabi ɣer Vulcan Office n tnarit."
 
 #. Long description
 #: descriptions/google-play.html%2Bhtml.body.p:48-1

@@ -68,6 +68,7 @@
 #include <slideshow.hxx>
 #include <stlpool.hxx>
 #include <glob.hxx>
+#include <VulcanHiddenInk.hxx>
 #include <memory>
 
 namespace sd {
@@ -262,7 +263,10 @@ void View::DoCut()
 
     const SdrMarkList& rMarkList = GetMarkedObjectList();
     if( pOLV )
+    {
+        sd::hiddenink::BeforeTextChange(*this);
         const_cast<OutlinerView*>(pOLV)->Cut();
+    }
     else if( rMarkList.GetMarkCount() != 0 )
     {
         OUString aStr(SdResId(STR_UNDO_CUT));
@@ -345,6 +349,7 @@ void View::DoPaste (::sd::Window* pWindow,bool /*bMergeMasterPagesOnly*/)
         if (pPage && pPage->IsMasterPage() && pOLV->IsReadOnly())
             return;
 
+        sd::hiddenink::BeforeTextChange(*this);
         const_cast< OutlinerView* >(pOLV)->PasteSpecial();
         ::Outliner& rOutliner = pOLV->GetOutliner();
 

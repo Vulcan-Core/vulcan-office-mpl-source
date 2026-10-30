@@ -67,6 +67,8 @@
 #include <editeng/scriptsetitem.hxx>
 #include <swundo.hxx>
 #include <doc.hxx>
+#include <UndoManager.hxx>
+#include <comphelper/kit.hxx>
 #include <viewopt.hxx>
 #include <wrtsh.hxx>
 #include <chrdlgmodes.hxx>
@@ -1541,12 +1543,16 @@ void SwAnnotationShell::ExecRotateTransliteration( SfxRequest const & rReq )
     pOLV->TransliterateText(m_aRotateCase.getNextMode());
 }
 
+bool SwAnnotationShell::IsConditionalFastCall(const SfxRequest& rReq)
+{
+    return IsKitPerViewUndoRedo(rReq) || SfxShell::IsConditionalFastCall(rReq);
+}
+
 void SwAnnotationShell::ExecUndo(SfxRequest &rReq)
 {
     const SfxItemSet* pArgs = rReq.GetArgs();
     SfxUndoManager* pUndoManager = GetUndoManager();
     SwWrtShell &rSh = m_rView.GetWrtShell();
-    SwUndoId nUndoId(SwUndoId::EMPTY);
 
     // tdf#147928 get these before "undo" which may delete this SwAnnotationShell
     SwPostItMgr* pPostItMgr = m_rView.GetPostItMgr();
@@ -1565,13 +1571,11 @@ void SwAnnotationShell::ExecUndo(SfxRequest &rReq)
     {
         case SID_UNDO:
         {
-            rSh.GetLastUndoInfo(nullptr, &nUndoId);
-            if (nUndoId == SwUndoId::CONFLICT)
-            {
-                rReq.SetReturnValue( SfxUInt32Item(nId, static_cast<sal_uInt32>(SID_REPAIRPACKAGE)) );
-                break;
-            }
-
+            // Vulcan fork: the comment editor's own undo steps are this view's; take those
+            // back first. Past them, the document undo is per view (see
+            // SwBaseShell::ExecUndo): this view's own change, possibly out of order, or
+            // nothing and a JSON answer saying why -- never the numeric
+            // SID_REPAIRPACKAGE conflict value.
             if ( pUndoManager )
             {
                 sal_uInt16 nCount = pUndoManager->GetUndoActionCount();
@@ -1589,20 +1593,29 @@ void SwAnnotationShell::ExecUndo(SfxRequest &rReq)
             }
 
             if ( nCnt )
-                rSh.Do( SwWrtShell::UNDO, nCnt );
+            {
+                sal_uInt16 nOffset = 0;
+                if (comphelper::COKit::isActive())
+                {
+                    // "Undo N" never reaches another view's action (ForCount).
+                    const SfxViewUndoLookup aLookup
+                        = rSh.GetDoc()->GetUndoManager().LookupViewUndo(&m_rView).ForCount(nCnt);
+                    if (!aLookup.CanDo())
+                    {
+                        if (aLookup.eStatus != SfxViewUndoLookup::Status::Empty)
+                            rReq.SetReturnValue(SfxStringItem(nId, SfxViewUndoLookupToJson(aLookup, /*bRedo=*/false)));
+                        break;
+                    }
+                    nOffset = static_cast<sal_uInt16>(aLookup.nOffset);
+                }
+                rSh.Do( SwWrtShell::UNDO, nCnt, nOffset );
+            }
 
             break;
         }
 
         case SID_REDO:
         {
-            (void)rSh.GetFirstRedoInfo(nullptr, &nUndoId);
-            if (nUndoId == SwUndoId::CONFLICT)
-            {
-                rReq.SetReturnValue( SfxUInt32Item(nId, static_cast<sal_uInt32>(SID_REPAIRPACKAGE)) );
-                break;
-            }
-
             if ( pUndoManager )
             {
                 sal_uInt16 nCount = pUndoManager->GetRedoActionCount();
@@ -1620,7 +1633,21 @@ void SwAnnotationShell::ExecUndo(SfxRequest &rReq)
             }
 
             if ( nCnt )
+            {
+                if (comphelper::COKit::isActive())
+                {
+                    // Vulcan fork: per-view redo, in order only.
+                    const SfxViewUndoLookup aLookup
+                        = rSh.GetDoc()->GetUndoManager().LookupViewRedo(&m_rView).ForCount(nCnt);
+                    if (!aLookup.CanDo())
+                    {
+                        if (aLookup.eStatus != SfxViewUndoLookup::Status::Empty)
+                            rReq.SetReturnValue(SfxStringItem(nId, SfxViewUndoLookupToJson(aLookup, /*bRedo=*/true)));
+                        break;
+                    }
+                }
                 rSh.Do( SwWrtShell::REDO, nCnt );
+            }
 
             break;
         }
@@ -1654,15 +1681,11 @@ void SwAnnotationShell::StateUndo(SfxItemSet &rSet)
                 sal_uInt16 nCount = pUndoManager ? pUndoManager->GetUndoActionCount() : 0;
                 if ( nCount )
                     rSfxViewFrame.GetSlotState( nWhich, rSfxViewFrame.GetInterface(), &rSet );
-                else if (rSh.GetLastUndoInfo(nullptr, &nUndoId))
+                else if (rSh.GetLastUndoInfo(nullptr, &nUndoId, &m_rView))
                 {
                     rSet.Put( SfxStringItem( nWhich, rSh.GetDoString(SwWrtShell::UNDO)) );
                 }
-                else if (nUndoId == SwUndoId::CONFLICT)
-                {
-                    rSet.Put( SfxUInt32Item(nWhich, static_cast<sal_uInt32>(SID_REPAIRPACKAGE)) );
-                }
-                else
+                else // Vulcan fork: nothing of this view's own to undo -> disabled, never "conflict"
                     rSet.DisableItem(nWhich);
                 break;
             }
@@ -1671,15 +1694,11 @@ void SwAnnotationShell::StateUndo(SfxItemSet &rSet)
                 sal_uInt16 nCount = pUndoManager ? pUndoManager->GetRedoActionCount() : 0;
                 if ( nCount )
                     rSfxViewFrame.GetSlotState( nWhich, rSfxViewFrame.GetInterface(), &rSet );
-                else if (rSh.GetFirstRedoInfo(nullptr, &nUndoId))
+                else if (rSh.GetFirstRedoInfo(nullptr, &nUndoId, &m_rView))
                 {
                     rSet.Put(SfxStringItem( nWhich, rSh.GetDoString(SwWrtShell::REDO)) );
                 }
-                else if (nUndoId == SwUndoId::CONFLICT)
-                {
-                    rSet.Put( SfxUInt32Item(nWhich, static_cast<sal_uInt32>(SID_REPAIRPACKAGE)) );
-                }
-                else
+                else // Vulcan fork: never the "conflict" state
                     rSet.DisableItem(nWhich);
                 break;
             }

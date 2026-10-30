@@ -89,6 +89,10 @@ JSDialog.comboboxEntry = function (parentContainer, data, builder) {
 		window.L.DomUtil.addClass(entry, 'checked');
 	else if (data.checked !== undefined)
 		window.L.DomUtil.addClass(entry, 'notchecked');
+	// VULCAN: a check-mark row says whether it is on to assistive
+	// tech too, not only with the drawn mark.
+	if (data.checked !== undefined)
+		entry.setAttribute('aria-checked', data.checked ? 'true' : 'false');
 
 	if (data.customRenderer)
 		JSDialog.OnDemandRenderer(builder, data.comboboxId, 'combobox', data.pos, content, entry, data.text);

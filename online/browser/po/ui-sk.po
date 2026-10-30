@@ -5102,7 +5102,7 @@ msgid ""
 "Unlinking citations will prevent Collabora Online from updating citations "
 "and bibliography in this document."
 msgstr ""
-"Odpojenie citácií zabráni Collabora Online v aktualizácii citácií a "
+"Odpojenie citácií zabráni Vulcan Office v aktualizácii citácií a "
 "bibliografie v tomto dokumente."
 
 #: src/control/HRuler.ts:321
@@ -6661,7 +6661,7 @@ msgstr ""
 #: src/map/handler/Map.VersionBar.js:50
 msgid "Your Collabora Online server needs updating. Version {0} is available."
 msgstr ""
-"Váš server Collabora Online vyžaduje aktualizáciu. Je dostupná verzia {0}."
+"Váš server Vulcan Office vyžaduje aktualizáciu. Je dostupná verzia {0}."
 
 #: src/map/handler/Map.WOPI.js:194
 msgid "Creating new file from template..."
@@ -6951,7 +6951,7 @@ msgstr ""
 
 #: welcome/welcome.html%2Bhtml.head.title:9-3
 msgid "Collabora Online Welcome"
-msgstr "Vitajte v Collabora Online"
+msgstr "Vitajte v Vulcan Office"
 
 #: welcome/welcome.html%2Bhtml.body.div.div.div.div.h1:26-7
 msgid "Explore The New {coolversion}"
@@ -6960,7 +6960,7 @@ msgstr "Zoznámte sa s novou verziou {coolversion}"
 #: welcome/welcome.html%2Bhtml.body.div.div.div.div.h2:27-7
 #: welcome/welcome.html%2Bhtml.body.div.div.div.div.h2:38-7
 msgid "Collabora Online Development Edition"
-msgstr "Collabora Online, developerská edícia"
+msgstr "Vulcan Office, developerská edícia"
 
 #: welcome/welcome.html%2Bhtml.body.div.div.div.div.p:28-7
 #, fuzzy
@@ -6991,7 +6991,7 @@ msgid ""
 msgstr ""
 "Pozrite si <a target=\"_blank\" href=\"https://www.collaboraonline.com/"
 "code-26-04-release-notes/\">poznámky k vydaniu</a> a zistite všetko o "
-"najnovšej verzii Collabora Online Development Edition, určenej pre domácich "
+"najnovšej verzii Vulcan Office Development Edition, určenej pre domácich "
 "používateľov a malé tímy."
 
 #: welcome/welcome.html%2Bhtml.body.div.div.div.div.h1:48-7
@@ -7454,7 +7454,7 @@ msgstr ""
 #~ "rýchlejšej kontrole pravopisu a ďalších zmenách."
 
 #~ msgid "Integrate Collabora Online into your webapp"
-#~ msgstr "Integrujte aplikáciu Collabora Online do svojej webovej aplikácie"
+#~ msgstr "Integrujte aplikáciu Vulcan Office do svojej webovej aplikácie"
 
 #~ msgid "Or get involved in the development"
 #~ msgstr "Alebo sa zapojte do vývoja"
@@ -7470,7 +7470,7 @@ msgstr ""
 #~ "all the essential steps on how to reproduce it."
 #~ msgstr ""
 #~ "Informácie o integrácii webovej aplikácie nájdete na stránke <a href=\"%"
-#~ "coolSdkURL\" target=\"_blank\">Collabora Online SDK</a>. Prostredníctvom <a "
+#~ "coolSdkURL\" target=\"_blank\">Vulcan Office SDK</a>. Prostredníctvom <a "
 #~ "href=\"%coolStepByStepURL\" target=\"_blank\">názorných postupov</a> možno "
 #~ "CODE zostaviť od nuly. Pomôcť môžete aj s <a href=\"%coolTranslationsURL\" "
 #~ "target=\"_blank\">prekladmi</a> alebo <a href=\"%coolBugreportURL\" target=\""
@@ -7537,7 +7537,7 @@ msgstr ""
 #~ msgstr "Server bude reštartovaný a o chvíľu bude opäť dostupný"
 
 #~ msgid "Oops, there is a problem connecting to Collabora Online : "
-#~ msgstr "Vyskytol sa problém s pripojením k Collabora Online: "
+#~ msgstr "Vyskytol sa problém s pripojením k Vulcan Office: "
 
 #~ msgid "Number of views"
 #~ msgstr "Počet zobrazení"

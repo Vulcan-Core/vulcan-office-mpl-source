@@ -104,6 +104,28 @@ public:
     SvxSearchDialog *getDialog () { return m_dialog.get();}
     static void SetSearchLabel(const SearchLabel& rSL);
     static void SetSearchLabel(const OUString& sStr);
+    // Vulcan: the ordinal form of the search status line -- "3 of 12".
+    //
+    // WHY THIS IS AN OVERLOAD AND NOT A NEW `SearchLabel` MEMBER: the enum
+    // above selects one of a fixed set of translated phrases, so a member
+    // cannot carry N and M. This is the same shape as the OUString overload
+    // that already exists and is already used to put a number in this label
+    // (sw/source/uibase/uiview/viewsrch.cxx: STR_SEARCH_KEY_FOUND_TIMES on
+    // FIND_ALL, STR_NB_REPLACED on REPLACE_ALL) -- so `searchlabel` carrying
+    // digits is established behaviour, not a new idea. It delegates to that
+    // overload, which means both sinks (the findbar's .uno:SearchLabel item
+    // and the open dialog's own label) are fed by exactly the code that
+    // already fed them. No new plumbing to lose on a rebase.
+    //
+    // WHO CONSUMES IT: the phone Find & Replace sheet. Under COKit the dialog
+    // is serialized from svx/uiconfig/ui/findreplacedialog-mobile.ui, whose
+    // `searchlabel` widget the client keeps and renders, and JSLabel::set_label
+    // (vcl/jsdialog/jsdialogbuilder.cxx) pushes a jsdialogupdate on every
+    // change -- so a producer calling this needs NO client change.
+    //
+    // DROPPING THIS ON A REBASE costs the phone find sheet its match count and
+    // nothing else; the call is inert wherever no producer calls it.
+    static void SetSearchLabel(sal_Int32 nCurrent, sal_Int32 nTotal);
     static OUString GetSearchLabel();
     SFX_DECL_CHILDWINDOW_WITHID(SvxSearchDialogWrapper);
 };

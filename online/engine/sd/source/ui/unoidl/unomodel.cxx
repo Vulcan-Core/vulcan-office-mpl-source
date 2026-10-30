@@ -73,6 +73,7 @@
 #include <comphelper/propertyvalue.hxx>
 #include <comphelper/sequence.hxx>
 #include <comphelper/servicehelper.hxx>
+#include <comphelper/scopeguard.hxx>
 #include <cppuhelper/supportsservice.hxx>
 #include <comphelper/processfactory.hxx>
 #include <comphelper/profilezone.hxx>
@@ -92,6 +93,11 @@
 
 #include <editeng/UnoForbiddenCharsTable.hxx>
 #include <svx/svdoutl.hxx>
+#include <svx/svdotext.hxx>
+#include <svx/svdogrp.hxx>
+#include <svx/svdograf.hxx>
+#include <svx/svditer.hxx>
+#include <svx/sdtagitm.hxx>
 #include <o3tl/any.hxx>
 #include <o3tl/safeint.hxx>
 #include <o3tl/string_view.hxx>
@@ -174,6 +180,8 @@
 
 #include <drawinglayer/primitive2d/structuretagprimitive2d.hxx>
 #include <drawinglayer/processor2d/Primitive2dJsonProcessor.hxx>
+#include <VulcanPdfPageModel.hxx>
+#include <VulcanHiddenInk.hxx>
 #include <vcl/graph.hxx>
 #include <unordered_map>
 
@@ -1682,6 +1690,85 @@ std::optional<OutlinerParaObject> getTextParagraphSnapshot(const SdrTextObj* pTe
     return *pStored;
 }
 
+/// Writes one object's geometry-mode fields: name, type, bounds in the
+/// margin-inclusive 1/100 mm frame, resize-mode state, the ideal text-fit
+/// size, and - for groups - a "Children" node recursing with the same
+/// fields. Children keep absolute bounds; "OrdNum" is the position within
+/// the parent list (the vector payload's children semantics).
+/// pPdfPageGraf is the page's protected PDF graphic, looked up ONCE by the
+/// caller (SdPage::GetPdfPageGraphic scans the page; per object it made a
+/// decomposed page of thousands of runs quadratic); children pass null.
+void writeObjectGeometry(::tools::JsonWriter& rJsonWriter, SdrObject* pSdrObj,
+                         const SdPage* pPageStandard, bool bFitFields,
+                         const SdrObject* pPdfPageGraf = nullptr)
+{
+    rJsonWriter.put("Name", pSdrObj->GetName());
+    rJsonWriter.put("Type", static_cast<sal_Int32>(pSdrObj->GetObjIdentifier()));
+
+    // Geometry in the margin-inclusive 1/100 mm frame the
+    // in-document '.uno:TransformDialog' dispatch expects
+    // (SetGeoAttrToMarked shifts its reference rectangle
+    // by the page borders under kit), so a value read
+    // here and written back is an identity.
+    const ::tools::Rectangle aLogicRect = pSdrObj->GetLogicRect();
+    rJsonWriter.put("PosX", aLogicRect.Left() + pPageStandard->GetLeftBorder());
+    rJsonWriter.put("PosY", aLogicRect.Top() + pPageStandard->GetUpperBorder());
+    rJsonWriter.put("Width", aLogicRect.GetWidth());
+    rJsonWriter.put("Height", aLogicRect.GetHeight());
+    rJsonWriter.put("RotateAngle", pSdrObj->GetRotateAngle().get());
+
+    // The undecomposed PDF page graphic (see SdPage::GetPdfPageGraphic):
+    // an agent reading a fresh PDF sees one immovable object per page until
+    // the DecomposePdfPages verb has run.
+    if (pPdfPageGraf && pPdfPageGraf == pSdrObj)
+        rJsonWriter.put("PdfPage", true);
+
+    // Resize modes as stored - what the ToggleAutoWidth/ToggleAutoHeight
+    // verbs flip.
+    rJsonWriter.put("AutoGrowWidth",
+                    pSdrObj->GetMergedItem(SDRATTR_TEXT_AUTOGROWWIDTH).GetValue());
+    rJsonWriter.put("AutoGrowHeight",
+                    pSdrObj->GetMergedItem(SDRATTR_TEXT_AUTOGROWHEIGHT).GetValue());
+
+    SdrTextObj* pSdrTxtObj = DynCastSdrTextObj(pSdrObj);
+    // Fit measurement is a full outliner layout per object, so it is
+    // opt-in (&fit=1) - bounds-only geometry callers must not pay for it.
+    // A box in ACTIVE text edit reports no fit fields at all: the stored
+    // paragraphs it would measure are stale against the live edit (the
+    // Texts snapshot beside these fields IS live), so absence - which
+    // every parser already treats as unknown - beats a wrong number.
+    if (bFitFields && pSdrTxtObj && pSdrTxtObj->HasText()
+        && !pSdrTxtObj->IsInEditMode())
+    {
+        // The frame size that would hug the text (FitFrameToTextSize's
+        // target, computed without touching the object), and whether the
+        // current frame is already within a 0.25 mm tolerance of it.
+        const Size aFitSize = pSdrTxtObj->CalcFitToTextSize();
+        rJsonWriter.put("TextFitWidth", aFitSize.Width());
+        rJsonWriter.put("TextFitHeight", aFitSize.Height());
+        const ::tools::Long nDW = aLogicRect.GetWidth() - aFitSize.Width();
+        const ::tools::Long nDH = aLogicRect.GetHeight() - aFitSize.Height();
+        rJsonWriter.put("FitsText",
+                        nDW >= -25 && nDW <= 25 && nDH >= -25 && nDH <= 25);
+    }
+
+    SdrObjList* pChildren = pSdrObj->GetSubList();
+    if (pChildren && pChildren->GetObjCount() > 0)
+    {
+        auto aChildrenNode = rJsonWriter.startNode("Children");
+        for (size_t nCId = 0; nCId < pChildren->GetObjCount(); ++nCId)
+        {
+            SdrObject* pChild = pChildren->GetObj(nCId);
+            if (!pChild)
+                continue;
+            auto aChildNode
+                = rJsonWriter.startNode("Child " + std::to_string(nCId));
+            rJsonWriter.put("OrdNum", static_cast<sal_Int64>(pChild->GetOrdNum()));
+            writeObjectGeometry(rJsonWriter, pChild, pPageStandard, bFitFields);
+        }
+    }
+}
+
 void GetDocStructureSlides(::tools::JsonWriter& rJsonWriter, const SdXImpressDocument* pDoc,
                            const std::map<OUString, OUString>& rArguments)
 {
@@ -1692,6 +1779,18 @@ void GetDocStructureSlides(::tools::JsonWriter& rJsonWriter, const SdXImpressDoc
         if (!it->second.equals(u"slides"_ustr))
             return;
     }
+
+    // Opt-in per-object name/type/geometry, so the default payload (and the
+    // tests pinning it) stays unchanged.
+    bool bGeometry = false;
+    if (auto itGeometry = rArguments.find(u"geometry"_ustr); itGeometry != rArguments.end())
+        bGeometry = itGeometry->second == u"1";
+
+    // Fit fields (TextFitWidth/Height, FitsText) cost one outliner layout
+    // per text object - opt-in on top of geometry.
+    bool bFit = false;
+    if (auto itFit = rArguments.find(u"fit"_ustr); itFit != rArguments.end())
+        bFit = itFit->second == u"1";
 
     sal_uInt16 nPageCount = pDoc->GetDoc()->GetSdPageCount(PageKind::Standard);
     sal_uInt16 nMasterPageCount = pDoc->GetDoc()->GetMasterSdPageCount(PageKind::Standard);
@@ -1738,6 +1837,19 @@ void GetDocStructureSlides(::tools::JsonWriter& rJsonWriter, const SdXImpressDoc
             rJsonWriter.put("LayoutId", static_cast<int>(nLayout));
             rJsonWriter.put("LayoutName", SdPage::autoLayoutToString(nLayout));
 
+            if (bGeometry)
+            {
+                // Page canvas in 1/100 mm: total size plus the borders that
+                // define the margin-inclusive frame the object geometry (and
+                // the InsertTextBox coordinates) live in.
+                rJsonWriter.put("PageWidth", pPageStandard->GetWidth());
+                rJsonWriter.put("PageHeight", pPageStandard->GetHeight());
+                rJsonWriter.put("BorderLeft", pPageStandard->GetLeftBorder());
+                rJsonWriter.put("BorderRight", pPageStandard->GetRightBorder());
+                rJsonWriter.put("BorderTop", pPageStandard->GetUpperBorder());
+                rJsonWriter.put("BorderBottom", pPageStandard->GetLowerBorder());
+            }
+
             // Every Objects in the page
             int nObjCount = pPageStandard->GetObjCount();
             rJsonWriter.put("ObjectCount", nObjCount);
@@ -1745,10 +1857,17 @@ void GetDocStructureSlides(::tools::JsonWriter& rJsonWriter, const SdXImpressDoc
             if (nObjCount > 0)
             {
                 auto aObjectsNode = rJsonWriter.startNode("Objects");
+                const SdrObject* pPdfPageGraf
+                    = bGeometry ? pPageStandard->GetPdfPageGraphic() : nullptr;
                 for (int nOId = 0; nOId < nObjCount; nOId++)
                 {
                     auto aObjectNode = rJsonWriter.startNode("Objects " + std::to_string(nOId));
                     SdrObject* pSdrObj = pPageStandard->GetObj(nOId);
+
+                    if (bGeometry)
+                        writeObjectGeometry(rJsonWriter, pSdrObj, pPageStandard, bFit,
+                                            pPdfPageGraf);
+
                     SdrTextObj* pSdrTxtObj = DynCastSdrTextObj(pSdrObj);
                     if (pSdrTxtObj && pSdrTxtObj->HasText())
                     {
@@ -1809,10 +1928,14 @@ void GetDocStructureSlidesText(::tools::JsonWriter& rJsonWriter, const SdXImpres
 
         OUStringBuffer aSlideBuffer("## Slide " + OUString::number(nPage + 1) + ": "
                                     + pPageStandard->GetName() + "\n");
-        const int nObjCount = pPageStandard->GetObjCount();
-        for (int nObj = 0; nObj < nObjCount; ++nObj)
+        // Every text object on the page, inside groups too, nested ones
+        // included: a built PDF page puts nearly all of its text in groups
+        // (cards, bands, lists), and the editor's search reaches into them,
+        // so a read of the top level alone hid text the search can change.
+        SdrObjListIter aObjIter(pPageStandard, SdrIterMode::DeepNoGroups);
+        while (aObjIter.IsMore())
         {
-            SdrTextObj* pTextObj = DynCastSdrTextObj(pPageStandard->GetObj(nObj));
+            SdrTextObj* pTextObj = DynCastSdrTextObj(aObjIter.Next());
             if (!pTextObj || !pTextObj->HasText())
                 continue;
             // An empty presentation object shows only its placeholder prompt
@@ -2241,6 +2364,15 @@ private:
                     static_cast<sal_Int64>(pPage->GetWidth() * constTwipConversionFactor));
         rWriter.put("slideHeight",
                     static_cast<sal_Int64>(pPage->GetHeight() * constTwipConversionFactor));
+        // The page borders, twips. Object geometry in this payload is
+        // logic (border-inset) coordinates; InsertShape and the document
+        // structure speak the margin-inclusive frame, border added. A
+        // client drawing an object where the user pressed needs the
+        // difference at hand, not a round trip away.
+        rWriter.put("borderLeft",
+                    static_cast<sal_Int64>(pPage->GetLeftBorder() * constTwipConversionFactor));
+        rWriter.put("borderTop",
+                    static_cast<sal_Int64>(pPage->GetUpperBorder() * constTwipConversionFactor));
     }
 
     void setupProcessor(tools::JsonWriter& rWriter, SdPage* pPage)
@@ -2254,6 +2386,15 @@ private:
         css::uno::Reference<css::drawing::XDrawPage> xDrawPage(pPage->getUnoPage());
         if (xDrawPage.is())
             aViewInfo.setVisualizedPage(xDrawPage);
+        // The payload feeds an EDIT view: content that exists only there -
+        // the prompt text of empty placeholders ("Click to add Title",
+        // ExclusiveEditViewPrimitive2D) - decomposes into the payload under
+        // its "exclusiveEditView" node, so the client can paint it in the
+        // editor and leave it out of previews and the slideshow. Without
+        // this the wrapper decomposed to nothing, the vector view showed
+        // bare frames the tile view labelled, and the client could not
+        // hit-test (own a press on) an empty placeholder at all.
+        aViewInfo.setEditViewActive(true);
         maProcessor->setViewInformation2D(aViewInfo);
     }
 
@@ -2335,9 +2476,86 @@ private:
         }
     }
 
+    // Snap rectangle in the payload's own unit (twips) - the same rectangle
+    // the graphicselection message reports for this object, so a client-side
+    // hit can place the selection frame exactly where the authoritative one
+    // will land.
+    void writeObjectBounds(tools::JsonWriter& rWriter, SdrObject* pObject)
+    {
+        const ::tools::Rectangle aSnapRect = pObject->GetSnapRect();
+        const OString aBoundsValue
+            = OString::number(static_cast<sal_Int64>(aSnapRect.Left() * constTwipConversionFactor)) + ", "_ostr
+              + OString::number(static_cast<sal_Int64>(aSnapRect.Top() * constTwipConversionFactor)) + ", "_ostr
+              + OString::number(static_cast<sal_Int64>(aSnapRect.GetWidth() * constTwipConversionFactor)) + ", "_ostr
+              + OString::number(static_cast<sal_Int64>(aSnapRect.GetHeight() * constTwipConversionFactor));
+        auto aBoundsArray = rWriter.startArray("bounds");
+        rWriter.putRaw(aBoundsValue);
+    }
+
+    // Group members, recursively: ordinal within the PARENT's list (which is
+    // what graphicselection's OrdNum reports once the group is entered) plus
+    // the same absolute snap-rect bounds. Geometry only - the group's whole
+    // primitive tree already rides on the top-level entry.
+    void writeObjectChildren(tools::JsonWriter& rWriter, SdrObject* pObject)
+    {
+        SdrObjList* pChildren = pObject->GetSubList();
+        if (!pChildren || pChildren->GetObjCount() == 0)
+            return;
+
+        auto aChildrenArray = rWriter.startArray("children");
+        for (size_t i = 0; i < pChildren->GetObjCount(); ++i)
+        {
+            SdrObject* pChild = pChildren->GetObj(i);
+            if (!pChild)
+                continue;
+            auto aChildNode = rWriter.startStruct();
+            rWriter.put("ordNum", static_cast<sal_Int64>(pChild->GetOrdNum()));
+            if (pChild->IsEmptyPresObj())
+                rWriter.put("emptyPresObj", true);
+            writeObjectBounds(rWriter, pChild);
+            writeObjectChildren(rWriter, pChild);
+        }
+    }
+
+    // An object's primitives. A GROUP's view-independent sequence is the
+    // concatenation of its members' sequences (ViewContactOfGroup), so it
+    // is written member by member, each under an "objectChild" node that
+    // carries the member's ordinal within the group: the client can then
+    // translate ONE member's subtree (a member drag inside an entered
+    // group) and hit-test a member's own ink. Same pixels, one more node.
+    void writeObjectPrimitives(tools::JsonWriter& rWriter, SdrObject* pObject,
+                               const drawinglayer::primitive2d::Primitive2DContainer& rPrimitives)
+    {
+        SdrObjGroup* pGroup = dynamic_cast<SdrObjGroup*>(pObject);
+        SdrObjList* pChildren = pGroup ? pGroup->GetSubList() : nullptr;
+        if (!pChildren || pChildren->GetObjCount() == 0)
+        {
+            maProcessor->decomposeAndWrite(rPrimitives);
+            return;
+        }
+        for (size_t i = 0; i < pChildren->GetObjCount(); ++i)
+        {
+            SdrObject* pChild = pChildren->GetObj(i);
+            if (!pChild)
+                continue;
+            drawinglayer::primitive2d::Primitive2DContainer aChildPrimitives;
+            pChild->GetViewContact().getViewIndependentPrimitive2DContainer(aChildPrimitives);
+            if (aChildPrimitives.empty())
+                continue;
+            auto aChildNode = rWriter.startStruct();
+            rWriter.put("type", "objectChild");
+            rWriter.put("ordNum", static_cast<sal_Int64>(pChild->GetOrdNum()));
+            auto aChildArray = rWriter.startArray("children");
+            writeObjectPrimitives(rWriter, pChild, aChildPrimitives);
+        }
+    }
+
     void writePageObjects(tools::JsonWriter& rWriter, SdPage* pPage)
     {
         auto aObjectsArray = rWriter.startArray("objects");
+        // Looked up once: GetPdfPageGraphic scans the page, and per object it
+        // made a decomposed page (thousands of runs) quadratic.
+        const SdrObject* pPdfPageGraf = pPage->GetPdfPageGraphic();
 
         for (size_t i = 0; i < pPage->GetObjCount(); ++i)
         {
@@ -2355,9 +2573,38 @@ private:
             auto pObjectNode = rWriter.startStruct();
             rWriter.put("id", static_cast<sal_Int64>(pObject->GetUniqueID()));
             rWriter.put("name", pObject->GetName());
+            // The client's selection identity (GraphicSelection extraInfo
+            // carries OrdNum): empty-primitive objects are skipped above, so
+            // a positional join against the objects array would break on any
+            // deck with empty placeholders.
+            rWriter.put("ordNum", static_cast<sal_Int64>(pObject->GetOrdNum()));
+            // An empty presentation placeholder: its only ink is the
+            // edit-view prompt, and a click into it should start typing.
+            if (pObject->IsEmptyPresObj())
+                rWriter.put("emptyPresObj", true);
+            // A PDF page's whole content as ONE protected graphic (the way
+            // SdPdfFilter opens a PDF): not a gesture target - the client
+            // asks for DecomposePdfPages and edits the objects that replace
+            // it.
+            if (pPdfPageGraf && pPdfPageGraf == pObject)
+                rWriter.put("pdfPage", true);
+            // Hit-test hints for the client (editable scanned PDFs): a
+            // locked object (a kept scan or overlay) is not a gesture
+            // target at all - core refuses to mark it, so a select echo on
+            // it would draw a frame core answers with silence; a hidden-ink
+            // OCR line paints nothing but IS text to click into (its runs
+            // count as ink); a move-protected object gets no drag echo.
+            if (pObject->IsMarkProtect())
+                rWriter.put("locked", true);
+            if (sd::hiddenink::IsHiddenLine(*pObject))
+                rWriter.put("hiddenInk", true);
+            if (pObject->IsMoveProtect())
+                rWriter.put("moveProtect", true);
+            writeObjectBounds(rWriter, pObject);
+            writeObjectChildren(rWriter, pObject);
             {
                 auto aPrimitiveArray = rWriter.startArray("primitives");
-                maProcessor->decomposeAndWrite(aPrimitives);
+                writeObjectPrimitives(rWriter, pObject, aPrimitives);
             }
         }
     }
@@ -2374,7 +2621,7 @@ private:
 bool SdXImpressDocument::supportsCommand(std::u16string_view rCommand)
 {
     if (rCommand == u"VectorPrimitives" || rCommand == u"VectorRenderingGraphics"
-        || rCommand == u"ExtractDocumentStructure")
+        || rCommand == u"ExtractDocumentStructure" || rCommand == u"PdfPageModel")
         return true;
     return false;
 }
@@ -2411,6 +2658,27 @@ void SdXImpressDocument::getCommandValues(::tools::JsonWriter& rJsonWriter,
                 drawinglayer::Primitive2dJsonProcessor::writeGraphicBase64(
                     rJsonWriter, itGraphic->second);
             }
+        }
+    }
+    else if (o3tl::starts_with(rCommand, ".uno:PdfPageModel"))
+    {
+        // The page as its object model (see VulcanPdfPageModel.hxx): raw=1
+        // reads a still-protected PDF page through the importer for the
+        // host's analysis; otherwise the live objects, for the save.
+        sal_Int32 nPart = 0;
+        bool bRaw = false;
+        if (auto it = aMap.find(u"part"_ustr); it != aMap.end())
+            nPart = it->second.toInt32();
+        if (auto it = aMap.find(u"raw"_ustr); it != aMap.end())
+            bRaw = it->second == "1" || it->second == "true";
+        SdPage* pPage = mpDoc && nPart >= 0 && nPart < mpDoc->GetSdPageCount(PageKind::Standard)
+                            ? mpDoc->GetSdPage(static_cast<sal_uInt16>(nPart), PageKind::Standard)
+                            : nullptr;
+        if (!pPage || !sd::pdfpage::WritePdfPageModel(rJsonWriter, *mpDoc, *pPage, nPart, bRaw))
+        {
+            rJsonWriter.put("type", "pdfpagemodel");
+            rJsonWriter.put("part", nPart);
+            rJsonWriter.put("error", pPage ? "no model" : "no such page");
         }
     }
     else if (o3tl::starts_with(rCommand, ".uno:VectorPrimitives"))
@@ -5245,6 +5513,53 @@ static void getTextHyperlinkInteractions(const uno::Reference<drawing::XShape>& 
     rOutliner.Clear();
 }
 
+static void putSpeakerNotes(SdDrawDocument& rDocument, SdPage& rStandardPage,
+                            ::tools::JsonWriter& rJsonWriter)
+{
+    const sal_uInt16 nSlideIndex = (rStandardPage.GetPageNum() - 1) >> 1;
+    SdPage* pNotesPage = rDocument.GetSdPage(nSlideIndex, PageKind::Notes);
+    if (!pNotesPage)
+        return;
+
+    SdrObject* pNotes = pNotesPage->GetPresObj(PresObjKind::Notes);
+    if (!pNotes)
+    {
+        // Imported presentations may contain a notes text object which was not
+        // registered as the layout's notes presentation object.
+        for (size_t nNote = 0; nNote < pNotesPage->GetObjCount(); ++nNote)
+        {
+            SdrObject* pCandidate = pNotesPage->GetObj(nNote);
+            if (pCandidate && !pNotesPage->IsPresObj(pCandidate) && pCandidate->HasText()
+                && (pCandidate->GetObjIdentifier() == SdrObjKind::Text
+                    || pCandidate->GetObjIdentifier() == SdrObjKind::TitleText
+                    || pCandidate->GetObjIdentifier() == SdrObjKind::OutlineText))
+            {
+                pNotes = pCandidate;
+                break;
+            }
+        }
+    }
+
+    // Empty presentation objects contain localized prompt text. That prompt
+    // is UI chrome, not speaker-note content, so never expose it to clients.
+    if (!pNotes || pNotes->IsEmptyPresObj())
+        return;
+
+    OutlinerParaObject* pPara = pNotes->GetOutlinerParaObject();
+    if (!pPara)
+        return;
+
+    OUStringBuffer aNotes;
+    const EditTextObject& rText = pPara->GetTextObject();
+    for (sal_Int32 nParagraph = 0; nParagraph < rText.GetParagraphCount(); ++nParagraph)
+    {
+        if (nParagraph > 0)
+            aNotes.append('\n');
+        aNotes.append(rText.GetText(nParagraph));
+    }
+    rJsonWriter.put("notes", aNotes.makeStringAndClear());
+}
+
 OString SdXImpressDocument::getPresentationInfo(bool bAllyState) const
 {
     ::tools::JsonWriter aJsonWriter;
@@ -5308,23 +5623,32 @@ OString SdXImpressDocument::getPresentationInfo(bool bAllyState) const
             bool bIsVisible = true; // default visible
             pSlide->getPropertyValue(u"Visible"_ustr) >>= bIsVisible;
 
+            auto aSlideNode = aJsonWriter.startStruct();
+            std::string sSlideHash = GetInterfaceHash(cppu::getXWeak(pSlide));
+            aJsonWriter.put("hash", sSlideHash);
+            aJsonWriter.put("index", i);
+            aJsonWriter.put("uniqueID", pPage->GetUniqueID());
+
+            if (bAllyState)
+            {
+                OUStringBuffer aHtml;
+                SdrOutliner* pOutliner = mpDoc->GetInternalOutliner();
+                if (pOutliner)
+                {
+                    SdHTMLFilter::ExportPage(pOutliner, pPage, aHtml);
+                    aJsonWriter.put("a11y", aHtml.makeStringAndClear());
+                    pOutliner->Clear();
+                }
+            }
+
+            putSpeakerNotes(*mpDoc, *pPage, aJsonWriter);
+
             if (!bIsVisible)
             {
-                auto aSlideNode = aJsonWriter.startStruct();
-                std::string sSlideHash = GetInterfaceHash(cppu::getXWeak(pSlide));
-                aJsonWriter.put("hash", sSlideHash);
-                aJsonWriter.put("index", i);
                 aJsonWriter.put("hidden", true);
-                aJsonWriter.put("uniqueID", pPage->GetUniqueID());
             }
             else
             {
-                auto aSlideNode = aJsonWriter.startStruct();
-                std::string sSlideHash = GetInterfaceHash(cppu::getXWeak(pSlide));
-                aJsonWriter.put("hash", sSlideHash);
-                aJsonWriter.put("index", i);
-                aJsonWriter.put("uniqueID", pPage->GetUniqueID());
-
                 auto aName = SdDrawPage::getPageApiNameFromUiName(pPage->GetName());
                 aJsonWriter.put("name", aName);
 
@@ -5332,60 +5656,8 @@ OString SdXImpressDocument::getPresentationInfo(bool bAllyState) const
                 aJsonWriter.put("slideWidth", aSlizeSize.getWidth());
                 aJsonWriter.put("slideHeight", aSlizeSize.getHeight());
 
-                if (bAllyState)
-                {
-                    OUStringBuffer aHtml;
-                    SdrOutliner* pOutliner = mpDoc->GetInternalOutliner();
-                    if (pOutliner)
-                    {
-                        SdHTMLFilter::ExportPage(pOutliner, pPage, aHtml);
-                        aJsonWriter.put("a11y", aHtml.makeStringAndClear());
-                        pOutliner->Clear();
-                    }
-                }
-
                 bool bIsDrawPageEmpty = pSlide->getCount() == 0;
                 aJsonWriter.put("empty", bIsDrawPageEmpty);
-
-                // Notes
-                SdPage* pNotesPage = mpDoc->GetSdPage((pPage->GetPageNum() - 1) >> 1, PageKind::Notes);
-                if (pNotesPage)
-                {
-                    SdrObject* pItObj = nullptr;
-                    SdrObject* pNotes = pNotesPage->GetPresObj(PresObjKind::Notes);
-
-                    if (!pNotes)
-                    {
-                        for (size_t nNote = 0; nNote < pNotesPage->GetObjCount(); nNote++)
-                        {
-                            pItObj = pNotesPage->GetObj(nNote);
-
-                            if (pItObj && pItObj->HasText() &&
-                                (pItObj->GetObjIdentifier() == SdrObjKind::Text
-                                 || pItObj->GetObjIdentifier() == SdrObjKind::TitleText
-                                 || pItObj->GetObjIdentifier() == SdrObjKind::OutlineText))
-                            {
-                                pNotes = pItObj;
-                                break;
-                            }
-                        }
-                    }
-
-                    if (pNotes)
-                    {
-                        OUStringBuffer strNotes;
-                        OutlinerParaObject* pPara = pNotes->GetOutlinerParaObject();
-                        if (pPara)
-                        {
-                            const EditTextObject& rText = pPara->GetTextObject();
-                            for (sal_Int32 nNote = 0; nNote < rText.GetParagraphCount(); nNote++)
-                            {
-                                strNotes.append(rText.GetText(nNote));
-                            }
-                            aJsonWriter.put("notes", strNotes.makeStringAndClear());
-                        }
-                    }
-                }
 
                 SdMasterPage* pMasterPage = nullptr;
                 SdDrawPage* pMasterPageTarget(dynamic_cast<SdDrawPage*>(pSlide));
@@ -5850,6 +6122,12 @@ uno::Reference< drawing::XDrawPage > SAL_CALL SdDrawPagesAccess::insertNewByInde
  */
 void SAL_CALL SdDrawPagesAccess::remove( const uno::Reference< drawing::XDrawPage >& xPage )
 {
+    removePages({ xPage });
+}
+
+void SdDrawPagesAccess::removePages(
+    const std::vector<uno::Reference<drawing::XDrawPage>>& rPages)
+{
     ::SolarMutexGuard aGuard;
 
     if( nullptr == mpModel || mpModel->mpDoc == nullptr )
@@ -5857,9 +6135,19 @@ void SAL_CALL SdDrawPagesAccess::remove( const uno::Reference< drawing::XDrawPag
 
     SdDrawDocument& rDoc = *mpModel->mpDoc;
 
-    sal_uInt16 nPageCount = rDoc.GetSdPageCount( PageKind::Standard );
-    if( nPageCount > 1 )
+    bool bUndo = rDoc.IsUndoEnabled();
+    if (bUndo)
+        rDoc.BegUndo(SdResId(STR_UNDO_DELETEPAGES));
+    comphelper::ScopeGuard aUndoGuard([&rDoc, bUndo]() {
+        if (bUndo)
+            rDoc.EndUndo();
+    });
+
+    for (const auto& xPage : rPages)
     {
+        if (rDoc.GetSdPageCount(PageKind::Standard) <= 1)
+            break;
+
         // get pPage from xPage and determine the Id (nPos ) afterwards
         SdDrawPage* pSvxPage = comphelper::getFromUnoTunnel<SdDrawPage>( xPage );
         if( pSvxPage )
@@ -5871,12 +6159,10 @@ void SAL_CALL SdDrawPagesAccess::remove( const uno::Reference< drawing::XDrawPag
 
                 SdPage* pNotesPage = static_cast< SdPage* >( rDoc.GetPage( nPage+1 ) );
 
-                bool bUndo = rDoc.IsUndoEnabled();
                 if( bUndo )
                 {
                     // Add undo actions and delete the pages.  The order of adding
                     // the undo actions is important.
-                    rDoc.BegUndo( SdResId( STR_UNDO_DELETEPAGES ) );
                     if (pNotesPage)
                     {
                         rDoc.AddUndo(SdrUndoFactory::CreateUndoDeletePage(*pNotesPage));
@@ -5890,12 +6176,14 @@ void SAL_CALL SdDrawPagesAccess::remove( const uno::Reference< drawing::XDrawPag
                     rDoc.RemovePage( nPage ); // the notes page
                 }
 
-                if( bUndo )
-                {
-                    rDoc.EndUndo();
-                }
             }
         }
+    }
+
+    if (bUndo)
+    {
+        rDoc.EndUndo();
+        aUndoGuard.dismiss();
     }
 
     mpModel->SetModified();

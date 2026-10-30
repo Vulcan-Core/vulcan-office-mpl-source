@@ -27,12 +27,92 @@
 #include <ndtxt.hxx>
 #include <fmtfld.hxx>
 #include <rootfrm.hxx>
+#include <viewsh.hxx>
+#include <viewopt.hxx>
 #include <docufld.hxx>
 #include <docstat.hxx>
+#include <comphelper/kit.hxx>
 #include <com/sun/star/document/XDocumentPropertiesSupplier.hpp>
 #include <com/sun/star/frame/XModel.hpp>
 
 using namespace ::com::sun::star;
+
+namespace sw
+{
+/** Is the page count this layout reports a property of a VIEWER rather than of
+    the document?
+
+    In browse (online/web) layout Writer lays the body out against the viewer's
+    window instead of the page, so SwRootFrame::GetPageNum() answers a question
+    about that window. Under COKit that answer belongs to whoever happens to be
+    looking: SwRootFrame::mnBrowseWidth is one per DOCUMENT and
+    SwViewShell::Init() forces every additional view onto the first one's
+    layout ("Here's the code which disables the usage of 'multiple' layouts at
+    the moment"), so one collaborator in reflowed/web layout puts the SHARED
+    document into that layout, and every save from then on persists their
+    number.
+
+    Persisting it is a display-state leak into a stored customer file: the
+    statistic reaches docProps/app.xml <Pages> on DOCX export
+    (oox/source/core/xmlfilterbase.cxx) and, because UpdateDocStat() is called
+    with bFields=true, it is also pushed into SwFieldIds::DocStat — the field
+    type behind a footer's cached NUMPAGES. A bug report showed exactly
+    that pair: Pages rewritten against a document that renders to a different
+    length, and the same wrong number propagated into the footer cache, on an
+    open the user never asked to be a save.
+
+    The statistic has two writers and both ask this: IncrementalDocStatCalculate
+    below, and SwDocStatFieldType::Expand, which every NUMPAGES field runs when
+    it is formatted, refreshed or exported. Asking it in only one of them is
+    not a guard: the other writes the window's count into nPage, and the next
+    calculation keeps that as the "previous" number.
+
+    Desktop keeps its existing behaviour: there, the layout IS the document's. */
+bool LayoutPageCountIsViewState(const SwRootFrame* pLayout)
+{
+    if (!pLayout || !comphelper::COKit::isActive())
+        return false;
+    const SwViewShell* pSh = pLayout->GetCurrShell();
+    return pSh && pSh->GetViewOptions() && pSh->GetViewOptions()->getBrowseMode();
+}
+}
+
+namespace
+{
+/** The page count the document itself last reported — what the imported
+    docProps/app.xml said, until a trustworthy layout replaces it. Used so that
+    a session that has only ever been in browse layout preserves the stored
+    value rather than dropping <Pages> from the file altogether. */
+sal_uInt32 lcl_StoredPageCount(SwDoc& rDoc)
+{
+    SwDocShell* pObjShell(rDoc.GetDocShell());
+    if (!pObjShell)
+        return 0;
+    try
+    {
+        const uno::Reference<document::XDocumentPropertiesSupplier> xDPS(
+            pObjShell->GetModel(), uno::UNO_QUERY);
+        if (!xDPS.is())
+            return 0;
+        const uno::Reference<document::XDocumentProperties> xDocProps(
+            xDPS->getDocumentProperties());
+        if (!xDocProps.is())
+            return 0;
+        const cpo::uno::Sequence<css::beans::NamedValue> aStats(
+            xDocProps->getDocumentStatistics());
+        for (const auto& rStat : aStats)
+        {
+            sal_Int32 nPages = 0;
+            if (rStat.Name == u"PageCount"_ustr && (rStat.Value >>= nPages) && nPages > 0)
+                return static_cast<sal_uInt32>(nPages);
+        }
+    }
+    catch (const uno::Exception&)
+    {
+    }
+    return 0;
+}
+}
 
 namespace sw
 {
@@ -102,6 +182,10 @@ void DocumentStatisticsManager::UpdateDocStat( bool bCompleteAsync, bool bFields
 // returns true while there is more to do
 bool DocumentStatisticsManager::IncrementalDocStatCalculate(tools::Long nChars, bool bFields)
 {
+    // Read before Reset() clears it: a browse-layout page count must not be
+    // allowed to overwrite what the document already reported.
+    const sal_uInt32 nPrevPage = mpDocStat->nPage;
+
     mbInitialized = true;
     mpDocStat->Reset();
     mpDocStat->nPara = 0; // default is 1!
@@ -142,7 +226,16 @@ bool DocumentStatisticsManager::IncrementalDocStatCalculate(tools::Long nChars, 
         }
     }
 
-    mpDocStat->nPage     = m_rDoc.getIDocumentLayoutAccess().GetCurrentLayout() ? m_rDoc.getIDocumentLayoutAccess().GetCurrentLayout()->GetPageNum() : 0;
+    const SwRootFrame* pLayout = m_rDoc.getIDocumentLayoutAccess().GetCurrentLayout();
+    if (LayoutPageCountIsViewState(pLayout))
+    {
+        // Keep the document's own number instead of this viewer's.
+        mpDocStat->nPage = nPrevPage ? nPrevPage : lcl_StoredPageCount(m_rDoc);
+    }
+    else
+    {
+        mpDocStat->nPage = pLayout ? pLayout->GetPageNum() : 0;
+    }
     SetDocStatModified( false );
 
     cpo::uno::Sequence < css::beans::NamedValue > aStat( mpDocStat->nPage ? 8 : 7);

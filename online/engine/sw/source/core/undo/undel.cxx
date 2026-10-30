@@ -48,6 +48,7 @@
 #include <frameformats.hxx>
 #include <fmtpdsc.hxx>
 #include <vector>
+#include <algorithm>
 
 // DELETE
 /*  lcl_MakeAutoFrames has to call MakeFrames for objects bounded "AtChar"
@@ -631,6 +632,24 @@ bool SwUndoDelete::CanGrouping( SwDoc& rDoc, const SwPaM& rDelPam )
 
     m_bGroup = true;
     return true;
+}
+
+std::optional<sw::UndoFootprint> SwUndoDelete::GetFootprint() const
+{
+    // Text inside one paragraph, and nothing that owns nodes of its own: a field, a
+    // footnote or a character-anchored frame is a placeholder character in the text, and
+    // its content lives elsewhere in the nodes array, so restoring it moves node indexes.
+    bool bNeutral = m_nSttNode == m_nEndNode && m_aSttStr && !m_aEndStr && !m_bDelFullPara
+                    && !m_bTableDelLastNd && !m_bResetPgDesc && !m_bResetPgBrk
+                    && m_nNdDiff == SwNodeOffset(0) && m_nSectDiff == SwNodeOffset(0)
+                    && m_nReplaceDummy == SwNodeOffset(0) && !m_oMvStt
+                    && SwUndo::IsHistoryNodeNeutral(m_pHistory.get());
+    if (bNeutral && m_aSttStr)
+    {
+        const OUString& rText = *m_aSttStr;
+        bNeutral = rText.indexOf(CH_TXTATR_BREAKWORD) < 0 && rText.indexOf(CH_TXTATR_INWORD) < 0;
+    }
+    return sw::UndoFootprint{ m_nSttNode, std::max(m_nSttNode, m_nEndNode), bNeutral };
 }
 
 SwUndoDelete::~SwUndoDelete()

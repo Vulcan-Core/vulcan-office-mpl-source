@@ -45,6 +45,7 @@
 #include <itabenum.hxx>
 #include <redline.hxx>
 #include <UndoRedline.hxx>
+#include <txatbase.hxx>
 
 using namespace css;
 using namespace css::uno;
@@ -320,6 +321,47 @@ CPPUNIT_TEST_FIXTURE(SwCoreDocTest, testContentControlDelete)
     // - Actual  : ^Atest
     // i.e. the end dummy character got deleted, but not the first one, which is inconsistent.
     CPPUNIT_ASSERT_EQUAL(u"\x0001test\x0001"_ustr, pTextNode->GetText());
+}
+
+CPPUNIT_TEST_FIXTURE(SwCoreDocTest, testContentControlTrackedReplace)
+{
+    // Given a document with a content control around "test", recording changes:
+    createSwDoc();
+    uno::Reference<lang::XMultiServiceFactory> xMSF(mxComponent, uno::UNO_QUERY);
+    uno::Reference<text::XTextDocument> xTextDocument(mxComponent, uno::UNO_QUERY);
+    uno::Reference<text::XText> xText = xTextDocument->getText();
+    uno::Reference<text::XTextCursor> xCursor = xText->createTextCursor();
+    xText->insertString(xCursor, u"test"_ustr, /*bAbsorb=*/false);
+    xCursor->gotoStart(/*bExpand=*/false);
+    xCursor->gotoEnd(/*bExpand=*/true);
+    uno::Reference<text::XTextContent> xContentControl(
+        xMSF->createInstance(u"com.sun.star.text.ContentControl"_ustr), uno::UNO_QUERY);
+    xText->insertTextContent(xCursor, xContentControl, /*bAbsorb=*/true);
+    SwDoc* pDoc = getSwDoc();
+    pDoc->getIDocumentRedlineAccess().SetRedlineFlags(RedlineFlags::On | RedlineFlags::ShowDelete
+                                                      | RedlineFlags::ShowInsert);
+
+    // When replacing the control's text, as a tracked Find & Replace does:
+    SwWrtShell* pWrtShell = getSwDocShell()->GetWrtShell();
+    pWrtShell->SttEndDoc(/*bStt=*/true);
+    SwTextNode* pTextNode = pWrtShell->GetCursor()->GetPointNode().GetTextNode();
+    SwPaM aPaM(SwPosition(*pTextNode, 1), SwPosition(*pTextNode, 5));
+    pDoc->getIDocumentContentOperations().ReplaceRange(aPaM, u"best"_ustr, false);
+
+    // Then the deleted and the inserted text are both inside the one content control:
+    // Without the accompanying fix in place, this test would have failed with 2 content controls:
+    // resetting the replacement's attributes split the control around it, so the DOCX export
+    // wrote two copies of the control with the replacement between them.
+    CPPUNIT_ASSERT_EQUAL(u"\x0001testbest\x0001"_ustr, pTextNode->GetText());
+    size_t nContentControls = 0;
+    for (size_t i = 0; i < pTextNode->GetpSwpHints()->Count(); ++i)
+    {
+        if (pTextNode->GetpSwpHints()->Get(i)->Which() == RES_TXTATR_CONTENTCONTROL)
+        {
+            ++nContentControls;
+        }
+    }
+    CPPUNIT_ASSERT_EQUAL(static_cast<size_t>(1), nContentControls);
 }
 
 CPPUNIT_TEST_FIXTURE(SwCoreDocTest, testCopyBookmarks)

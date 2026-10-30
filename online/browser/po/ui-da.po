@@ -5111,7 +5111,7 @@ msgid ""
 "Unlinking citations will prevent Collabora Online from updating citations "
 "and bibliography in this document."
 msgstr ""
-"Hvis citaternes sammenkædning fjernes, vil Collabora Online ikke længere "
+"Hvis citaternes sammenkædning fjernes, vil Vulcan Office ikke længere "
 "kunne opdatere citater og bibliografi i dette dokument."
 
 #: src/control/HRuler.ts:321
@@ -6677,7 +6677,7 @@ msgstr ""
 
 #: src/map/handler/Map.VersionBar.js:50
 msgid "Your Collabora Online server needs updating. Version {0} is available."
-msgstr "Din Collabora Online server skal opdateres. Version {0} er tilgængelig."
+msgstr "Din Vulcan Office server skal opdateres. Version {0} er tilgængelig."
 
 #: src/map/handler/Map.WOPI.js:194
 msgid "Creating new file from template..."
@@ -6967,7 +6967,7 @@ msgstr ""
 
 #: welcome/welcome.html%2Bhtml.head.title:9-3
 msgid "Collabora Online Welcome"
-msgstr "Collabora Online Velkommen"
+msgstr "Vulcan Office Velkommen"
 
 #: welcome/welcome.html%2Bhtml.body.div.div.div.div.h1:26-7
 msgid "Explore The New {coolversion}"
@@ -6976,7 +6976,7 @@ msgstr "Udforsk den nye {coolversion}"
 #: welcome/welcome.html%2Bhtml.body.div.div.div.div.h2:27-7
 #: welcome/welcome.html%2Bhtml.body.div.div.div.div.h2:38-7
 msgid "Collabora Online Development Edition"
-msgstr "Collabora Online Development Edition"
+msgstr "Vulcan Office Development Edition"
 
 #: welcome/welcome.html%2Bhtml.body.div.div.div.div.p:28-7
 msgid ""
@@ -7005,7 +7005,7 @@ msgid ""
 msgstr ""
 "Læs vores <a target=\"_blank\" rel=\"noopener\" href=\"https://www."
 "collaboraonline.com/code-26-04-release-notes/\">udgivelsesnoter</a> og bliv "
-"klogere på den seneste Collabora Online Development Edition, henvendt til "
+"klogere på den seneste Vulcan Office Development Edition, henvendt til "
 "hjemmebrugere og mindre teams."
 
 #: welcome/welcome.html%2Bhtml.body.div.div.div.div.h1:48-7
@@ -7426,7 +7426,7 @@ msgstr ""
 #~ msgstr "Serveren genstarter og vil snart være til rådighed"
 
 #~ msgid "Oops, there is a problem connecting to Collabora Online : "
-#~ msgstr "Ups, der er et problem med forbindelsen til Collabora Online: "
+#~ msgstr "Ups, der er et problem med forbindelsen til Vulcan Office: "
 
 #~ msgid "Number of views"
 #~ msgstr "Antal visninger"

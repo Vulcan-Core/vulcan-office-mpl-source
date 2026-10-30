@@ -3522,7 +3522,19 @@ void ScGridWindow::Command( const CommandEvent& rCEvt )
             // Selecting this cell is not allowed, neither is context menu.
             return;
 
-        if (mpSpellCheckCxt
+        // Vulcan G10 (phone Calc edit grammar): tap-again must never enter
+        // edit. On a phone the spell branch this feeds would
+        // SetInputMode(SC_INPUT_TABLE), select the misspelled word and open
+        // the spelling popup over a squiggled text cell — an edit without
+        // intent, keyboard down — and its walk-left can move the selection to
+        // a different column. Google Sheets mobile draws no in-grid spell UI,
+        // so a phone always builds the ordinary cell context menu; tablets
+        // and desktop keep the stock behaviour.
+        ScTabViewShell* pKitViewShell = mrViewData.GetViewShell();
+        const bool bKitPhoneCalc = comphelper::COKit::isActive()
+            && pKitViewShell && pKitViewShell->isKitMobilePhone();
+
+        if (!bKitPhoneCalc && mpSpellCheckCxt
             && (bPosIsInEditView || !mrViewData.GetMarkData().IsCellMarked(nCellX, nCellY)))
         {
             // Find the first string to the left for spell checking in case the current cell is empty.

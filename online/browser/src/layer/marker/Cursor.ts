@@ -26,6 +26,7 @@ class Cursor {
 	private blinkSuspendTimeout: any;
 	private visible: boolean = false;
 	private domAttached: boolean = false;
+	private dpiListener: DPIChangeListener = new DPIChangeListener(() => this.onResize());
 
 	// position and size should be in core pixels.
 	constructor(rectangle: cool.SimpleRectangle, map: any, options: any) {
@@ -54,6 +55,15 @@ class Cursor {
 		this.visible = true;
 		this.domAttached = true;
 
+		// Read the CSS width only now that the caret is in the document. A
+		// detached element has no computed style -- getComputedStyle returns ''
+		// in Chromium and WebKit -- so the read initLayout used to make was NaN,
+		// onResize wrote 'NaNpx', the browser dropped it, and no caret was ever
+		// thinned: 2 CSS px, i.e. 4 device px on a Retina screen.
+		if (!this.width)
+			this.width = parseFloat(getComputedStyle(this.cursor, null).getPropertyValue('width'));
+		this.onResize();
+
 		this.update();
 
 		if (this.map._docLayer.isCalc())
@@ -64,6 +74,8 @@ class Cursor {
 		window.addEventListener('blur', this.onFocusBlur);
 		window.addEventListener('focus', this.onFocusBlur);
 		window.addEventListener('resize', this.onResize);
+		// Moving the window to a screen with another scale fires no resize.
+		this.dpiListener.start();
 	}
 
 	setMouseCursor() {
@@ -102,6 +114,7 @@ class Cursor {
 		window.removeEventListener('blur', this.onFocusBlur);
 		window.removeEventListener('focus', this.onFocusBlur);
 		window.removeEventListener('resize', this.onResize);
+		this.dpiListener.stop();
 	}
 
 	isDomAttached(): boolean {
@@ -123,9 +136,25 @@ class Cursor {
 		this.addCursorClass(ev.type !== 'blur');
 	}
 
+	// The caret's rendered width in CSS px. The Impress/PDF text echo
+	// (VulcanTextEchoSection) draws its caret at this width, so the two
+	// match. NaN until add() has read the stylesheet width.
+	getCssWidth(): number {
+		if (window.devicePixelRatio === 1)
+			return this.width;
+		// this.width comes from the computed style, so it is CSS px.
+		// Dividing it by the device pixel ratio keeps the caret 2 device
+		// px on hi-dpi screens, which is the intent -- but unfloored it
+		// goes SUB-PIXEL: a 2 px caret becomes 0.667 CSS px at DPR 3, which
+		// the compositor renders as a faint smear rather than a caret.
+		// Every phone is DPR 2-3. Floor at one CSS px. (Until 
+		// this.width was NaN, so none of this ran; add() now applies it.)
+		return Math.max(1, this.width / window.devicePixelRatio);
+	}
+
 	onResize = () => {
 		if (window.devicePixelRatio !== 1)
-			this.cursor.style.width = this.width / window.devicePixelRatio + 'px';
+			this.cursor.style.width = this.getCssWidth() + 'px';
 		else
 			this.cursor.style.removeProperty('width');
 	}
@@ -211,9 +240,6 @@ class Cursor {
 		window.L.DomEvent
 			.disableClickPropagation(this.cursor)
 			.disableScrollPropagation(this.container);
-
-		let cursorCss = getComputedStyle(this.cursor, null);
-		this.width = parseFloat(cursorCss.getPropertyValue('width'));
 	}
 
 	private transformX(xpos: number): number {

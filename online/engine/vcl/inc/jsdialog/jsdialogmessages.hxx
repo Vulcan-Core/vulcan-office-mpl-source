@@ -40,6 +40,7 @@ public:
     VclPtr<vcl::Window> m_pWindow;
     VclPtr<PopupMenu> m_pMenu;
     std::unique_ptr<jsdialog::ActionDataMap> m_pData;
+    bool m_bForce;
 
 private:
     void copy(const JSDialogMessageInfo& rInfo)
@@ -47,6 +48,7 @@ private:
         this->m_eType = rInfo.m_eType;
         this->m_pWindow = rInfo.m_pWindow;
         this->m_pMenu = rInfo.m_pMenu;
+        this->m_bForce = rInfo.m_bForce;
         if (rInfo.m_pData)
         {
             std::unique_ptr<jsdialog::ActionDataMap> pData(
@@ -57,18 +59,20 @@ private:
 
 public:
     JSDialogMessageInfo(jsdialog::MessageType eType, VclPtr<vcl::Window> pWindow,
-                        std::unique_ptr<jsdialog::ActionDataMap> pData)
+                        std::unique_ptr<jsdialog::ActionDataMap> pData, bool bForce = false)
         : m_eType(eType)
         , m_pWindow(std::move(pWindow))
         , m_pData(std::move(pData))
+        , m_bForce(bForce)
     {
     }
 
     JSDialogMessageInfo(jsdialog::MessageType eType, VclPtr<PopupMenu> pMenu,
-                        std::unique_ptr<jsdialog::ActionDataMap> pData)
+                        std::unique_ptr<jsdialog::ActionDataMap> pData, bool bForce = false)
         : m_eType(eType)
         , m_pMenu(std::move(pMenu))
         , m_pData(std::move(pData))
+        , m_bForce(bForce)
     {
     }
 
@@ -92,7 +96,6 @@ class JSDialogNotifyIdle final : public Idle
     VclPtr<vcl::Window> m_aContentWindow;
     OUString m_sTypeOfJSON;
     OString m_LastNotificationMessage;
-    bool m_bForce;
 
     std::deque<JSDialogMessageInfo> m_aMessageQueue;
     std::mutex m_aQueueMutex;
@@ -104,13 +107,13 @@ public:
     void Invoke() override;
 
     void clearQueue();
-    void forceUpdate();
     template <class VclType>
     void sendMessage(const jsdialog::MessageType eType, const VclPtr<VclType>& pTarget,
-                     std::unique_ptr<jsdialog::ActionDataMap> pData = nullptr);
+                     std::unique_ptr<jsdialog::ActionDataMap> pData = nullptr,
+                     bool bForce = false);
 
 private:
-    void send(const OString& sMsg);
+    void send(const OString& sMsg, bool bForce = false);
     OString generateFullUpdate() const;
     OString generateWidgetUpdate(const VclPtr<vcl::Window>& pWindow) const;
     OString generateCloseMessage() const;

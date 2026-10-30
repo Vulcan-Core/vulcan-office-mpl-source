@@ -74,14 +74,12 @@ using namespace com::sun::star;
 
 // Static Data
 
-// color for ChangeTracking "by author" as in the writer (swmodul1.cxx)
-
+// ChangeTracking "by author" colours are svtools' AUTHOR1-9, the slots Writer,
+// Impress and the comment markers read, so no reviewer is outlined red or green
+// in Calc either (the designer's rule). Calc kept a list of its own here,
+// whose first author was #FF0000 and fourth #008000.
 #define SC_AUTHORCOLORCOUNT     9
-
-const Color nAuthorColor[ SC_AUTHORCOLORCOUNT ] = {
-                    COL_LIGHTRED,       COL_LIGHTBLUE,      COL_LIGHTMAGENTA,
-                    COL_GREEN,          COL_RED,            COL_BLUE,
-                    COL_BROWN,          COL_MAGENTA,        COL_CYAN };
+static_assert(svtools::AUTHOR9 - svtools::AUTHOR1 == SC_AUTHORCOLORCOUNT - 1);
 
 // Helper class for color assignment to avoid repeated lookups for the same user
 
@@ -135,7 +133,8 @@ void ScActionColorChanger::Update( const ScChangeAction& rAction )
                 nLastUserIndex = nPos % SC_AUTHORCOLORCOUNT;
             }
         }
-        nColor = nAuthorColor[nLastUserIndex];
+        nColor = ScModule::get()->GetColorConfig().GetColorValue(
+            static_cast<svtools::ColorConfigEntry>(svtools::AUTHOR1 + nLastUserIndex)).nColor;
     }
 }
 

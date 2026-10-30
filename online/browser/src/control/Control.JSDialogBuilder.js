@@ -83,7 +83,7 @@ window.L.Control.JSDialogBuilder = window.L.Control.extend({
 		this._colorPickers = [];
 
 		// list of types which can have multiple children but are not considered as containers
-		this._nonContainerType = ['buttonbox', 'treelistbox', 'iconview', 'iconviewlist', 'combobox', 'listbox',
+		this._nonContainerType = ['buttonbox', 'treelistbox', 'iconview', 'iconviewlist', 'combobox', 'listbox', 'dropdown',
 			'scrollwindow', 'grid', 'tabcontrol', 'multilineedit', 'formulabaredit', 'frame', 'expander'];
 
 		this._controlHandlers = {};
@@ -158,7 +158,6 @@ window.L.Control.JSDialogBuilder = window.L.Control.extend({
 		this._controlHandlers['calendar'] = JSDialog.calendar;
 		this._controlHandlers['htmlcontent'] = JSDialog.htmlContent;
 		this._controlHandlers['colorpicker'] = JSDialog.colorPicker;
-		this._controlHandlers['emojipicker'] = JSDialog.emojiPicker;
 		this._controlHandlers['chip'] = JSDialog.chip;
 		this._controlHandlers['dropdown'] = JSDialog.Dropdown;
 		this._controlHandlers['menu'] = JSDialog.treeView;
@@ -1270,14 +1269,15 @@ window.L.Control.JSDialogBuilder = window.L.Control.extend({
 	},
 
 	_spinnerImgControl: function(parentContainer, data, builder) {
-		var svgElement = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
-		svgElement.setAttribute('xmlns', 'http://www.w3.org/2000/svg');
-		svgElement.setAttribute('width', '298');
-		svgElement.setAttribute('height', '192');
-		// todo: change svg paths color depending on document type
-		svgElement.innerHTML = '<defs> <linearGradient id="spinner-shadow-bottom-linearGradient" x1="131.73" x2="184.28" y1="124.94" y2="177.49" gradientUnits="userSpaceOnUse"> <stop stop-color="#e6e6e6" offset="0"/> <stop stop-color="#ccc" stop-opacity="0" offset="1"/> </linearGradient> <linearGradient id="spinner-shadow-top-linearGradient" x1="130.72" x2="203.26" y1="151.3" y2="118.61" gradientUnits="userSpaceOnUse"> <stop stop-color="#e6e6e6" offset="0"/> <stop stop-color="#b3b3b3" stop-opacity="0" offset="1"/> </linearGradient> <linearGradient id="spinner-paper-linearGradient" x1="166.04" x2="106.19" y1="71.233" y2="36.679" gradientUnits="userSpaceOnUse"> <stop stop-color="#b3d3e5" offset="0"/> <stop stop-color="#d9e9f2" offset="1"/> </linearGradient> <linearGradient id="spinner-paper-fold-linearGradient" x1="167.16" x2="175.12" y1="46.783" y2="51.379" gradientUnits="userSpaceOnUse"> <stop stop-color="#68a7ca" offset="0"/> <stop stop-color="#4290bd" offset="1"/> </linearGradient> <linearGradient id="spinner-inner-left-linearGradient" x1="114.56" x2="142.35" y1="103.94" y2="103.94" gradientUnits="userSpaceOnUse"> <stop stop-color="#4290bd" offset="0"/> <stop stop-color="#4290bd" stop-opacity="0" offset="1"/> </linearGradient> </defs> <g id="spinner-box-g" transform="translate(9.8904)"> <g id="spinner-shadow-g"> <path id="spinner-shadow-top" d="m196.39 151.18 16.366-9.4488-81.829-47.244-16.366 9.4488z" fill="url(#spinner-shadow-top-linearGradient)"/> <path id="spinner-shadow-bottom" d="m130.93 188.98 65.463-37.795 16.366 9.4488-65.463 37.795z" fill="url(#spinner-shadow-bottom-linearGradient)"/> </g> <path id="spinner-box-back" d="m130.93 56.693-65.463 37.795 65.463 37.795 65.463-37.795z" fill="#b4d3e4" fill-opacity=".97667"/> <g> <path id="spinner-box-f-right-bg" d="m130.93 132.28v56.693l65.463-37.795v-56.693z" fill="white"/> <path id="spinner-box-f-right" d="m130.93 132.28v56.693l65.463-37.795v-56.693z" fill="#8ebdd7"/> <path id="spinner-box-f-left" d="m130.93 132.28v56.693l-65.463-37.795v-56.693z" fill="#d9e9f2"/> <path id="spinner-inner-right-bg" d="m81.829 103.94 49.098-28.346 49.098 28.346-49.098 28.346z" fill="white"/> <path id="spinner-inner-right" d="m81.829 103.94 49.098-28.346 49.098 28.346-49.098 28.346z" fill="#68a7ca"/> <path id="spinner-inner-left-bg" d="m130.93 75.591v56.693l-49.098-28.346z" fill="white"/> <path id="spinner-inner-left" d="m130.93 75.591v56.693l-49.098-28.346z" fill="url(#spinner-inner-left-linearGradient)"/> </g> <path id="spinner-handle" d="m114.56 153.07-6.5463 3.7795-32.732-18.898 6.5463-3.7795" fill="none" stroke="#4290bd" stroke-linecap="round" stroke-width="3"/> </g> <g id="spinner-paper-g" transform="translate(9.8904)"> <path id="spinner-paper-bg" d="m130.93 18.898s-14.524 12.927-49.098 28.346l49.098 28.346c16.428-6.7073 29.159-14.202 37.537-19.8 7.5473-5.0432 6.4305-9.2141 6.4305-9.2141-0.42453-2.5692-4.7288-5.0245-4.7288-5.0245z" fill="white"/> <path id="spinner-paper" d="m130.93 18.898s-14.524 12.927-49.098 28.346l49.098 28.346c16.428-6.7073 29.159-14.202 37.537-19.8 7.5473-5.0432 6.4305-9.2141 6.4305-9.2141-0.42453-2.5692-4.7288-5.0245-4.7288-5.0245z" fill="url(#spinner-paper-linearGradient)"/> <path id="spinner-paper-fold-bg" d="m168.46 55.791c7.5473-5.0432-1.2989-9.0071-1.2989-9.0071-0.42453-2.5692 3.0006-5.2315 3.0006-5.2315 4.4877 2.646 4.7288 5.0245 4.7288 5.0245 1.0076 4.4201-6.4305 9.2141-6.4305 9.2141z" fill="white"/> <path id="spinner-paper-fold" d="m168.46 55.791c7.5473-5.0432-1.2989-9.0071-1.2989-9.0071-0.42453-2.5692 3.0006-5.2315 3.0006-5.2315 4.4877 2.646 4.7288 5.0245 4.7288 5.0245 1.0076 4.4201-6.4305 9.2141-6.4305 9.2141z" fill="url(#spinner-paper-fold-linearGradient)"/> </g>';
+		// Vulcan Office: the busy/reconnect popup ("Connecting…" etc.; the only
+		// user of the 'spinnerimg' widget, see openBusyPopup in
+		// Control.UIManager.ts) shows the Vulcan V brand mark instead of the
+		// stock engine box artwork. The mark comes from --spinner-logo
+		// (css/vulcan-theme.css, both themes — same asset as the splash) and
+		// breathes via a pure-CSS animation (vulcan-theme.css §12): no rAF,
+		// cheap on low-end laptops.
 		var spinner = window.L.DomUtil.create('div', builder.options.cssClass + ' spinner-img ', parentContainer);
-		spinner.appendChild(svgElement);
+		window.L.DomUtil.create('div', 'vulcan-busy-mark', spinner);
 		spinner.id = data.id;
 
 		return false;
@@ -1810,6 +1810,12 @@ window.L.Control.JSDialogBuilder = window.L.Control.extend({
 			return false;
 
 		var divElem = window.L.DomUtil.create('div', builder.options.cssClass, parentContainer);
+		// An id is what a click handler gets back (_setupHandlers passes only
+		// `{id: element.id}`), so a container that wants to be found again --
+		// a tab, a swappable page -- has to carry one. Containers without an
+		// `id` in their JSON are unchanged.
+		if (data.id)
+			divElem.id = data.id;
 		if (data.style && data.style.length)
 			window.L.DomUtil.addClass(divElem, data.style);
 		for (var i = 0; i < data.children.length; ++i) {
@@ -1831,6 +1837,13 @@ window.L.Control.JSDialogBuilder = window.L.Control.extend({
 		colorSample.id = data.id;
 		colorSample.style.backgroundColor = data.color;
 		colorSample.name = data.color.substring(1);
+		// The swatch's own two derived colours -- its 92% inner edge and its
+		// 80%-toward-white check-disc tint -- published for the stylesheet.
+		// Both are per-swatch, so neither can be a static rule; a CSSOM
+		// property write is the one dynamic-style path the editor's CSP
+		// (`style-src 'self'`) leaves open.
+		if (typeof ColorPicker !== 'undefined' && ColorPicker.paintSwatchDerivedColors)
+			ColorPicker.paintSwatchDerivedColors(colorSample, data.color);
 
 		if (data.size === 'big') {
 			var selectionMarker = window.L.DomUtil.create('div', 'colors-container-tint-mark', colorSample);
@@ -1896,7 +1909,13 @@ window.L.Control.JSDialogBuilder = window.L.Control.extend({
 		}
 
 		var titleSpan = window.L.DomUtil.create('span', '', menuEntry);
-		titleSpan.textContent = title;
+		// G29 — a menu label on a phone is a LABEL, never a payload. Several
+		// callers author `name` as HTML for the desktop context menu, which
+		// PARSES it; this renderer writes labels with textContent and draws its
+		// own icon from data.command, so that markup used to land on screen
+		// verbatim. `hyperlink` is not this guard: it only wraps the row in an
+		// <a>. See Util.PlainLabel.ts — inert on a label that is already one.
+		titleSpan.textContent = JSDialog.PlainLabel(title);
 		var paddingClass = icon ? 'menu-entry-with-icon flex-fullwidth' : 'menu-entry-no-icon';
 		window.L.DomUtil.addClass(titleSpan, paddingClass);
 
@@ -2496,8 +2515,16 @@ window.L.Control.JSDialogBuilder.getMenuStructureForMobileWizard = function(menu
 	if (itemCommand.indexOf('sep') >= 0)
 		return null;
 
+	// A caller that authors a PLAIN label beside the desktop context menu's
+	// HTML `name` wins here. The mobile wizard writes labels with textContent,
+	// so `name` is markup on this path and `text` is the thing a human reads —
+	// this is the SEAM half of G29; JSDialog.PlainLabel at the renderer is the
+	// net. No shipped caller passed both until now, so preferring `text` is
+	// inert for the canvas context menu and the comment kebab.
 	var itemText = '';
-	if (menu.name)
+	if (menu.text)
+		itemText = menu.text;
+	else if (menu.name)
 		itemText = menu.name;
 
 	var itemType = 'submenu';

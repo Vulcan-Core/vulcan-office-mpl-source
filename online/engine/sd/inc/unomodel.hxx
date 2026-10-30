@@ -38,6 +38,7 @@
 #include <unotools/weakref.hxx>
 
 #include <unordered_map>
+#include <vector>
 
 #include <vcl/graph.hxx>
 
@@ -355,6 +356,9 @@ public:
     // XDrawPages
     virtual css::uno::Reference< css::drawing::XDrawPage > SAL_CALL insertNewByIndex( sal_Int32 nIndex ) override;
     virtual void SAL_CALL remove( const css::uno::Reference< css::drawing::XDrawPage >& xPage ) override;
+
+    /// Remove a page batch as one undoable document mutation.
+    void removePages(const std::vector<css::uno::Reference<css::drawing::XDrawPage>>& rPages);
 
     // XNameAccess
     virtual cpo::uno::Any SAL_CALL getByName( const OUString& aName ) override;

@@ -19,7 +19,9 @@
 
 #include <svx/svdlayer.hxx>
 #include <sfx2/dispatch.hxx>
+#include <sfx2/kit/helper.hxx>
 #include <sfx2/viewfrm.hxx>
+#include <comphelper/kit.hxx>
 #include <svx/svdviter.hxx>
 #include <svx/svdview.hxx>
 #include <tools/debug.hxx>
@@ -34,6 +36,7 @@
 #include <sdresid.hxx>
 #include <unokywds.hxx>
 #include <drawdoc.hxx>
+#include <unomodel.hxx>
 #include <utility>
 
 #include <ViewShell.hxx>
@@ -214,6 +217,9 @@ void ChangeSlideExclusionStateUndoAction::Undo()
             for (const sd::slidesorter::model::SharedPageDescriptor& rpDescriptor : mrpDescriptors)
                 pSlideSorterViewShell->GetSlideSorter().GetView().SetState(rpDescriptor, meState,
                                                                            mbOldStateValue);
+
+            if (comphelper::COKit::isActive())
+                KitHelper::notifyDocumentSizeChangedAllViews(mrDoc.getUnoModel(), false);
         }
     }
 }
@@ -231,6 +237,9 @@ void ChangeSlideExclusionStateUndoAction::Redo()
             for (const sd::slidesorter::model::SharedPageDescriptor& rpDescriptor : mrpDescriptors)
                 pSlideSorterViewShell->GetSlideSorter().GetView().SetState(rpDescriptor, meState,
                                                                            !mbOldStateValue);
+
+            if (comphelper::COKit::isActive())
+                KitHelper::notifyDocumentSizeChangedAllViews(mrDoc.getUnoModel(), false);
         }
     }
 }

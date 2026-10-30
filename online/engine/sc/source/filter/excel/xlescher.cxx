@@ -22,10 +22,19 @@
 #include <algorithm>
 
 #include <xlescher.hxx>
+#include <xlactivex.hxx>
 
+#include <com/sun/star/awt/Size.hpp>
 #include <com/sun/star/drawing/XControlShape.hpp>
+#include <com/sun/star/frame/XModel.hpp>
+#include <com/sun/star/io/XOutputStream.hpp>
 #include <com/sun/star/script/ScriptEventDescriptor.hpp>
+#include <com/sun/star/uno/Exception.hpp>
+#include <oox/helper/binaryinputstream.hxx>
+#include <oox/ole/olehelper.hxx>
+#include <tools/stream.hxx>
 #include <tools/UnitConversion.hxx>
+#include <unotools/streamwrap.hxx>
 #include <document.hxx>
 #include <xistream.hxx>
 #include <xlroot.hxx>
@@ -330,6 +339,44 @@ OUString XclControlHelper::ExtractFromMacroDescriptor(
             rDescriptor.EventMethod.equalsAscii( spTbxListenerData[ eEventType ].mpcEventMethod ) )
         return XclTools::GetXclMacroName( rDescriptor.ScriptCode );
     return OUString();
+}
+
+// ActiveX controls of .xlsx/.xlsm (xlactivex.hxx) ============================
+
+cpo::uno::Sequence< sal_Int8 > XclActiveX::ExportStream(
+        const Reference< css::frame::XModel >& rxDocModel,
+        const Reference< XControlModel >& rxCtrlModel, const css::awt::Size& rSize )
+{
+    try
+    {
+        SvMemoryStream aMem( 512, 512 );
+        {
+            // the writer seeks back to patch block sizes: the wrapper must be seekable (as the .xls
+            // export's Ctls stream, xcl97esc.cxx)
+            Reference< css::io::XOutputStream > xOut( new utl::OSeekableOutputStreamWrapper( aMem ) );
+            OUString aTypeName;
+            if( !oox::ole::MSConvertOCXControls::WriteOCXExcelKludgeStream( rxDocModel, xOut, rxCtrlModel, rSize, aTypeName ) )
+                return cpo::uno::Sequence< sal_Int8 >();
+        }
+        const sal_uInt64 nSize = aMem.TellEnd();
+        if( nSize == 0 || nSize > sal_uInt64( SAL_MAX_INT32 ) )
+            return cpo::uno::Sequence< sal_Int8 >();
+        return cpo::uno::Sequence< sal_Int8 >( static_cast< const sal_Int8* >( aMem.GetData() ),
+                                               static_cast< sal_Int32 >( nSize ) );
+    }
+    catch( const css::uno::Exception& )
+    {
+    }
+    return cpo::uno::Sequence< sal_Int8 >();
+}
+
+OUString XclActiveX::ClassIdOf( const cpo::uno::Sequence< sal_Int8 >& rBin )
+{
+    if( rBin.getLength() <= 16 )
+        return OUString();
+    // SequenceInputStream keeps a pointer to the sequence: rBin outlives aIn here
+    oox::SequenceInputStream aIn( rBin );
+    return oox::ole::OleHelper::importGuid( aIn );
 }
 
 /* vim:set shiftwidth=4 softtabstop=4 expandtab: */

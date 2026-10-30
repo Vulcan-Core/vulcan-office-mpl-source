@@ -30,9 +30,14 @@
 #include <Poco/SharedPtr.h>
 #include <Poco/URI.h>
 
+#include <chrono>
+#include <cstdint>
 #include <deque>
+#include <map>
 #include <optional>
+#include <string_view>
 #include <utility>
+#include <vector>
 
 class DocumentBroker;
 // wsd/AIChatSession.cpp is only compiled into builds that have an HTTP
@@ -62,6 +67,11 @@ public:
     void sendFileMode(bool readOnly, bool editComments, bool manageRedlines);
 
     void setLockFailed(const std::string& reason);
+
+    /// True while this session is read-only only because its storage lock
+    /// failed (as opposed to a session that never had edit rights). Cleared
+    /// when an attemptlock retry wins the lock back.
+    bool isLockFailed() const { return _isLockFailed; }
 
     STATE_ENUM(SessionState,
                DETACHED, // initial
@@ -93,6 +103,10 @@ public:
     handleOpenDocKitToClientMessage(const std::shared_ptr<Message>& payload,
                                     const std::shared_ptr<DocumentBroker>& docBroker,
                                     const std::shared_ptr<StreamSocket>& saveAsSocket);
+
+    /// Vulcan: reads a kit `jsdialog:` frame for this view into
+    /// vulcanNoteDialog. Never consumes the frame, and never throws.
+    void vulcanReadDialogFrame(const std::string& json);
 
     /// Integer id of the view in the kit process, or -1 if unknown
     int getKitViewId() const { return _kitViewId; }
@@ -175,6 +189,19 @@ public:
 
     void enqueueSendMessage(const std::shared_ptr<Message>& data);
 
+    /// Vulcan: how long roster/cursor fan-out (viewinfo:, cellviewcursor:,
+    /// textviewselection:) is coalesced for. 0 - the default - disables
+    /// coalescing entirely, so the wire is exactly what upstream sends.
+    /// Configured with per_document.view_update_coalesce_ms.
+    static std::chrono::milliseconds viewUpdateCoalesceInterval();
+
+    /// True when we are holding back a coalesced roster/cursor update.
+    bool hasPendingViewUpdates() const { return !_pendingViewUpdates.empty(); }
+
+    /// Sends the coalesced roster/cursor updates we hold, if the coalescing
+    /// interval has elapsed. Called once per document poll iteration.
+    void flushCoalescedViewUpdatesIfDue();
+
     /// Set the save-as socket which is used to send convert-to results.
     void setSaveAsSocket(const std::shared_ptr<StreamSocket>& socket)
     {
@@ -194,6 +221,10 @@ public:
 
     const AdditionalFilePocoUris& getAdditionalFilePublicUri() const { return _additionalFileUrisPublic; }
 
+    /// Whether the request that opened this session was server-to-server
+    /// (RequestDetails::isServerToServer()); validates the storage URI.
+    bool isServerToServer() const { return _isServerToServer; }
+
     /// The access token of this session.
     const Authorization& getAuthorization() const { return _auth; }
 
@@ -203,14 +234,39 @@ public:
         _auth.expire();
     }
 
+    /// Why a token refresh was asked for.
+    ///
+    /// Upload and lock requests can share a wait, but need their own retries and
+    /// failure handling. A lock-only timeout demotes without reporting a save error.
+    enum class TokenRefreshCause
+    {
+        Upload = 1,
+        Lock = 2
+    };
+
     /// Start waiting for a token refresh from the host.
-    void startTokenRefresh(const std::chrono::seconds timeout = std::chrono::seconds(30))
+    void startTokenRefresh(const std::chrono::seconds timeout = std::chrono::seconds(30),
+                           const TokenRefreshCause cause = TokenRefreshCause::Upload)
     {
         LOG_DBG("Session [" << getId() << "] starting token refresh wait (attempt #"
                             << (_tokenRefreshAttempts + 1) << ')');
         ++_tokenRefreshAttempts;
+        _tokenRefreshCauses = static_cast<unsigned>(cause);
         _auth.startTokenRefresh(timeout);
     }
+
+    /// Join an existing wait without spending another attempt or extending its deadline.
+    void addTokenRefreshCause(const TokenRefreshCause cause)
+    {
+        _tokenRefreshCauses |= static_cast<unsigned>(cause);
+    }
+
+    bool hasTokenRefreshCause(const TokenRefreshCause cause) const
+    {
+        return (_tokenRefreshCauses & static_cast<unsigned>(cause)) != 0;
+    }
+
+    void clearTokenRefreshCauses() { _tokenRefreshCauses = 0; }
 
     /// Returns the number of consecutive refresh attempts since the last successful upload.
     int tokenRefreshAttempts() const { return _tokenRefreshAttempts; }
@@ -270,6 +326,116 @@ public:
     int getTileHeightInTwips() const { return _tileHeightTwips; }
 
     bool isTextDocument() const { return _isTextDocument; }
+
+    bool isSpreadsheetDocument() const { return _isSpreadsheetDocument; }
+
+    /// Vulcan: wsd sent this view a `.uno:AcceptFormula notify=1` of its own
+    /// (DocumentBroker::vulcanCommitInProgressInput), whose result the client
+    /// never asked for.
+    void vulcanExpectCommitResult() { ++_vulcanCommitResultsOwed; }
+
+    /// Vulcan: an `.uno:AcceptFormula` result is one of wsd's own (and is
+    /// swallowed) while any are still owed.
+    bool vulcanTakeCommitResult()
+    {
+        if (_vulcanCommitResultsOwed == 0)
+            return false;
+        --_vulcanCommitResultsOwed;
+        return true;
+    }
+
+    /// Vulcan: the modeless dialogs core has open in this view, by
+    /// LOK window id, with the dialog's id (its .ui id, such as FormulaDialog),
+    /// from the kit's jsdialog frames: a dialog's full frame (no action) of type
+    /// modelessdialog adds it, its close frame removes it.
+    /// Calc's reference dialogs (the Function Wizard, Manage Names, Conditional
+    /// Formatting, the filters, ...) are modeless and lock this view's
+    /// SfxDispatcher, so core refuses every .uno:Save sent through this view
+    /// while one is open (anyrefdg.cxx, dispatch.cxx). Modal dialogs and message
+    /// boxes do not lock it, and are not tracked, except Data > Validity
+    /// (ValidationDialog): modal, but its range picker (Allow: Cell range, then
+    /// the Source field) enters reference mode, which locks the view the same
+    /// way (ScValidationDlg::SetupRefDlg, ScRefHandler::EnterRefMode). Its full
+    /// frame keeps the type it opened with, so it is tracked by its id.
+    void vulcanNoteDialog(std::string_view jsontype, std::string_view action,
+                          std::string_view type, std::string_view dialogId, std::uint64_t id)
+    {
+        if (jsontype != "dialog")
+            return;
+        // The dialog's own close frame carries no type. A popup's close
+        // (type modalpopup) is not the dialog closing.
+        if (action == "close" && type.empty())
+            _vulcanModelessDialogs.erase(id);
+        else if (action.empty() && (type == "modelessdialog" || dialogId == "ValidationDialog"))
+            _vulcanModelessDialogs[id] = std::string(dialogId);
+    }
+
+    /// Vulcan: a save sent through this view may be refused, because
+    /// a modeless dialog is open in a spreadsheet view (vulcanNoteDialog).
+    bool vulcanSaveBlockedByDialog() const
+    {
+        return isSpreadsheetDocument() && !_vulcanModelessDialogs.empty();
+    }
+
+    /// Vulcan: a dialog open in this spreadsheet view committed the
+    /// view's cell when it opened (vulcanDialogCommitsInputAtOpen), so a final
+    /// write that closes it has no cell of this view left to commit, and keeps
+    /// the edit open (DocumentBroker::sendUnoSave). Find & Replace, Hyperlink,
+    /// Spelling and any dialog not listed there do not commit it: the view may
+    /// still hold a half-typed cell, which that save commits as before.
+    bool vulcanInputCommittedByDialog() const
+    {
+        if (!isSpreadsheetDocument())
+            return false;
+        for (const auto& dialog : _vulcanModelessDialogs)
+            if (vulcanDialogCommitsInputAtOpen(dialog.second))
+                return true;
+        return false;
+    }
+
+    /// Vulcan: the dialogs that end their view's cell edit as they
+    /// open: the Function Wizard (ScFormulaDlg's constructor runs
+    /// InputEnterHandler, sc/source/ui/formdlg/formula.cxx), and every Calc
+    /// reference dialog (ScAnyRefDlgController, whose ScRefHandler::EnterRefMode
+    /// runs it, sc/source/ui/miscdlgs/anyrefdg.cxx); the ids are their .ui ids
+    /// in engine/sc/source/ui. The wizard then marks the view's input line
+    /// modified while it still holds the text last entered in the view, so a
+    /// save that ends the edit after wsd closes the wizard (its Cancel is only
+    /// posted) stores that text into the cell under it.
+    static bool vulcanDialogCommitsInputAtOpen(std::string_view dialogId)
+    {
+        if (dialogId == "FormulaDialog")
+            return true;
+        static constexpr std::string_view referenceDialogs[] = {
+            "AdvancedFilterDialog", "AnalysisOfVarianceDialog", "ChiSquareTestDialog",
+            "CondFormatEasyDlg", "ConditionalFormatDialog", "ConsolidateDialog",
+            "CorrelationDialog", "CovarianceDialog", "DefineDatabaseRangeDialog",
+            "DefineNameDialog", "DescriptiveStatisticsDialog", "ExponentialSmoothingDialog",
+            "FourierAnalysisDialog", "GoalSeekDialog", "ManageNamesDialog",
+            "MovingAverageDialog", "MultipleOperationsDialog", "NameRangesDialog",
+            "PivotTableLayout", "PrintAreasDialog", "RandomNumberGeneratorDialog",
+            "RegressionDialog", "SamplingDialog", "ShowChangesDialog", "SimpleRefDialog",
+            "SolverDialog", "SparklineDataRangeDialog", "SparklineDialog",
+            "StandardFilterDialog", "TTestDialog", "XMLSourceDialog", "ZTestDialog",
+            "tablerangedialog",
+        };
+        for (const std::string_view referenceDialog : referenceDialogs)
+            if (dialogId == referenceDialog)
+                return true;
+        return false;
+    }
+
+    const std::map<std::uint64_t, std::string>& vulcanModelessDialogs() const
+    {
+        return _vulcanModelessDialogs;
+    }
+
+    /// Vulcan: the host marks headless agent views with
+    /// UserExtraInfo.vulcan_agent in CheckFileInfo. Such views drive the
+    /// document without a canvas, so they are excluded from the tile-cache
+    /// budget. Defaults to false, i.e. an ordinary user view.
+    void setVulcanAgentView(bool isAgent) { _isVulcanAgentView = isAgent; }
+    bool isVulcanAgentView() const { return _isVulcanAgentView; }
 
     void setThumbnailSession(const bool val) { _thumbnailSession = val; }
 
@@ -442,6 +608,10 @@ private:
 
     bool loadDocument(const char* buffer, int length, const StringVector& tokens,
                       const std::shared_ptr<DocumentBroker>& docBroker);
+    /// The global accessibility switch also changes the stock desktop UI mode,
+    /// so phone sessions opt into the per-view protocol without enabling that
+    /// deployment-wide switch.
+    bool canUseAccessibility() const;
     bool getStatus(const char* buffer, int length,
                    const std::shared_ptr<DocumentBroker>& docBroker);
     bool getCommandValues(const char* buffer, int length, const StringVector& tokens,
@@ -464,6 +634,18 @@ private:
                         const std::shared_ptr<DocumentBroker>& docBroker);
 
     bool forwardToClient(const std::shared_ptr<Message>& payload);
+
+    /// Vulcan: roster/cursor coalescing (see viewUpdateCoalesceInterval()).
+    /// Decides what to do with a message on its way to this client:
+    /// - returns false for anything we are not coalescing, or that may go out
+    ///   right away, in which case the caller sends it as usual. Anything held
+    ///   back is flushed first, so the client's message order never changes;
+    /// - returns true when the message was buffered to be sent later, replacing
+    ///   any older update of the same kind for the same view.
+    bool coalesceViewUpdate(const std::shared_ptr<Message>& payload);
+
+    /// Enqueues every coalesced update we hold, in arrival order.
+    void flushCoalescedViewUpdates(std::chrono::steady_clock::time_point now);
 
     /// Returns true if given message from the client should be allowed or not
     /// Eg. in readonly mode only few messages should be allowed
@@ -511,12 +693,18 @@ private:
     /// How to find our service from the client.
     const ServerURL _serverURL;
 
+    /// See isServerToServer().
+    const bool _isServerToServer;
+
     /// Authorization data - either access_token or access_header.
     Authorization _auth;
 
-    /// Number of consecutive token-refresh attempts triggered by upload 401s
+    /// Number of consecutive token-refresh attempts triggered by upload or lock 401s
     /// since the last successful upload. Bounds the refresh-on-unauthorize retry loop.
     int _tokenRefreshAttempts;
+
+    /// Both lanes may share one in-flight token refresh. See TokenRefreshCause.
+    unsigned _tokenRefreshCauses = 0;
 
     /// Rotating clipboard remote access identifiers - protected by GlobalSessionMapMutex
     std::string _clipboardKeys[2];
@@ -599,11 +787,47 @@ private:
     /// because it's read-only just because of transient lock failure.
     bool _isLockFailed = false;
 
+    /// Vulcan: setLockFailed demoted a full editor (not a comment-only or
+    /// redline session), so a won attemptlock must undo exactly that.
+    bool _lockFailedDemotedEditor = false;
+    /// Vulcan: setLockFailed pushed this session's Core view read-only, so a
+    /// won attemptlock must lift it again (and only then).
+    bool _lockFailedViewReadOnly = false;
+    /// Vulcan: the comment and redline rights setLockFailed took away.
+    bool _lockFailedSavedComments = false;
+    bool _lockFailedSavedRedlines = false;
+
     /// Client is using a text document?
     bool _isTextDocument;
 
+    /// Vulcan: client is using a spreadsheet (the status: type), whose
+    /// in-progress cell a going-away save commits first
+    /// (DocumentBroker::vulcanCommitInProgressInput).
+    bool _isSpreadsheetDocument = false;
+
+    /// Vulcan: wsd's own `.uno:AcceptFormula` results still to come
+    /// (vulcanExpectCommitResult).
+    std::size_t _vulcanCommitResultsOwed = 0;
+
+    /// Vulcan: the modeless dialogs open in this view, by LOK window
+    /// id, with the dialog's id (vulcanNoteDialog).
+    std::map<std::uint64_t, std::string> _vulcanModelessDialogs;
+
     /// Session used to generate thumbnail
     bool _thumbnailSession;
+
+    /// Vulcan: headless agent view (UserExtraInfo.vulcan_agent), see
+    /// isVulcanAgentView().
+    bool _isVulcanAgentView = false;
+
+    /// Vulcan: roster/cursor updates held back for coalescing, in arrival order,
+    /// each keyed by "<kind>|<viewId>" so a newer update of the same kind for the
+    /// same view supersedes the one we still hold. Always empty unless
+    /// per_document.view_update_coalesce_ms is set.
+    std::vector<std::pair<std::string, std::shared_ptr<Message>>> _pendingViewUpdates;
+
+    /// Vulcan: when we last let a roster/cursor update through to this client.
+    std::chrono::steady_clock::time_point _lastViewUpdateFlush;
 
     // Saves time from setting/fetching user info multiple times using zotero API
     bool _isZoteroUserInfoSet = false;

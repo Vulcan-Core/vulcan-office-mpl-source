@@ -41,6 +41,7 @@
 #include <drawingml/chart/stylemodel.hxx>
 #include <drawingml/chart/colorsmodel.hxx>
 #include <drawingml/chart/chartspacemodel.hxx>
+#include <drawingml/chart/chartworkbook.hxx>
 #include <o3tl/safeint.hxx>
 #include <o3tl/unit_conversion.hxx>
 #include <oox/ppt/pptimport.hxx>
@@ -1386,6 +1387,18 @@ Reference< XShape > const & Shape::createAndInsert(
         {
             putPropertyToGrabBag(u"mso-sp-fPublished"_ustr, Any(mbFPublished));
         }
+
+        // this shape arrived as a <p:pic> and was diverted to a CustomShape
+        // above (bIsCroppedGraphic) only because its geometry is not a plain rect.
+        // Record that origin, so the exporter can write it back as a picture instead of
+        // an image-filled autoshape. LibreOffice renders the autoshape correctly and
+        // PowerPoint shows an EMPTY FRAME, which is why the loss was invisible here.
+        // Not marked for the 3D route: an extruded graphic must stay a shape.
+        if (mpGraphicPropertiesPtr && mpGraphicPropertiesPtr->mbIsCustomShape
+            && !mpGraphicPropertiesPtr->mbIsExtruded)
+        {
+            putPropertyToGrabBag(u"mso-pic-origin"_ustr, Any(true));
+        }
         if (!msTitle.isEmpty())
         {
             xSet->setPropertyValue(u"Title"_ustr, Any(msTitle));
@@ -1683,6 +1696,29 @@ Reference< XShape > const & Shape::createAndInsert(
             {
                 // Disable layouting until table height is expanded to fit the content
                 pTableShape->SetSkipChangeLayout(true);
+
+                // VULCAN: the table style this table cites, whether it is built in, and
+                // the parts of it the table turns on. The cells take that style's formatting as
+                // their own above, and nothing in the model names the style, so the export writes
+                // these back from here.
+                const OUString& rStyleId = mpTablePropertiesPtr->getStyleId();
+                if (!rStyleId.isEmpty())
+                {
+                    cpo::uno::Any aGrabBag;
+                    pTableShape->GetGrabBagItem(aGrabBag);
+                    comphelper::SequenceAsHashMap aTableGrabBag(aGrabBag);
+                    aTableGrabBag[u"TableStyleId"_ustr] <<= rStyleId;
+                    aTableGrabBag[u"TableStyleBuiltIn"_ustr]
+                        <<= table::TableProperties::isPredefinedStyleId(rStyleId);
+                    aTableGrabBag[u"FirstRow"_ustr] <<= mpTablePropertiesPtr->isFirstRow();
+                    aTableGrabBag[u"FirstCol"_ustr] <<= mpTablePropertiesPtr->isFirstCol();
+                    aTableGrabBag[u"LastRow"_ustr] <<= mpTablePropertiesPtr->isLastRow();
+                    aTableGrabBag[u"LastCol"_ustr] <<= mpTablePropertiesPtr->isLastCol();
+                    aTableGrabBag[u"BandRow"_ustr] <<= mpTablePropertiesPtr->isBandRow();
+                    aTableGrabBag[u"BandCol"_ustr] <<= mpTablePropertiesPtr->isBandCol();
+                    pTableShape->SetGrabBagItem(
+                        cpo::uno::Any(aTableGrabBag.getAsConstPropertyValueList()));
+                }
             }
         }
 
@@ -2747,6 +2783,13 @@ void Shape::finalizeXShape( XmlFilterBase& rFilter, const Reference< XShapes >& 
                     }
                     // Restore the original color map
                     pPowerPointImport->getActualSlidePersist()->setClrMap(std::move(pClrMap));
+
+                    // Keep the workbook the chart's c:externalData names, and the data the
+                    // chart now shows, so that the PPTX export can write it back while that
+                    // data is unchanged (ChartExport::ExportContent). Without it every save
+                    // dropped the workbook, and PowerPoint's Edit Data had nothing to open.
+                    if (!aModel.maSheetPath.isEmpty())
+                        chart::keepChartWorkbook(rFilter, aModel.maSheetPath, xChartDoc);
                 }
 #endif
             }

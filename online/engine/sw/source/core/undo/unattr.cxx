@@ -20,6 +20,7 @@
 #include <sal/config.h>
 
 #include <utility>
+#include <algorithm>
 
 #include <UndoAttribute.hxx>
 #include <svl/itemiter.hxx>
@@ -635,6 +636,13 @@ SwUndoResetAttr::SwUndoResetAttr( const SwPosition& rPos, sal_uInt16 nFormatId )
     m_nSttContent = m_nEndContent = rPos.GetContentIndex();
 }
 
+std::optional<sw::UndoFootprint> SwUndoResetAttr::GetFootprint() const
+{
+    const SwNodeOffset nStart = std::min(m_nSttNode, m_nEndNode);
+    const SwNodeOffset nEnd = std::max(m_nSttNode, m_nEndNode);
+    return sw::UndoFootprint{ nStart, nEnd, SwUndo::IsHistoryNodeNeutral(m_pHistory.get()) };
+}
+
 SwUndoResetAttr::~SwUndoResetAttr()
 {
 }
@@ -809,6 +817,13 @@ SwUndoAttr::SwUndoAttr( const SwPaM& rRange, SfxItemSet aSet,
         if (const SwPageDesc *pPgDesc = pPgDescItem->StaticWhichCast(RES_PAGEDESC).GetPageDesc(); pPgDesc != nullptr)
             m_aPageDescName = pPgDesc->GetName();
     }
+}
+
+std::optional<sw::UndoFootprint> SwUndoAttr::GetFootprint() const
+{
+    const SwNodeOffset nStart = std::min(m_nSttNode, m_nEndNode);
+    const SwNodeOffset nEnd = std::max(m_nSttNode, m_nEndNode);
+    return sw::UndoFootprint{ nStart, nEnd, SwUndo::IsHistoryNodeNeutral(m_pHistory.get()) };
 }
 
 SwUndoAttr::~SwUndoAttr()

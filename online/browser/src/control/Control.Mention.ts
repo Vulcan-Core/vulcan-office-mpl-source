@@ -13,6 +13,65 @@
  * Control.Mention
  */
 
+/*
+ * 🔴 TRACE, recorded because the phone-Impress parity matrix carried
+ * google-slides.json's "@-mention with email notification" (comments / CORE) as
+ * "server-side half still untraced" for four passes, and that description is
+ * the wrong shape. It is not a client that works waiting on a server that does
+ * not. On a PRESENTATION neither half runs, and the client half is the one that
+ * stops first.
+ *
+ * 1. This class is never CONSTRUCTED for a presentation. Its single
+ *    instantiation, Control.UIManager.ts:873, sits inside the
+ *    `if (docType === 'text')` branch opened at :859. On Impress, Draw and Calc
+ *    `map.mention` stays undefined for the life of the session.
+ *
+ * 2. Every entry point is independently doctype-gated to Writer as well, so the
+ *    gate is not one line anyone could relax by accident:
+ *      - CommentSection.ts:620      `app.map._docLayer._docType === 'text'`
+ *      - CommentListSection.ts:810  same test, and this is the PHONE path --
+ *                                   the 'input' listener on #input-modal-input,
+ *                                   i.e. the mobile comment modal
+ *      - TextInput.js:829           `this._map.getDocType() === 'text'`
+ *      - A11yTextInput.js:599       same
+ *    (CommentSection.ts:1615 and :1647 test it again before reading
+ *    isTypingMention().)
+ *
+ * 3. The autocomplete list is not ours to produce and never was. sendMentionPostMsg
+ *    below only fires a postMessage OUT — msgId 'UI_Mention',
+ *    {type:'autocomplete'} — and the list comes back only if the WOPI host
+ *    answers with 'Action_Mention', which Map.WOPI.js:1130-1132 feeds to
+ *    openMentionPopup. The EMAIL is likewise entirely the host's: the only other
+ *    thing we emit is 'UI_Mention' {type:'selected'} in callback() below. There
+ *    is no mail path in this tree, and there is no bug here to fix — this is the
+ *    designed division of labour.
+ *
+ * 4. OUR host implements neither message. In the host application the integration is
+ *    the host's editor component, whose
+ *    postMessage switch at :1344 handles App_LoadingStatus,
+ *    Host_PostmessageReady, UI_Close, Action_RevisionHistory, rev-history,
+ *    UI_FileVersions, UI_Share, Action_Save_Resp, View_Added, View_Removed,
+ *    Get_Selection, Vulcan_AIAction, Doc_ModifiedStatus, Vulcan_Telemetry,
+ *    Vulcan_Ready, Send_UNO_Command_Resp, Vulcan_ReadRange_Resp,
+ *    Vulcan_GetSheetInfo_Resp, User_Idle, User_Active, Clicked_Button,
+ *    State_Changed, Download_As, Action_Paste, Clicked_Special, Action_Error and
+ *    Error. 'UI_Mention' is not among them, and 'Action_Mention' is never sent:
+ *    grepping the repository for either token outside vendor/vulcan-office
+ *    returns nothing. So the round trip is open at BOTH ends even in Writer.
+ *
+ * What that means for the row: closing it is not a phone-UI diff and not a
+ * doctype gate to relax. It needs (a) core to give Impress comments a mention
+ * anchor, and (b) the host to implement the UI_Mention/Action_Mention pair plus
+ * the notification. Do not "fix" it by widening the four gates above — the
+ * popup would open onto a list nobody sends.
+ *
+ * ⚠ LATENT, not currently reachable: Map.WOPI.js:1132 is
+ * `this._map.mention.openMentionPopup(list)` with no optional chaining, so a
+ * host that DID answer Action_Mention while a presentation is open would throw
+ * a TypeError. Ours never sends it, so this cannot fire today. Worth an `?.`
+ * whenever that file is next touched; it is outside this lane.
+ */
+
 /* global app cool */
 
 interface MentionUserData {

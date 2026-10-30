@@ -11,6 +11,8 @@
 
 #include <config.h>
 
+#include <common/ConfigUtil.hpp>
+#include <net/AsyncDNS.hpp>
 #include <net/HttpRequest.hpp>
 #include <test/MockStreamSocket.hpp>
 #include <wsd/COOLWSD.hpp>
@@ -18,8 +20,10 @@
 #include <wsd/ClientRequestDispatcher.hpp>
 #include <wsd/ContentType.hpp>
 #include <wsd/FileServer.hpp>
+#include <wsd/HostUtil.hpp>
 #include <wsd/RequestDetails.hpp>
 #include <wsd/ServerURL.hpp>
+#include <wsd/Storage.hpp>
 
 #include <test/lokassert.hpp>
 #include <test/testlog.hpp>
@@ -31,6 +35,59 @@
 #include <string>
 
 #include <Poco/Net/HTTPRequest.h>
+#include <Poco/Util/LayeredConfiguration.h>
+#include <Poco/Util/MapConfiguration.h>
+
+namespace
+{
+/// Installs, for one test, the WOPI host config the editor fleet runs with when the
+/// engine lane is armed (the deployment configuration):
+/// group[0] the public editor domain, group[1] a
+/// scheme-wrapped address regex for the engine lane's loopback WOPI hosts. The range
+/// is TEST-NET-2 here, not the VPC's, so that no interface of the machine running
+/// the test can be inside it (StorageBase::validate() admits a local host to a
+/// server-to-server request, which would mask the group[1] answer). Leaves
+/// an empty, WOPI-disabled host state and the previous config behind.
+class ScopedEditorFleetHosts
+{
+public:
+    ScopedEditorFleetHosts()
+        : _config(new Poco::Util::MapConfiguration)
+        , _layered(new Poco::Util::LayeredConfiguration)
+        , _previous(nullptr)
+    {
+        _config->setString("storage.wopi[@allow]", "true");
+        // The shipped coolwsd.xml has an <alias_groups> element; parseAliases()
+        // only reads the groups when that key exists.
+        _config->setString("storage.wopi.alias_groups", "");
+        _config->setString("storage.wopi.alias_groups[@mode]", "groups");
+        _config->setString("storage.wopi.alias_groups.group[0].host",
+                           "https://editor.example.com:443");
+        _config->setString("storage.wopi.alias_groups.group[0].host[@allow]", "true");
+        _config->setString("storage.wopi.alias_groups.group[1].host",
+                           "https://198\\.51\\.100\\.[0-9]+");
+        _config->setString("storage.wopi.alias_groups.group[1].host[@allow]", "true");
+        _layered->addWriteable(_config, 0);
+        _previous = ConfigUtil::setConfigForTest(_layered.get());
+        HostUtil::parseAliases(*_layered);
+    }
+
+    ~ScopedEditorFleetHosts()
+    {
+        // Re-parsed with no group and WOPI off, parseAliases() empties every list.
+        _config->clear();
+        _config->setString("storage.wopi[@allow]", "false");
+        _config->setString("storage.wopi.alias_groups", "");
+        HostUtil::parseAliases(*_layered);
+        ConfigUtil::setConfigForTest(_previous);
+    }
+
+private:
+    Poco::AutoPtr<Poco::Util::MapConfiguration> _config;
+    Poco::AutoPtr<Poco::Util::LayeredConfiguration> _layered;
+    const Poco::Util::AbstractConfiguration* _previous;
+};
+} // namespace
 
 /// Unit tests for ClientRequestDispatcher.
 class ClientRequestDispatcherTests : public CPPUNIT_NS::TestFixture
@@ -63,6 +120,10 @@ class ClientRequestDispatcherTests : public CPPUNIT_NS::TestFixture
 
     CPPUNIT_TEST(testServerURL_ProxyPrefixNegativePort);
     CPPUNIT_TEST(testServerURL_ProxyPrefixValidPort);
+
+    CPPUNIT_TEST(testValidate_InternalAliasGroupFollowsCallerTrust);
+    CPPUNIT_TEST(testWopiAccessCheck_InternalAliasGroupRefusedToPublicCaller);
+    CPPUNIT_TEST(testFetchModels_NonPublicHostRefusedToPublicCaller);
 
     CPPUNIT_TEST_SUITE_END();
 
@@ -324,10 +385,14 @@ private:
 
     /// Helper: create a CRD wired to a MockStreamSocket, inject an HTTP request,
     /// and call handleIncomingMessage. Returns the raw HTTP response.
-    std::string dispatchRequest(const std::string& httpRequest)
+    /// peerAddress, when given, is the TCP peer the request appears to come from.
+    std::string dispatchRequest(const std::string& httpRequest,
+                                const std::string& peerAddress = std::string())
     {
         auto handler = std::make_shared<ClientRequestDispatcher>();
         auto socket = std::make_shared<MockStreamSocket>();
+        if (!peerAddress.empty())
+            socket->setClientAddress(peerAddress);
         socket->setHandler(handler);
 
         // Call through base — onConnect and handleIncomingMessage are private overrides.
@@ -411,6 +476,136 @@ private:
         LOK_ASSERT_EQUAL(std::string("https://example.com:8443"), url.getWebServerUrl());
 
         COOLWSD::ServerName = saved;
+    }
+
+    /// A WOPISrc host that only the internal alias group admits is a WOPI host for a
+    /// server-to-server request alone; group[0] answers the same for every caller.
+    void testValidate_InternalAliasGroupFollowsCallerTrust()
+    {
+        constexpr std::string_view testname = __func__;
+        const ScopedEditorFleetHosts hosts;
+
+        // validate() resolves names, so it needs the resolver thread. Started once
+        // per process and left running: AsyncDNS cannot be restarted after a stop.
+        net::AsyncDNS::startAsyncDNS();
+
+        // The engine lane's WOPISrc: a task IP and a port in the callback range.
+        const Poco::URI taskIp("http://198.51.100.7:42001/wopi/files/1?access_token=t");
+        LOK_ASSERT_MESSAGE("a group[1] WOPISrc is a WOPI host for a server-to-server request",
+                           StorageBase::validate(taskIp, /*takeOwnership=*/false,
+                                                 /*serverToServer=*/true) ==
+                               StorageBase::StorageType::Wopi);
+        LOK_ASSERT_MESSAGE("a group[1] WOPISrc is refused to a public request",
+                           StorageBase::validate(taskIp, /*takeOwnership=*/false,
+                                                 /*serverToServer=*/false) ==
+                               StorageBase::StorageType::Unauthorized);
+
+        // A name that does not match the regex as text but resolves into the range:
+        // glibc reads "198.51.25607" as 198.51.100.7 (inet_aton's a.b.c form), with no
+        // DNS server involved. validate() then checks the resolved address.
+        const Poco::URI resolvesInside("http://198.51.25607:42001/wopi/files/1?access_token=t");
+        LOK_ASSERT_MESSAGE("a name resolving into group[1] is refused to a public request",
+                           StorageBase::validate(resolvesInside, /*takeOwnership=*/false,
+                                                 /*serverToServer=*/false) ==
+                               StorageBase::StorageType::Unauthorized);
+        LOK_ASSERT_MESSAGE("a name resolving into group[1] serves a server-to-server request",
+                           StorageBase::validate(resolvesInside, /*takeOwnership=*/false,
+                                                 /*serverToServer=*/true) ==
+                               StorageBase::StorageType::Wopi);
+
+        // The editor's own loopback, which no group lists: a WOPI host for a
+        // server-to-server request alone (a test WOPI host on the same machine), never
+        // a door to the task-local ports for anyone else.
+        const Poco::URI loopback("http://127.0.0.1:9/wopi/files/1?access_token=t");
+        LOK_ASSERT_MESSAGE("a loopback WOPISrc serves a server-to-server request",
+                           StorageBase::validate(loopback, /*takeOwnership=*/false,
+                                                 /*serverToServer=*/true) ==
+                               StorageBase::StorageType::Wopi);
+        LOK_ASSERT_MESSAGE("a loopback WOPISrc is refused to a public request",
+                           StorageBase::validate(loopback, /*takeOwnership=*/false,
+                                                 /*serverToServer=*/false) ==
+                               StorageBase::StorageType::Unauthorized);
+
+        // The public editor domain: unchanged, whoever asks.
+        const Poco::URI editor("https://editor.example.com/wopi/files/1?access_token=t");
+        for (const bool serverToServer : { false, true })
+        {
+            LOK_ASSERT_MESSAGE("a group[0] WOPISrc is a WOPI host for every caller",
+                               StorageBase::validate(editor, /*takeOwnership=*/false,
+                                                     serverToServer) ==
+                                   StorageBase::StorageType::Wopi);
+        }
+    }
+
+    /// /hosting/wopiAccessCheck probes a caller-chosen callbackUrl without
+    /// authentication; through the load balancer it must not reach the internal range.
+    void testWopiAccessCheck_InternalAliasGroupRefusedToPublicCaller()
+    {
+        constexpr std::string_view testname = __func__;
+        const ScopedEditorFleetHosts hosts;
+
+        const std::string body = R"({"callbackUrl": "http://198.51.100.7:42001/wopi/files/1"})";
+        const auto post = [&body](const std::string& extraHeaders)
+        {
+            return "POST /hosting/wopiAccessCheck HTTP/1.1\r\n"
+                   "Host: editor.example.com\r\n"
+                   "Content-Type: application/json\r\n" +
+                   extraHeaders + "Content-Length: " + std::to_string(body.size()) +
+                   "\r\n\r\n" + body;
+        };
+
+        // A browser through the load balancer: the peer is the balancer's private
+        // address and the request carries X-Forwarded-For.
+        const std::string viaBalancer =
+            dispatchRequest(post("X-Forwarded-For: 203.0.113.9\r\n"), "10.8.0.5");
+        LOK_ASSERT_MESSAGE("a forwarded wopiAccessCheck is refused a group[1] callbackUrl",
+                           viaBalancer.find(R"("status": "WopiHostNotAllowed")") !=
+                               std::string::npos);
+
+        // A caller outside net.post_allow, connecting directly.
+        const std::string direct = dispatchRequest(post(std::string()), "203.0.113.9");
+        LOK_ASSERT_MESSAGE("a public peer's wopiAccessCheck is refused a group[1] callbackUrl",
+                           direct.find(R"("status": "WopiHostNotAllowed")") !=
+                               std::string::npos);
+    }
+
+    /// /browser/<any>/fetch-models has no authentication and returns the upstream body;
+    /// a public caller must not point its custom provider into the VPC or at loopback.
+    void testFetchModels_NonPublicHostRefusedToPublicCaller()
+    {
+        constexpr std::string_view testname = __func__;
+
+        // The refusal resolves the host to check every address.
+        net::AsyncDNS::startAsyncDNS();
+
+        const auto post = [](const std::string& baseUrl, const std::string& extraHeaders)
+        {
+            const std::string body = "provider=custom&baseUrl=" + baseUrl;
+            return "POST /browser/0123456789/fetch-models HTTP/1.1\r\n"
+                   "Host: editor.example.com\r\n"
+                   "Content-Type: application/x-www-form-urlencoded\r\n" +
+                   extraHeaders + "Content-Length: " + std::to_string(body.size()) +
+                   "\r\n\r\n" + body;
+        };
+
+        // The refusal text, distinct from the KIT allowlist's, so the check below
+        // cannot pass on that refusal instead.
+        constexpr std::string_view refused = "Target host is not a public address";
+
+        // A browser through the load balancer, aiming at an internal service.
+        const std::string viaBalancer = dispatchRequest(
+            post("http%3A%2F%2F10.8.1.1%3A8080", "X-Forwarded-For: 203.0.113.9\r\n"),
+            "10.8.0.5");
+        LOK_ASSERT_MESSAGE("a forwarded fetch-models is refused a VPC host",
+                           viaBalancer.find("HTTP/1.1 421") != std::string::npos &&
+                               viaBalancer.find(refused) != std::string::npos);
+
+        // A caller outside net.post_allow, aiming at the editor's own loopback.
+        const std::string direct =
+            dispatchRequest(post("http%3A%2F%2F127.0.0.1%3A9980", std::string()), "203.0.113.9");
+        LOK_ASSERT_MESSAGE("a public peer's fetch-models is refused a loopback host",
+                           direct.find("HTTP/1.1 421") != std::string::npos &&
+                               direct.find(refused) != std::string::npos);
     }
 };
 

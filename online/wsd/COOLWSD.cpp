@@ -60,6 +60,7 @@
 #include <common/SigUtil.hpp>
 #include <common/Unit.hpp>
 #include <common/Util.hpp>
+#include <common/VulcanLogScrub.hpp>
 #include <net/AsyncDNS.hpp>
 #include <net/HttpRequest.hpp>
 #include <net/ServerSocket.hpp>
@@ -171,8 +172,6 @@ int PrisonerServerSocketFD;
 
 #else // MOBILEAPP
 
-std::shared_ptr<http::Session> FetchHttpSession;
-
 #if ENABLE_DEBUG
 std::chrono::milliseconds careerSpanMs(std::chrono::milliseconds::zero());
 #endif
@@ -241,8 +240,20 @@ std::string removeProtocolAndPort(const std::string& host)
 
 void COOLWSD::appendAllowedAliasGroups(const LayeredConfiguration& conf, std::vector<std::string>& allowed)
 {
+    // While alias groups after group[0] are internal (the default; HostUtil::parseAliases()
+    // reads the same attribute), they serve server-to-server WOPI requests only, and
+    // must not widen the hosts a document in any editing session may pull external
+    // data from, so only group[0] joins that list.
+    const bool secondaryGroupsInternal =
+        conf.getBool("storage.wopi.alias_groups[@secondary_groups_internal]", true);
+
     for (size_t i = 0;; i++)
     {
+        if (secondaryGroupsInternal && i > 0)
+        {
+            break;
+        }
+
         const std::string path = "storage.wopi.alias_groups.group[" + std::to_string(i) + ']';
         if (!conf.has(path + ".host"))
         {
@@ -2808,7 +2819,7 @@ void COOLWSD::displayHelp()
     Poco::Util::HelpFormatter helpFormatter(options());
     helpFormatter.setCommand(commandName());
     helpFormatter.setUsage("OPTIONS");
-    helpFormatter.setHeader("Collabora Online WebSocket server.");
+    helpFormatter.setHeader("Vulcan Office WebSocket server.");
     helpFormatter.format(std::cout);
 }
 
@@ -3663,18 +3674,6 @@ void COOLWSDServer::dumpState(std::ostream& os) const
     else
         os << "\n  smaps_rollup: " << Util::replace(std::move(smap), "\n", "\n\t");
 
-#if !MOBILEAPP
-    if (FetchHttpSession)
-    {
-        os << "\nFetchHttpSession:\n";
-        FetchHttpSession->dumpState(os, "\n  ");
-    }
-    else
-#endif // !MOBILEAPP
-    {
-        os << "\nFetchHttpSession: null\n";
-    }
-
     os << "\nServer poll:\n";
     _acceptPoll.dumpState(os);
 
@@ -3824,62 +3823,6 @@ void COOLWSDServer::AcceptPoll::wakeupHook()
 }
 
 #if !MOBILEAPP
-void COOLWSD::processFetchUpdate(const std::shared_ptr<SocketPoll>& poll)
-{
-    try
-    {
-        const std::string url(INFOBAR_URL);
-        if (url.empty())
-            return; // No url, nothing to do.
-
-        if (FetchHttpSession)
-            return;
-
-        Poco::URI uriFetch(url);
-        uriFetch.addQueryParameter("product", ConfigUtil::getString("product_name", APP_NAME));
-        uriFetch.addQueryParameter("version", Util::getCoolVersion());
-        LOG_TRC("Infobar update request from " << uriFetch.toString());
-        FetchHttpSession = StorageConnectionManager::getHttpSession(uriFetch);
-        if (!FetchHttpSession)
-            return;
-
-        http::Request request(uriFetch.getPathAndQuery());
-        request.add("Accept", "application/json");
-
-        FetchHttpSession->setFinishedHandler([](const std::shared_ptr<http::Session>& httpSession) {
-
-            std::shared_ptr<http::Response> httpResponse = httpSession->response();
-
-            FetchHttpSession.reset();
-            if (httpResponse->statusLine().statusCode() == http::StatusCode::OK)
-            {
-                LOG_DBG("Infobar update returned: " << httpResponse->getBody());
-
-                std::lock_guard<std::mutex> lock(COOLWSD::FetchUpdateMutex);
-                COOLWSD::LatestVersion = httpResponse->getBody();
-            }
-            else
-                LOG_WRN("Failed to update the infobar. Got: "
-                        << httpResponse->statusLine().statusCode() << ' '
-                        << httpResponse->statusLine().reasonPhrase());
-        });
-
-        FetchHttpSession->asyncRequest(request, poll);
-    }
-    catch(const Poco::Exception& exc)
-    {
-        LOG_DBG("FetchUpdate: " << exc.displayText());
-    }
-    catch(std::exception& exc)
-    {
-        LOG_DBG("FetchUpdate: " << exc.what());
-    }
-    catch(...)
-    {
-        LOG_DBG("FetchUpdate: Unknown exception");
-    }
-}
-
 #if ENABLE_DEBUG
 std::string COOLWSD::getServerURL()
 {
@@ -3943,9 +3886,6 @@ void COOLWSD::innerMain()
         FileServerRoot = Util::getApplicationPath();
     FileServerRoot = Poco::Path(FileServerRoot).absolute().toString();
     LOG_DBG("FileServerRoot: " << FileServerRoot);
-
-    const auto fetchUpdateCheck = std::chrono::duration_cast<std::chrono::milliseconds>(
-        std::chrono::hours(std::max(ConfigUtil::getConfigValue<int>("fetch_update_check", 10), 0)));
 
 #endif
 
@@ -4108,8 +4048,6 @@ void COOLWSD::innerMain()
 
     const auto startStamp = std::chrono::steady_clock::now();
 #if !MOBILEAPP
-    auto stampFetch = startStamp - (fetchUpdateCheck - std::chrono::milliseconds(60000));
-
 #ifdef __linux__
     if (ConfigUtil::getConfigValue<bool>("stop_on_config_change", false))
     {
@@ -4164,14 +4102,6 @@ void COOLWSD::innerMain()
 
 #if !MOBILEAPP
         SavedClipboards->checkexpiry(timeNow);
-
-        const std::chrono::milliseconds durationFetch
-            = std::chrono::duration_cast<std::chrono::milliseconds>(timeNow - stampFetch);
-        if (fetchUpdateCheck > std::chrono::milliseconds::zero() && durationFetch > fetchUpdateCheck)
-        {
-            processFetchUpdate(mainWait);
-            stampFetch = timeNow;
-        }
 
         // if Admin hasn't seen any document activity for over 10 mins them malloc_trim
         constexpr time_t idleTrimCheck(10 * 60);
@@ -4605,7 +4535,9 @@ void dump_state()
     oss << "\nEnd WSD " << ProcUtil::getProcessId() << " Dump State.\n";
 
     const std::string msg = oss.str();
-    fprintf(stderr, "%s", msg.c_str()); // Log in the journal.
+    // Vulcan: raw stderr bypasses the logger's scrub; the dump carries "public uri:" and
+    // each session's Authorization.
+    fprintf(stderr, "%s", Vulcan::scrubLogSecrets(msg).c_str()); // Log in the journal.
     LOG_WRN(msg);
 
 #if !MOBILEAPP

@@ -23,6 +23,7 @@
 #include <wsd/DocumentBroker.hpp>
 #include <wsd/Exceptions.hpp>
 #include <wsd/RequestDetails.hpp>
+#include <wsd/Storage.hpp>
 
 bool CheckFileInfo::checkFileInfo(int redirectLimit)
 {
@@ -66,7 +67,23 @@ bool CheckFileInfo::checkFileInfo(int redirectLimit)
                 LOG_INF("WOPI::CheckFileInfo redirect to URI ["
                         << Anonymizer::anonymizeUrl(location) << "]");
 
-                _url = RequestDetails::sanitizeURI(location);
+                // The redirect target is vetted as the WOPISrc was, with the same
+                // caller trust: otherwise an open redirect on an allowed WOPI host
+                // would carry this request to any host the editor can reach.
+                const Poco::URI target = RequestDetails::sanitizeURI(location);
+                if (StorageBase::validate(target, /*takeOwnership=*/false, _serverToServer) !=
+                    StorageBase::StorageType::Wopi)
+                {
+                    LOG_ERR("WOPI::CheckFileInfo redirect to a host that is not an allowed "
+                            "WOPI host for this request, refusing to follow it ["
+                            << Anonymizer::anonymizeUrl(location) << ']');
+                    _state = State::Fail;
+                    if (_onFinishCallback)
+                        _onFinishCallback(*this);
+                    return;
+                }
+
+                _url = target;
                 checkFileInfo(redirectLimit - 1);
                 return;
             }

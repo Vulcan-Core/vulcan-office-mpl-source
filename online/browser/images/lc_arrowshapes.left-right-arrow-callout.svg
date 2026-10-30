@@ -3,8 +3,8 @@
   <path
 	 class="icn icn--shape-color" 
      d="m21.5 12-5-4.5v2h-2v-7h-5v7h-2v-2l-5 4.5 5 4.5v-2h2v7h5v-7h2v2z"
-     fill="#fafafa" 
-	 stroke="#3a3a38" 
+     fill="none" 
+	 stroke="currentColor" 
 	 stroke-linecap="round" 
 	 stroke-linejoin="miter"
      />

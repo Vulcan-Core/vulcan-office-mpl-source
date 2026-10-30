@@ -143,11 +143,36 @@ int KitHelper::createView(SfxViewFrame& rViewFrame, ViewShellDocId docId)
     assert(!isSfxMediumMissingInteractionHandled(rViewFrame) && "original XInteractionHandler missing");
 
     comphelper::COKit::setDocId(docId);
+
+    // VULCAN (Lane W, W5): remember who was current BEFORE the request. The
+    // SID_NEWWINDOW execution can be REFUSED without a word -- ExecView_Impl
+    // returns early when the target frame's view shell disallows new windows
+    // (its OSL_FAIL is a no-op in production) -- and then Current() below is
+    // still SOMEBODY ELSE'S view. Returning that view's id hands the joiner
+    // an id another session holds: two sessions drive one SfxViewShell, and
+    // every per-view setting the joiner applies stomps the other session
+    // (wet-proven: a phone's reflow arm set NewWindowAllowed(false), the next
+    // joiner aliased the phone's view id). The sw-side flips are fixed to
+    // never disallow under COKit; this is the backstop that turns any future
+    // regression of that contract into a loud load failure instead of a
+    // silent split.
+    SfxViewShell* pPrevViewShell = SfxViewShell::Current();
+
     SfxRequest aRequest(rViewFrame, SID_NEWWINDOW);
     rViewFrame.ExecView_Impl(aRequest);
     SfxViewShell* pViewShell = SfxViewShell::Current();
     if (pViewShell == nullptr)
         return -1;
+
+    if (pViewShell == pPrevViewShell)
+    {
+        SAL_WARN("kit",
+                 "KitHelper::createView: SID_NEWWINDOW created no view (refused?); "
+                 "refusing to reissue view id "
+                     << static_cast<sal_Int32>(pViewShell->GetViewShellId())
+                     << " held by another session");
+        return -1;
+    }
 
     assert(pViewShell->GetDocId() == docId && "DocId must be already set!");
     return static_cast<sal_Int32>(pViewShell->GetViewShellId());
@@ -839,6 +864,23 @@ void KitHelper::notifyPartSizeChangedAllViews(vcl::ITiledRenderable* pDoc, int n
     {
         if (lcl_getDocForView(pViewShell) == pDoc && pViewShell->getPart() == nPart)
             KitHelper::notifyDocumentSizeChanged(pViewShell, ""_ostr, pDoc, false);
+        pViewShell = SfxViewShell::GetNext(*pViewShell);
+    }
+}
+
+void KitHelper::notifyPartInvalidationAllViews(const vcl::ITiledRenderable* pDoc, int nPart)
+{
+    if (!pDoc || pDoc->isDisposed() || DisableCallbacks::disabled())
+        return;
+
+    // Part indices are document-local. Notify every collaborator on the
+    // owning document, without leaking an identically numbered invalidation
+    // to another document in the same process.
+    SfxViewShell* pViewShell = SfxViewShell::GetFirst();
+    while (pViewShell)
+    {
+        if (lcl_getDocForView(pViewShell) == pDoc)
+            pViewShell->viewInvalidateTilesCallback(nullptr, nPart, pViewShell->getEditMode());
         pViewShell = SfxViewShell::GetNext(*pViewShell);
     }
 }

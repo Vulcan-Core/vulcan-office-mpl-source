@@ -21,6 +21,7 @@
 #include <common/ProcUtil.hpp>
 #include <common/StaticLogHelper.hpp>
 #include <common/Util.hpp>
+#include <common/VulcanLogScrub.hpp>
 
 #include <Poco/AutoPtr.h>
 #include <Poco/FileChannel.h>
@@ -120,7 +121,9 @@ public:
 #endif
         if (!channel)
             return;
-        channel->log(Poco::Message(name(), text, prio));
+        // Vulcan: the one sink every LOG_* line reaches. Redact WOPI tokens and
+        // session cookies here, whatever the call site printed.
+        channel->log(Poco::Message(name(), Vulcan::scrubLogSecrets(text), prio));
     }
 
     static Log::Level mapToLevel(Poco::Message::Priority prio)

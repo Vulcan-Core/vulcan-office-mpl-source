@@ -171,6 +171,11 @@ void Primitive2dJsonProcessor::writeSvgGradientCommon(
     const drawinglayer::primitive2d::SvgGradientHelper& rGradient)
 {
     writePathScaled(rGradient.getPolyPolygon());
+    writeMatrixScaled("unitMatrix", rGradient.createUnitGradientToObjectTransformation());
+    if (!rGradient.getCreatesContent())
+        mrWriter.put("createsContent", false);
+    if (rGradient.getSingleEntry())
+        mrWriter.put("singleEntry", true);
 
     switch (rGradient.getSpreadMethod())
     {
@@ -258,6 +263,15 @@ void Primitive2dJsonProcessor::writeRangeScaled(std::string_view sName,
     mrWriter.putSimpleValue(rRange.getMinY() * mfScaleFactor);
     mrWriter.putSimpleValue(rRange.getMaxX() * mfScaleFactor);
     mrWriter.putSimpleValue(rRange.getMaxY() * mfScaleFactor);
+}
+
+// Includes the shadow's blur and offset and the glow's radius: the client
+// sizes the layer it composites a node in to this range.
+void Primitive2dJsonProcessor::writeContentRange(const BasePrimitive2D& rPrimitive)
+{
+    const basegfx::B2DRange aRange(rPrimitive.getB2DRange(maViewInformation2D));
+    if (!aRange.isEmpty())
+        writeRangeScaled("range", aRange);
 }
 
 void Primitive2dJsonProcessor::writeHatchScaled(
@@ -502,6 +516,32 @@ void Primitive2dJsonProcessor::decomposeAndWrite(const Primitive2DContainer& rPr
     }
 }
 
+// The vector client (browser/src/canvas/vector/VectorPrimitiveRenderer.ts)
+// paints a fixed set of node types; for any other type it paints only the
+// node's "children". The typed nodes that call this have no client renderer
+// and no children of their own, so without their decomposition the client
+// paints nothing for them: an image-filled shape (a cropped picture from
+// Google Slides, a picture slide background), a gradient or hatch fill, a
+// line with arrow heads. The decomposition is the one the tile
+// path renders, built from types the client paints. A client that learns to
+// paint one of these types itself must stop descending into its children.
+//
+// That includes a transparence, which the client paints itself: its content
+// masked by the luminance of its transparence subtree, as the tile path does.
+// So a fill inside one, or one that decomposes to one (a scrim fading in over
+// a photo, an SVG picture with a mask or a stop-opacity gradient), gets its
+// children like any other.
+void Primitive2dJsonProcessor::writeDecompositionAsChildren(const BasePrimitive2D& rPrimitive)
+{
+    Primitive2DContainer aContainer;
+    rPrimitive.get2DDecomposition(aContainer, maViewInformation2D);
+    if (aContainer.empty())
+        return;
+
+    auto aChildArray = mrWriter.startArray("children");
+    decomposeAndWrite(aContainer);
+}
+
 OString Primitive2dJsonProcessor::dumpAsJson(const Primitive2DContainer& rPrimitive2DSequence)
 {
     tools::JsonWriter aWriter;
@@ -576,10 +616,15 @@ void Primitive2dJsonProcessor::processPrimitive(const BasePrimitive2D& rBasePrim
             const auto& rPrimitive = static_cast<const TransformPrimitive2D&>(rBasePrimitive);
             mrWriter.put("type", "transform");
             writeMatrixTranslationScaled("matrix", rPrimitive.getTransformation());
+            // Children decompose in the transformed space, as in every BaseProcessor2D.
+            const geometry::ViewInformation2D aLastViewInformation2D(maViewInformation2D);
+            maViewInformation2D.setObjectTransformation(
+                aLastViewInformation2D.getObjectTransformation() * rPrimitive.getTransformation());
             {
                 auto aChildArray = mrWriter.startArray("children");
                 decomposeAndWrite(rPrimitive.getChildren());
             }
+            maViewInformation2D = aLastViewInformation2D;
         }
         break;
 
@@ -717,6 +762,8 @@ void Primitive2dJsonProcessor::processPrimitive(const BasePrimitive2D& rBasePrim
             writeStrokeAttributeScaled(rPrimitive.getStrokeAttribute());
             writeArrowAttributeScaled("start", rPrimitive.getStart());
             writeArrowAttributeScaled("end", rPrimitive.getEnd());
+
+            writeDecompositionAsChildren(rPrimitive);
         }
         break;
 
@@ -733,6 +780,8 @@ void Primitive2dJsonProcessor::processPrimitive(const BasePrimitive2D& rBasePrim
 
             if (rPrimitive.hasTransparency())
                 mrWriter.put("transparency", rPrimitive.getTransparency());
+
+            writeDecompositionAsChildren(rPrimitive);
         }
         break;
 
@@ -750,6 +799,8 @@ void Primitive2dJsonProcessor::processPrimitive(const BasePrimitive2D& rBasePrim
 
             if (rPrimitive.hasTransparency())
                 mrWriter.put("transparency", rPrimitive.getTransparency());
+
+            writeDecompositionAsChildren(rPrimitive);
         }
         break;
 
@@ -761,6 +812,8 @@ void Primitive2dJsonProcessor::processPrimitive(const BasePrimitive2D& rBasePrim
             writeRangeScaled("definitionRange", rPrimitive.getDefinitionRange());
             mrWriter.put("backgroundColor", colorToHex(rPrimitive.getBColor()));
             writeHatchScaled(rPrimitive.getFillHatch());
+
+            writeDecompositionAsChildren(rPrimitive);
         }
         break;
 
@@ -773,6 +826,8 @@ void Primitive2dJsonProcessor::processPrimitive(const BasePrimitive2D& rBasePrim
             writeRangeScaled("definitionRange", rPrimitive.getDefinitionRange());
             mrWriter.put("backgroundColor", colorToHex(rPrimitive.getBackgroundColor()));
             writeHatchScaled(rPrimitive.getFillHatch());
+
+            writeDecompositionAsChildren(rPrimitive);
         }
         break;
 
@@ -785,6 +840,8 @@ void Primitive2dJsonProcessor::processPrimitive(const BasePrimitive2D& rBasePrim
 
             if (rPrimitive.hasTransparency())
                 mrWriter.put("transparency", rPrimitive.getTransparency());
+
+            writeDecompositionAsChildren(rPrimitive);
         }
         break;
 
@@ -799,6 +856,8 @@ void Primitive2dJsonProcessor::processPrimitive(const BasePrimitive2D& rBasePrim
 
             if (rPrimitive.hasTransparency())
                 mrWriter.put("transparency", rPrimitive.getTransparency());
+
+            writeDecompositionAsChildren(rPrimitive);
         }
         break;
 
@@ -905,6 +964,8 @@ void Primitive2dJsonProcessor::processPrimitive(const BasePrimitive2D& rBasePrim
             mrWriter.put("color", colorToHex(rPrimitive.getBColor()));
             writePathScaled(rPrimitive.getB2DPolyPolygon());
             writeGradient(rPrimitive.getAlphaGradient(), "alphaGradient");
+
+            writeDecompositionAsChildren(rPrimitive);
         }
         break;
 
@@ -922,6 +983,8 @@ void Primitive2dJsonProcessor::processPrimitive(const BasePrimitive2D& rBasePrim
             mrWriter.put("width", aSizePixel.getWidth());
             mrWriter.put("height", aSizePixel.getHeight());
             writeBitmapData(rBitmap);
+
+            writeDecompositionAsChildren(rPrimitive);
         }
         break;
 
@@ -951,6 +1014,7 @@ void Primitive2dJsonProcessor::processPrimitive(const BasePrimitive2D& rBasePrim
                 = static_cast<const UnifiedTransparencePrimitive2D&>(rBasePrimitive);
             mrWriter.put("type", "unifiedTransparence");
             mrWriter.put("transparence", rPrimitive.getTransparence());
+            writeContentRange(rPrimitive);
             {
                 auto aChildArray = mrWriter.startArray("children");
                 decomposeAndWrite(rPrimitive.getChildren());
@@ -962,6 +1026,7 @@ void Primitive2dJsonProcessor::processPrimitive(const BasePrimitive2D& rBasePrim
         {
             const auto& rPrimitive = static_cast<const TransparencePrimitive2D&>(rBasePrimitive);
             mrWriter.put("type", "transparence");
+            writeContentRange(rPrimitive);
             {
                 auto aChildArray = mrWriter.startArray("children");
                 decomposeAndWrite(rPrimitive.getChildren());
@@ -979,6 +1044,7 @@ void Primitive2dJsonProcessor::processPrimitive(const BasePrimitive2D& rBasePrim
             mrWriter.put("type", "modifiedColor");
             const basegfx::BColorModifierSharedPtr& rModifier = rPrimitive.getColorModifier();
             mrWriter.put("modifier", rModifier->getModifierName());
+            writeContentRange(rPrimitive);
 
             // Output modifier-specific parameters so the client can apply the modification
             if (rModifier->getBColorModifierType() == basegfx::BColorModifierType::BCMType_replace)
@@ -1002,6 +1068,7 @@ void Primitive2dJsonProcessor::processPrimitive(const BasePrimitive2D& rBasePrim
             mrWriter.put("color", colorToHex(rPrimitive.getShadowColor()));
             mrWriter.put("blur", rPrimitive.getShadowBlur() * mfScaleFactor);
             writeMatrixTranslationScaled("matrix", rPrimitive.getShadowTransform());
+            writeContentRange(rPrimitive);
             {
                 auto aChildArray = mrWriter.startArray("children");
                 decomposeAndWrite(rPrimitive.getChildren());
@@ -1014,7 +1081,11 @@ void Primitive2dJsonProcessor::processPrimitive(const BasePrimitive2D& rBasePrim
             const auto& rPrimitive = static_cast<const GlowPrimitive2D&>(rBasePrimitive);
             mrWriter.put("type", "glow");
             mrWriter.put("color", colorToHex(rPrimitive.getGlowColor().getBColor()));
+            if (rPrimitive.getGlowColor().IsTransparent())
+                mrWriter.put("transparency",
+                             1.0 - rPrimitive.getGlowColor().GetAlpha() / 255.0);
             mrWriter.put("radius", rPrimitive.getGlowRadius() * mfScaleFactor);
+            writeContentRange(rPrimitive);
             {
                 auto aChildArray = mrWriter.startArray("children");
                 decomposeAndWrite(rPrimitive.getChildren());
@@ -1027,6 +1098,7 @@ void Primitive2dJsonProcessor::processPrimitive(const BasePrimitive2D& rBasePrim
             const auto& rPrimitive = static_cast<const SoftEdgePrimitive2D&>(rBasePrimitive);
             mrWriter.put("type", "softEdge");
             mrWriter.put("radius", rPrimitive.getRadius() * mfScaleFactor);
+            writeContentRange(rPrimitive);
             {
                 auto aChildArray = mrWriter.startArray("children");
                 decomposeAndWrite(rPrimitive.getChildren());
@@ -1039,10 +1111,6 @@ void Primitive2dJsonProcessor::processPrimitive(const BasePrimitive2D& rBasePrim
             const auto& rPrimitive
                 = static_cast<const SvgLinearGradientPrimitive2D&>(rBasePrimitive);
             mrWriter.put("type", "svgLinearGradient");
-            mrWriter.put("startX", rPrimitive.getStart().getX() * mfScaleFactor);
-            mrWriter.put("startY", rPrimitive.getStart().getY() * mfScaleFactor);
-            mrWriter.put("endX", rPrimitive.getEnd().getX() * mfScaleFactor);
-            mrWriter.put("endY", rPrimitive.getEnd().getY() * mfScaleFactor);
             writeSvgGradientCommon(rPrimitive);
         }
         break;
@@ -1052,16 +1120,13 @@ void Primitive2dJsonProcessor::processPrimitive(const BasePrimitive2D& rBasePrim
             const auto& rPrimitive
                 = static_cast<const SvgRadialGradientPrimitive2D&>(rBasePrimitive);
             mrWriter.put("type", "svgRadialGradient");
-            mrWriter.put("centerX", rPrimitive.getStart().getX() * mfScaleFactor);
-            mrWriter.put("centerY", rPrimitive.getStart().getY() * mfScaleFactor);
-            mrWriter.put("radius", rPrimitive.getRadius() * mfScaleFactor);
-
             if (rPrimitive.isFocalSet())
             {
-                mrWriter.put("focalX", rPrimitive.getFocal().getX() * mfScaleFactor);
-                mrWriter.put("focalY", rPrimitive.getFocal().getY() * mfScaleFactor);
+                const basegfx::B2DPoint aFocal(rPrimitive.createUnitGradientFocal());
+                auto aFocalArray = mrWriter.startArray("unitFocal");
+                mrWriter.putSimpleValue(aFocal.getX());
+                mrWriter.putSimpleValue(aFocal.getY());
             }
-
             writeSvgGradientCommon(rPrimitive);
         }
         break;
@@ -1074,6 +1139,8 @@ void Primitive2dJsonProcessor::processPrimitive(const BasePrimitive2D& rBasePrim
             mrWriter.put("colorB", colorToHex(rPrimitive.getColorB()));
             mrWriter.put("offsetA", rPrimitive.getOffsetA());
             mrWriter.put("offsetB", rPrimitive.getOffsetB());
+
+            writeDecompositionAsChildren(rPrimitive);
         }
         break;
 
@@ -1093,6 +1160,8 @@ void Primitive2dJsonProcessor::processPrimitive(const BasePrimitive2D& rBasePrim
                 mrWriter.put("translateBX", rPrimitive.getTranslateB().getX());
                 mrWriter.put("translateBY", rPrimitive.getTranslateB().getY());
             }
+
+            writeDecompositionAsChildren(rPrimitive);
         }
         break;
 

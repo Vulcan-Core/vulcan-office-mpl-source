@@ -28,6 +28,8 @@
 #include <svx/sdr/contact/objectcontact.hxx>
 #include <drawinglayer/processor2d/hittestprocessor2d.hxx>
 #include <svx/svdpagv.hxx>
+#include <svx/svdobj.hxx>
+#include <svx/vulcanprovenance.hxx>
 #include <svx/sdr/contact/viewcontact.hxx>
 
 
@@ -152,6 +154,16 @@ bool ViewObjectContactPrimitiveHit(
 
         // ask for HitStack
         aHitTestProcessor2D.collectHitStack(pHitContainer != nullptr);
+
+        // Editable scanned PDFs: a hidden-ink OCR line (named "ocr:") paints
+        // nothing, yet a click on it places the caret. Only such an object's
+        // text hit test looks inside its fully transparent groups.
+        if (bTextOnly)
+        {
+            const SdrObject* pObject = rVOC.GetViewContact().TryToGetSdrObject();
+            aHitTestProcessor2D.setHitInvisibleText(
+                pObject && pObject->GetName().startsWith(svx::vulcan::ROLE_LINE));
+        }
 
         // feed it with the primitives
         aHitTestProcessor2D.process(aSequence);

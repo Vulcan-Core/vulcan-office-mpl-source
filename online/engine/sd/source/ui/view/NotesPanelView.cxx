@@ -26,9 +26,42 @@
 #include <EventMultiplexer.hxx>
 #include <app.hrc>
 #include <strings.hrc>
+#include <sfx2/kit/helper.hxx>
+#include <tools/json_writer.hxx>
+#include <COKit/COKitEnums.h>
 
 namespace sd
 {
+namespace
+{
+void lcl_NotifySpeakerNotesChanged(SdrTextObj& rNotesText)
+{
+    SdPage* pNotesPage
+        = dynamic_cast<SdPage*>(rNotesText.getSdrPageFromSdrObject());
+    if (!pNotesPage || pNotesPage->GetPageKind() != PageKind::Notes
+        || pNotesPage->GetPageNum() == 0)
+    {
+        return;
+    }
+
+    auto& rDocument
+        = static_cast<SdDrawDocument&>(pNotesPage->getSdrModelFromSdrPage());
+    const sal_uInt16 nSlideIndex = (pNotesPage->GetPageNum() - 1) >> 1;
+    SdPage* pStandardPage = rDocument.GetSdPage(nSlideIndex, PageKind::Standard);
+    if (!pStandardPage)
+        return;
+
+    tools::JsonWriter aState;
+    aState.put("slideId", pStandardPage->GetUniqueID());
+    aState.put("requestId", "");
+
+    tools::JsonWriter aPayload;
+    aPayload.put("commandName", ".uno:KitSpeakerNotesChanged");
+    aPayload.put("state", aState.finishAndGetAsOString());
+    KitHelper::notifyAllViews(KIT_CALLBACK_STATE_CHANGED, aPayload.finishAndGetAsOString());
+}
+}
+
 NotesPanelView::NotesPanelView(DrawDocShell& rDocSh, vcl::Window* pWindow,
                                NotesPanelViewShell& rNotesPanelViewShell)
     : ::sd::SimpleOutlinerView(*rDocSh.GetDoc(), pWindow->GetOutDev(), &rNotesPanelViewShell)
@@ -133,6 +166,7 @@ void NotesPanelView::setNotesToDoc()
     pNotesTextObj->SetOutlinerParaObject(std::move(pNewText));
     if (pNotesTextObj->IsEmptyPresObj())
         pNotesTextObj->SetEmptyPresObj(false);
+    lcl_NotifySpeakerNotesChanged(*pNotesTextObj);
 }
 
 void NotesPanelView::Paint(const ::tools::Rectangle& rRect, ::sd::Window const* /*pWin*/)
@@ -219,7 +253,10 @@ void NotesPanelView::onLoseFocus()
             // if the notes are empty restore the placeholder text and state.
             SdPage* pPage = dynamic_cast<SdPage*>(pNotesTextObj->getSdrPageFromSdrObject());
             if (pPage)
+            {
                 pPage->RestoreDefaultText(pNotesTextObj, pNotesTextObj->GetCustomPromptText());
+                lcl_NotifySpeakerNotesChanged(*pNotesTextObj);
+            }
         }
         else
             setNotesToDoc();

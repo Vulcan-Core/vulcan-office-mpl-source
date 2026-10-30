@@ -223,7 +223,24 @@ void SwView::StateViewOptions(SfxItemSet &rSet)
     while(nWhich)
     {
         bool bReadonly = GetDocShell()->IsReadOnly();
-        if (bReadonly && nWhich != FN_VIEW_GRAPHIC && nWhich != SID_SPOTLIGHT_CHAR_DF
+        // VULCAN (Lane W, W2): web view survives a read-only document.
+        //
+        // Reflow is a READING aid -- it exists so an 11pt line fits a 393px
+        // screen -- and a read-only document is the case it serves best, not
+        // an exception to it. This blanket disable would grey the row out and
+        // publish `.uno:BrowseView=false` with IsEnabled false, i.e. the menu
+        // would assert "you are in page view" no matter which mode you were
+        // actually in, which is the exact failure W2 exists to remove.
+        //
+        // Toggling costs the document nothing: ExecViewOptions brackets the
+        // whole operation in a save/restore of the modified flag
+        // (`if (!bModified) rSh.ResetModified();`), and the layout mode is not
+        // content. COKit-gated so desktop read-only behaviour is unchanged.
+        const bool bViewOnlyOption
+            = comphelper::COKit::isActive()
+              && (nWhich == SID_BROWSER_MODE || nWhich == FN_PRINT_LAYOUT);
+        if (bReadonly && !bViewOnlyOption && nWhich != FN_VIEW_GRAPHIC
+            && nWhich != SID_SPOTLIGHT_CHAR_DF
             && nWhich != SID_AUTOSPELL_CHECK)
         {
             rSet.DisableItem(nWhich);
@@ -481,8 +498,33 @@ void SwView::ExecViewOptions(SfxRequest &rReq)
         break;
 
     case SID_BROWSER_MODE:
-        bBrowseModeChanged = !pOpt->getBrowseMode();
-        pOpt->setBrowseMode(true );
+        /*
+         * VULCAN (Lane W, W2): under COKit this is a TOGGLE, not a radio.
+         *
+         * SID_BROWSER_MODE and FN_PRINT_LAYOUT are a RADIO PAIR: "turn web
+         * view on" and "turn web view off". Desktop Writer renders them as two
+         * rows with menu:style="radio" (sw/uiconfig/sweb/menubar/menubar.xml),
+         * so whichever one you can see is always the one that does something.
+         *
+         * A phone kebab has one row, and that row is a checkbox. Sent from the
+         * mode it already selects, EITHER radio is a no-op that broadcasts no
+         * state change -- which is exactly the defect the fork shipped: the
+         * View entry was wired to .uno:PrintLayout, dispatched from page view,
+         * and produced no status message and no layout change (wire-verified
+         * twice on the built image).
+         *
+         * eState is STATE_TOGGLE for every dispatch that carries no argument,
+         * and no COOL dispatch of this command carries one -- sfx.sdi declares
+         * SID_BROWSER_MODE with no parameter list, so an argument cannot even
+         * be attached. Desktop keeps radio semantics because its dispatches
+         * arrive the same way and this branch is gated on COKit.
+         */
+        if (comphelper::COKit::isActive() && STATE_TOGGLE == eState)
+            bFlag = !pOpt->getBrowseMode();
+        else
+            bFlag = true;
+        bBrowseModeChanged = bFlag != pOpt->getBrowseMode();
+        pOpt->setBrowseMode( bFlag );
         break;
 
     case FN_PRINT_LAYOUT:

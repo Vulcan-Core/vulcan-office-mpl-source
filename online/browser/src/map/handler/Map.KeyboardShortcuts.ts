@@ -382,6 +382,9 @@ keyboardShortcuts.definitions.set('default', new Array<ShortcutDescriptor>(
     new ShortcutDescriptor({ eventType: 'keydown', modifier: Mod.CTRL, key: 'f', dispatchAction: 'home-search' }),
     new ShortcutDescriptor({ eventType: 'keydown', modifier: Mod.CTRL, key: 'p', dispatchAction: 'print' }),
     new ShortcutDescriptor({ eventType: 'keydown', modifier: Mod.CTRL, key: 's', dispatchAction: 'save', dispatchData: 'keyboard' }),
+    // On a Mac, Mod.CTRL reads Cmd; unclaimed, physical Ctrl+S falls through to core's
+    // callback-less kit-save — "Saved" pill, no PutFile (LEGE-A1).
+    new ShortcutDescriptor({ eventType: 'keydown', modifier: Mod.MACCTRL, key: 's', dispatchAction: 'save', dispatchData: 'keyboard', platform: Platform.MAC | Platform.IOSAPP }),
     new ShortcutDescriptor({ eventType: 'keydown', modifier: Mod.CTRL | Mod.SHIFT | Mod.ALT, key: 'V', unoAction: '.uno:PasteSpecial', platform: Platform.WINDOWS | Platform.LINUX | Platform.MAC | Platform.CHROMEOSAPP}),
     new ShortcutDescriptor({ eventType: 'keydown', modifier: Mod.CTRL | Mod.SHIFT, key: 'V', dispatchAction: '.uno:PasteSpecial', platform: Platform.CODAQT | Platform.CODAWINDOWS | Platform.CODAMAC }),
 
@@ -390,8 +393,13 @@ keyboardShortcuts.definitions.set('default', new Array<ShortcutDescriptor>(
     new ShortcutDescriptor({ docType: 'spreadsheet', eventType: 'keydown', key: 'PageDown', dispatchAction: 'scrollpagedown', viewType: ViewType.ReadOnly }),
     new ShortcutDescriptor({ docType: 'spreadsheet', eventType: 'keydown', modifier: Mod.CTRL | Mod.SHIFT, key: 'PageUp' }),
     new ShortcutDescriptor({ docType: 'spreadsheet', eventType: 'keydown', modifier: Mod.CTRL | Mod.SHIFT, key: 'PageDown' }),
-    new ShortcutDescriptor({ docType: 'spreadsheet', eventType: 'keydown', key: 'F5' }),
+    new ShortcutDescriptor({ docType: 'spreadsheet', eventType: 'keydown', key: 'F5', dispatchAction: 'focusonaddressinput' }), // Blocks browser refresh; Excel parity: focus the Name Box
     new ShortcutDescriptor({ docType: 'spreadsheet', eventType: 'keydown', key: 'F9', unoAction: '.uno:Calculate' }),
+    new ShortcutDescriptor({ docType: 'spreadsheet', eventType: 'keydown', key: 'F4', dispatchAction: 'togglerelative' }), // Excel parity: cycle absolute/relative references
+    new ShortcutDescriptor({ docType: 'spreadsheet', eventType: 'keydown', modifier: Mod.SHIFT, key: 'F2', dispatchAction: 'insertcomment' }), // Excel parity: insert comment
+    new ShortcutDescriptor({ docType: 'spreadsheet', eventType: 'keydown', modifier: Mod.ALT, key: '=', keyCode: [187, 61] /* '=' is 187 on Chrome, 61 on Firefox */, unoAction: '.uno:AutoSum', viewType: ViewType.Edit }), // Excel parity: AutoSum
+    new ShortcutDescriptor({ docType: 'spreadsheet', eventType: 'keydown', modifier: Mod.CTRL, key: 'r', unoAction: '.uno:FillRight', viewType: ViewType.Edit, platform: Platform.WINDOWS | Platform.LINUX | Platform.CHROMEOSAPP }), // Excel parity: fill right; not on Mac where Cmd+R stays browser refresh
+    new ShortcutDescriptor({ docType: 'spreadsheet', eventType: 'keydown', modifier: Mod.CTRL, key: 't', unoAction: '.uno:InsertCalcTable', viewType: ViewType.Edit }), // Excel parity: format as table; the browser-tab passthrough below skips this case
     new ShortcutDescriptor({ docType: 'spreadsheet', eventType: 'keydown', modifier: Mod.CTRL, key: ',', unoAction: '.uno:InsertCurrentDate' }),
     new ShortcutDescriptor({ docType: 'spreadsheet', eventType: 'keydown', modifier: Mod.CTRL, key: ';', unoAction: '.uno:InsertCurrentDate' }),
     new ShortcutDescriptor({ docType: 'spreadsheet', eventType: 'keydown', modifier: Mod.SHIFT, key: 'F10', dispatchAction: 'sheettabmenu',
@@ -403,11 +411,28 @@ keyboardShortcuts.definitions.set('default', new Array<ShortcutDescriptor>(
     new ShortcutDescriptor({ docType: 'text', eventType: 'keydown', key: 'F2' }),
     new ShortcutDescriptor({ docType: 'text', eventType: 'keydown', key: 'F3', unoAction: '.uno:ExpandGlossary' }),
     new ShortcutDescriptor({ docType: 'text', eventType: 'keydown', modifier: Mod.CTRL, key: 'F3' }),
-    new ShortcutDescriptor({ docType: 'text', eventType: 'keydown', key: 'F5' }),
+    new ShortcutDescriptor({ docType: 'text', eventType: 'keydown', key: 'F5', unoAction: '.uno:Navigator' }), // Blocks browser refresh; Word parity: F5 (Go To) opens the Navigator
     new ShortcutDescriptor({ docType: 'text', eventType: 'keydown', key: 'F12', unoAction: '.uno:DefaultNumbering', platform: Platform.CODAWINDOWS | Platform.CODAMAC | Platform.CODAQT }),
+    // Word parity: Ctrl+Alt+1/2/3 (Cmd+Opt on Mac, matching Word for Mac)
+    // apply heading paragraph styles. Free in core Accelerators for
+    // TextDocument (the Ctrl+1/2/3 bindings exist only in GlobalDocument).
+    // Known caveat: browsers report AltGr as Ctrl+Alt, so e.g. a German
+    // layout's AltGr+2 (²) hits Heading 2 — same collision desktop Word has;
+    // shadow these in a per-language table if it bites.
+    new ShortcutDescriptor({ docType: 'text', eventType: 'keydown', modifier: Mod.CTRL | Mod.ALT, key: '1', dispatchAction: 'applyheading1', viewType: ViewType.Edit }),
+    new ShortcutDescriptor({ docType: 'text', eventType: 'keydown', modifier: Mod.CTRL | Mod.ALT, key: '2', dispatchAction: 'applyheading2', viewType: ViewType.Edit }),
+    new ShortcutDescriptor({ docType: 'text', eventType: 'keydown', modifier: Mod.CTRL | Mod.ALT, key: '3', dispatchAction: 'applyheading3', viewType: ViewType.Edit }),
 
     // Impress.
     new ShortcutDescriptor({ docType: 'presentation', eventType: 'keydown', key: 'F5', dispatchAction: 'presentation' }),
+    new ShortcutDescriptor({ docType: 'presentation', eventType: 'keydown', modifier: Mod.SHIFT, key: 'F5', dispatchAction: 'presentation-currentslide' }), // PowerPoint parity: present from current slide (was de-table-only)
+    // PowerPoint parity: Ctrl+M inserts a new slide (overrides core
+    // ResetAttributes in presentation edit mode only). Mod.CTRL is Cmd on
+    // Mac where Cmd+M is minimize (not reliably preventDefault-able), so
+    // Mac gets the real-Ctrl variant instead — PowerPoint for Mac accepts
+    // Ctrl+M too.
+    new ShortcutDescriptor({ docType: 'presentation', eventType: 'keydown', modifier: Mod.CTRL, key: 'm', unoAction: '.uno:InsertPage', viewType: ViewType.Edit, platform: Platform.WINDOWS | Platform.LINUX | Platform.CHROMEOSAPP }),
+    new ShortcutDescriptor({ docType: 'presentation', eventType: 'keydown', modifier: Mod.MACCTRL, key: 'm', unoAction: '.uno:InsertPage', viewType: ViewType.Edit, platform: Platform.MAC }),
     new ShortcutDescriptor({ docType: 'presentation', eventType: 'keydown', key: 'PageUp', dispatchAction: 'previouspart', viewType: ViewType.ReadOnly }),
     new ShortcutDescriptor({ docType: 'presentation', eventType: 'keydown', key: 'PageDown', dispatchAction: 'nextpart', viewType: ViewType.ReadOnly }),
 
@@ -435,7 +460,8 @@ keyboardShortcuts.definitions.set('default', new Array<ShortcutDescriptor>(
     new ShortcutDescriptor({ eventType: 'keydown', modifier: Mod.CTRL, key: 'w', platform: Platform.LINUX | Platform.WINDOWS | Platform.MAC, preventDefault: false }), // Close current tab
     new ShortcutDescriptor({ eventType: 'keydown', modifier: Mod.CTRL, key: 'n', dispatchAction: 'backstage-new', platform: Platform.CODAWINDOWS | Platform.CODAMAC | Platform.CODAQT }), // Open backstage "New" tab in desktop apps
     new ShortcutDescriptor({ eventType: 'keydown', modifier: Mod.CTRL, key: 'n', preventDefault: false, platform: ~(Platform.CODAWINDOWS | Platform.CODAMAC | Platform.CODAQT) }), // Open new browser window (everywhere except desktop apps)
-    new ShortcutDescriptor({ eventType: 'keydown', modifier: Mod.CTRL, key: 't', preventDefault: false }), // Open new browser tab
+    new ShortcutDescriptor({ eventType: 'keydown', modifier: Mod.CTRL, key: 't', preventDefault: false, // Open new browser tab; in editable spreadsheets Ctrl+T is Insert Table instead (see the Calc block above)
+        condition: () => !(keyboardShortcuts.map && keyboardShortcuts.map._docLayer && keyboardShortcuts.map._docLayer._docType === 'spreadsheet' && keyboardShortcuts.map.isEditMode()) }),
     new ShortcutDescriptor({ eventType: 'keydown', modifier: Mod.CTRL, key: '`', preventDefault: false, platform: Platform.MAC }), // Cycle through windows
 ));
 

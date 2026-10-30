@@ -89,8 +89,9 @@ void RequestVettingStation::handleRequest(const std::string& id)
     // Before we create DocBroker with a SocketPoll thread, a ClientSession, and a Kit process,
     // we need to vet this request by invoking CheckFileInfo.
     // For that, we need the storage settings to create a connection.
-    const StorageBase::StorageType storageType =
-        StorageBase::validate(uriPublic, /*takeOwnership=*/false);
+    // The host is vetted with the trust of the request that named it.
+    const StorageBase::StorageType storageType = StorageBase::validate(
+        uriPublic, /*takeOwnership=*/false, _requestDetails.isServerToServer());
     switch (storageType)
     {
         case StorageBase::StorageType::Unsupported:
@@ -260,8 +261,9 @@ void RequestVettingStation::handleRequest(const std::string& id,
     // Before we create DocBroker with a SocketPoll thread, a ClientSession, and a Kit process,
     // we need to vet this request by invoking CheckFileInfo.
     // For that, we need the storage settings to create a connection.
-    const StorageBase::StorageType storageType =
-        StorageBase::validate(uriPublic, /*takeOwnership=*/false);
+    // The host is vetted with the trust of the request that named it.
+    const StorageBase::StorageType storageType = StorageBase::validate(
+        uriPublic, /*takeOwnership=*/false, _requestDetails.isServerToServer());
     switch (storageType)
     {
         case StorageBase::StorageType::Unsupported:
@@ -430,7 +432,8 @@ void RequestVettingStation::checkFileInfo(const Poco::URI& uri, int redirectLimi
 
     // CheckFileInfo asynchronously.
     assert(_checkFileInfo == nullptr);
-    _checkFileInfo = std::make_shared<CheckFileInfo>(_poll, uri, std::move(cfiContinuation));
+    _checkFileInfo = std::make_shared<CheckFileInfo>(
+        _poll, uri, _requestDetails.isServerToServer(), std::move(cfiContinuation));
     _checkFileInfoStart = std::chrono::steady_clock::now();
     _checkFileInfo->checkFileInfo(redirectLimit);
 }

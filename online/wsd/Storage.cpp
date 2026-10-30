@@ -153,7 +153,8 @@ static bool isLocalhost(const std::string& targetHost)
 #endif
 
 StorageBase::StorageType StorageBase::validate(const Poco::URI& uri,
-                                               [[maybe_unused]] bool takeOwnership)
+                                               [[maybe_unused]] bool takeOwnership,
+                                               [[maybe_unused]] bool serverToServer)
 {
     if (uri.isRelative() || uri.getScheme() == "file")
     {
@@ -203,17 +204,23 @@ StorageBase::StorageType StorageBase::validate(const Poco::URI& uri,
     {
         const auto& targetHost = uri.getHost();
         HostUtil::setFirstHost(uri);
-        if (HostUtil::allowedWopiHost(targetHost) || isLocalhost(targetHost))
+        // A host on this machine's own interfaces is a WOPI host for a server-to-server
+        // request only: for any other caller it would open the editor's loopback, and
+        // every port that shares it, to a caller-chosen request.
+        if (HostUtil::allowedWopiHost(targetHost, serverToServer) ||
+            (serverToServer && isLocalhost(targetHost)))
         {
             LOG_DBG("Validated URI [" << Anonymizer::anonymizeUrl(uri.toString()) << "] as WOPI");
             return StorageBase::StorageType::Wopi;
         }
 
-        // check if the IP address is in the list of allowed hosts
+        // check if the IP address is in the list of allowed hosts; the same caller
+        // trust applies, so a name that resolves into an internal alias group is
+        // refused to a public caller just as the bare address is
         const auto hostAddresses(net::resolveAddresses(targetHost));
         for (const auto& address : hostAddresses)
         {
-            if (HostUtil::allowedWopiHost(address))
+            if (HostUtil::allowedWopiHost(address, serverToServer))
             {
                 LOG_DBG("Validated URI [" << Anonymizer::anonymizeUrl(uri.toString())
                                           << "] as WOPI");
@@ -235,7 +242,8 @@ StorageBase::StorageType StorageBase::validate(const Poco::URI& uri,
 
 std::unique_ptr<StorageBase> StorageBase::create(const Poco::URI& uri, const std::string& jailRoot,
                                                  const std::string& jailPath, bool takeOwnership,
-                                                 const AdditionalFilePocoUris& additionalFileUrisPublic)
+                                                 const AdditionalFilePocoUris& additionalFileUrisPublic,
+                                                 bool serverToServer)
 {
     // FIXME: By the time this gets called we have already sent to the client three
     // 'progress:' messages: "id":"find", "id":"connect" and "id":"ready". We should ideally do the checks
@@ -252,7 +260,7 @@ std::unique_ptr<StorageBase> StorageBase::create(const Poco::URI& uri, const std
         }
     }
 
-    const StorageBase::StorageType type = validate(uri, takeOwnership);
+    const StorageBase::StorageType type = validate(uri, takeOwnership, serverToServer);
     switch (type)
     {
         case StorageBase::StorageType::Unsupported:
@@ -282,7 +290,7 @@ std::unique_ptr<StorageBase> StorageBase::create(const Poco::URI& uri, const std
 
 #if !MOBILEAPP
         case StorageBase::StorageType::Wopi:
-            return std::make_unique<WopiStorage>(uri, jailRoot, jailPath);
+            return std::make_unique<WopiStorage>(uri, jailRoot, jailPath, serverToServer);
             break;
 #endif //!MOBILEAPP
     }

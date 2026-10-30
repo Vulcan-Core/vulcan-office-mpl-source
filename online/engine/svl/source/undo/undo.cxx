@@ -1353,6 +1353,165 @@ OUString SfxUndoManager::GetRedoActionsInfo() const
     return OUString::fromUtf8(aStream.str());
 }
 
+OUString SfxViewUndoLookupToJson(const SfxViewUndoLookup& rLookup, bool bRedo)
+{
+    std::u16string_view aStatus = u"blocked";
+    switch (rLookup.eStatus)
+    {
+        case SfxViewUndoLookup::Status::NothingOwn:
+            aStatus = u"nothing_own";
+            break;
+        case SfxViewUndoLookup::Status::Busy:
+            aStatus = u"busy";
+            break;
+        case SfxViewUndoLookup::Status::Empty:
+            aStatus = u"empty";
+            break;
+        case SfxViewUndoLookup::Status::NotMovable:
+            aStatus = u"not_movable";
+            break;
+        default:
+            break;
+    }
+    return OUString::Concat(u"{\"vulcanUndo\":{\"status\":\"") + aStatus
+           + u"\",\"otherViewId\":"
+           + OUString::number(static_cast<sal_Int32>(rLookup.nOtherViewId))
+           + u",\"command\":\"" + (bRedo ? std::u16string_view(u"redo") : std::u16string_view(u"undo"))
+           + u"\"}}";
+}
+
+SfxViewUndoLookup SfxUndoManager::LookupViewUndo(
+    ViewShellId nViewId,
+    const std::function<bool(const SfxUndoAction& rMine)>& rCanMove,
+    const std::function<bool(const SfxUndoAction& rMine, const SfxUndoAction& rOther)>& rIndependent) const
+{
+    SfxViewUndoLookup aRet;
+    // Snapshot the top level, most recent first. The predicates only read the actions.
+    std::vector<const SfxUndoAction*> aUndo;
+    std::vector<const SfxUndoAction*> aRedo;
+    {
+        UndoManagerGuard aGuard(*m_xData);
+        if (ImplIsInListAction_Lock())
+        {
+            aRet.eStatus = SfxViewUndoLookup::Status::Busy;
+            return aRet;
+        }
+        const SfxUndoArray& rArray = m_xData->maUndoArray;
+        for (size_t i = rArray.nCurUndoAction; i > 0; --i)
+            aUndo.push_back(rArray.maUndoActions[i - 1].pAction.get());
+        for (size_t i = rArray.nCurUndoAction; i < rArray.maUndoActions.size(); ++i)
+            aRedo.push_back(rArray.maUndoActions[i].pAction.get());
+    }
+
+    if (aUndo.empty())
+        return aRet; // Empty
+
+    size_t nMine = 0;
+    while (nMine < aUndo.size() && aUndo[nMine]->GetViewShellId() != nViewId)
+        ++nMine;
+
+    if (nMine == aUndo.size())
+    {
+        aRet.eStatus = SfxViewUndoLookup::Status::NothingOwn;
+        aRet.nOtherViewId = aUndo[0]->GetViewShellId();
+        return aRet;
+    }
+
+    if (nMine == 0)
+    {
+        aRet.eStatus = SfxViewUndoLookup::Status::OwnTop;
+        // For "Undo N" (SfxViewUndoLookup::ForCount): the view's own actions in a row from the top.
+        while (aRet.nOwnRun < aUndo.size() && aUndo[aRet.nOwnRun]->GetViewShellId() == nViewId)
+            ++aRet.nOwnRun;
+        aRet.bOwnRunToBottom = aRet.nOwnRun == aUndo.size();
+        if (!aRet.bOwnRunToBottom)
+            aRet.nBelowOwnRunViewId = aUndo[aRet.nOwnRun]->GetViewShellId();
+        return aRet;
+    }
+
+    const SfxUndoAction& rMine = *aUndo[nMine];
+    if (!rCanMove(rMine))
+    {
+        // Not another view's fault: this kind of action is never undone out of order.
+        aRet.eStatus = SfxViewUndoLookup::Status::NotMovable;
+        return aRet;
+    }
+    aRet.eStatus = SfxViewUndoLookup::Status::Blocked;
+    aRet.nOtherViewId = aUndo[nMine - 1]->GetViewShellId();
+
+    // Every later action by another view, nearest to mine first.
+    for (size_t i = nMine; i > 0; --i)
+    {
+        const SfxUndoAction& rOther = *aUndo[i - 1];
+        if (!rIndependent(rMine, rOther))
+        {
+            aRet.nOtherViewId = rOther.GetViewShellId();
+            return aRet;
+        }
+    }
+
+    // And other views' actions waiting to be redone: they were recorded after mine, and their
+    // stored positions must survive my action going away. The view's own redo actions need no
+    // check: they were undone after mine was done, and undoing mine now stacks it above them
+    // on the redo stack, so they are redone in the order they were made.
+    for (const SfxUndoAction* pRedo : aRedo)
+    {
+        if (pRedo->GetViewShellId() == nViewId)
+            continue;
+        if (!rIndependent(rMine, *pRedo))
+        {
+            aRet.nOtherViewId = pRedo->GetViewShellId();
+            return aRet;
+        }
+    }
+
+    aRet.eStatus = SfxViewUndoLookup::Status::Independent;
+    aRet.nOffset = nMine;
+    aRet.nOtherViewId = ViewShellId(-1);
+    // The top action is another view's: "Undo N" may not start here (ForCount).
+    aRet.nBelowOwnRunViewId = aUndo[0]->GetViewShellId();
+    return aRet;
+}
+
+SfxViewUndoLookup SfxUndoManager::LookupViewRedo(ViewShellId nViewId) const
+{
+    SfxViewUndoLookup aRet;
+    std::vector<const SfxUndoAction*> aRedo;
+    {
+        UndoManagerGuard aGuard(*m_xData);
+        if (ImplIsInListAction_Lock())
+        {
+            aRet.eStatus = SfxViewUndoLookup::Status::Busy;
+            return aRet;
+        }
+        const SfxUndoArray& rArray = m_xData->maUndoArray;
+        for (size_t i = rArray.nCurUndoAction; i < rArray.maUndoActions.size(); ++i)
+            aRedo.push_back(rArray.maUndoActions[i].pAction.get());
+    }
+
+    if (aRedo.empty())
+        return aRet; // Empty
+
+    if (aRedo[0]->GetViewShellId() == nViewId)
+    {
+        aRet.eStatus = SfxViewUndoLookup::Status::OwnTop;
+        // For "Redo N" (SfxViewUndoLookup::ForCount): the view's own actions in a row.
+        while (aRet.nOwnRun < aRedo.size() && aRedo[aRet.nOwnRun]->GetViewShellId() == nViewId)
+            ++aRet.nOwnRun;
+        aRet.bOwnRunToBottom = aRet.nOwnRun == aRedo.size();
+        if (!aRet.bOwnRunToBottom)
+            aRet.nBelowOwnRunViewId = aRedo[aRet.nOwnRun]->GetViewShellId();
+        return aRet;
+    }
+
+    aRet.nOtherViewId = aRedo[0]->GetViewShellId();
+    const bool bHasOwn = std::any_of(aRedo.begin(), aRedo.end(), [nViewId](const SfxUndoAction* p) {
+        return p->GetViewShellId() == nViewId;
+    });
+    aRet.eStatus = bHasOwn ? SfxViewUndoLookup::Status::Blocked : SfxViewUndoLookup::Status::NothingOwn;
+    return aRet;
+}
+
 bool SfxUndoManager::IsEmptyActions() const
 {
     UndoManagerGuard aGuard(*m_xData);

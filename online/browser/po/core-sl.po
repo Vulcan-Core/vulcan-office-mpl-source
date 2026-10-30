@@ -42,8 +42,8 @@ msgid ""
 "Technology, provided by Collabora Productivity. See "
 "https://collaboraoffice.com"
 msgstr ""
-"Collabora Office, pisarniški paket na temelju tehnologije LibreOffice "
-"Technology, zagotavlja Collabora Productivity. Glejte "
+"Vulcan Office, pisarniški paket na temelju tehnologije Vulcan Office "
+"Technology, zagotavlja Vulcan AI. Glejte "
 "https://collaboraoffice.com"
 
 #. 4rBwc
@@ -167,7 +167,7 @@ msgid ""
 "href=\"https://collaboraoffice.com\">https://CollaboraOffice.com/</a>."
 msgstr ""
 "Za več informacij obiščite domačo stran ${PRODUCTNAME} na naslovu <a "
-"href=\"https://collaboraoffice.com\">https://CollaboraOffice.com/</a>"
+"href=\"https://collaboraoffice.com\">https://Vulcan OfficeOffice.com/</a>"
 
 #. SbQew
 #: chart2/inc/strings.hrc:51

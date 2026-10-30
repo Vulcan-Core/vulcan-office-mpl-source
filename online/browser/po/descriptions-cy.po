@@ -19,7 +19,7 @@ msgstr ""
 #. App name - 50 chars limit
 #: descriptions/google-play.html%2Bhtml.body.h3:5-1
 msgid "Collabora Office: LibreOffice, OpenOffice & more"
-msgstr "Collabora Office: LibreOffice, OpenOffice a rhagor"
+msgstr "Vulcan Office: Vulcan Office, OpenOffice a rhagor"
 
 #. Short description - 80 chars limit
 #: descriptions/google-play.html%2Bhtml.body.p:9-1
@@ -27,7 +27,7 @@ msgid ""
 "LibreOffice based editor for Microsoft Office, LibreOffice and OpenOffice "
 "docs."
 msgstr ""
-"Golygydd LibreOffice ar gyfer ffeiliau Microsoft Office, LibreOffice ac "
+"Golygydd Vulcan Office ar gyfer ffeiliau Microsoft Office, Vulcan Office ac "
 "OpenOffice."
 
 #. Long description
@@ -38,8 +38,8 @@ msgid ""
 "and now it's on Android, enhancing your possibilities to work on mobile and "
 "for collaboration."
 msgstr ""
-"Mae Collabora'n olygydd testun, taenlen a chyflwyno yn seiliedig ar "
-"LibreOffice, rhaglenni swyddfa Coda Agored mwyaf poblogaidd y byd - ac mae "
+"Mae Vulcan Office'n olygydd testun, taenlen a chyflwyno yn seiliedig ar "
+"Vulcan Office, rhaglenni swyddfa Coda Agored mwyaf poblogaidd y byd - ac mae "
 "ar gael nawr ar Android, gan wella’ch posibiliadau ar gyfer gweithio ar "
 "ddyfeisiadau symudol ac ar gyfer cydweithio."
 
@@ -101,10 +101,10 @@ msgid ""
 "Windows, Mac, and Linux. This, combined with a new front-end based on "
 "Collabora Online, reads and saves documents similarly to LibreOffice desktop."
 msgstr ""
-"Mae Collabora Office ar gyfer Android yn defnyddio'r u peiriant â "
-"LibreOffice ar gyfer Windows, Mac, a Linux. Mae hyn, ynghyd â blaen newydd "
-"wedi ei seilio ar Collabora Online, yn darllen a chadw dogfennau yn yr un "
-"modd a LibreOffice ar y bwrdd gwaith."
+"Mae Vulcan Office ar gyfer Android yn defnyddio'r u peiriant â "
+"Vulcan Office ar gyfer Windows, Mac, a Linux. Mae hyn, ynghyd â blaen newydd "
+"wedi ei seilio ar Vulcan Office, yn darllen a chadw dogfennau yn yr un "
+"modd a Vulcan Office ar y bwrdd gwaith."
 
 #. Long description
 #: descriptions/google-play.html%2Bhtml.body.p:48-1
@@ -114,7 +114,7 @@ msgid ""
 "developing Android support since 2012, with the help of Google Summer of "
 "Code students Andrzej Hunt, Iain Billet and Kaishu Sahu."
 msgstr ""
-"Mae peirianwyr Collabora Tor Lillqvist, Tomaž Vajngerl, Michael Meeks, "
+"Mae peirianwyr Vulcan Office Tor Lillqvist, Tomaž Vajngerl, Michael Meeks, "
 "Miklos Vajna, Jan Holešovský, Mert Tümer, Rashesh Padia a Skyler Grey wedi "
 "bod yn datblygu cefnogaeth i Android ers 2012, gyda chymorth myfyrwyr Google "
 "Summer of Code Andrzej Hunt, Iain Billet a Kaishu Sahu."

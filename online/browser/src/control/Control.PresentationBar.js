@@ -29,7 +29,10 @@ class PresentationBar {
 
 		this.create();
 
-		map.on('wopiprops', this.onWopiProps, this);
+		// app.onWopiProps replays CheckFileInfo props that arrived before
+		// this bar existed and fires on arrival/refresh otherwise (this bar
+		// is created once and never removed, so no off() is needed).
+		app.onWopiProps(this.onWopiProps.bind(this));
 		map.on('doclayerinit', this.onDocLayerInit, this);
 		app.events.on('updatepermission', this.onUpdatePermission.bind(this));
 		map.on('commandstatechanged', this.onCommandStateChanged, this);

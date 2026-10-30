@@ -30,13 +30,21 @@ L.ProgressOverlay = window.L.Layer.extend({
 		if (window.ThisIsAMobileApp) {
 			productName = window.MobileAppName;
 		} else {
-			productName = (typeof brandProductName !== 'undefined') ? brandProductName : 'Collabora Online Development Edition (unbranded)';
+			productName = (typeof brandProductName !== 'undefined') ? brandProductName : 'Vulcan Office';
 		}
-		if (window.logoURL) {
-			this._spinner.style.setProperty(
-				'--spinner-logo',
-				`url("${window.logoURL}")`
-			);
+		// Splash brand mark. Unless the integrator explicitly opts out with
+		// logoURL === 'none', show the Vulcan V instead of the plain rotating
+		// arc: an integrator-supplied logoURL wins, otherwise the theme-aware
+		// default --spinner-logo from css/vulcan-theme.css (the bundled
+		// images/branding/vulcan-v.png) is used. Either way hide the canvas arc
+		// so the branded, bouncing mark is what the user sees while loading.
+		if (window.logoURL !== 'none') {
+			if (window.logoURL) {
+				this._spinner.style.setProperty(
+					'--spinner-logo',
+					`url("${window.logoURL}")`
+				);
+			}
 			this._spinnerCanvas.style.opacity = '0';
 		}
 		this._brandLabel = window.L.DomUtil.create('div', 'leaflet-progress-label brand-label', this._container);

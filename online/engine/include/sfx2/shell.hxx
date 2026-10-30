@@ -476,6 +476,18 @@ public:
         */
     virtual bool IsConditionalFastCall( const SfxRequest &rReq );
 
+    /** Vulcan fork: true for a plain SID_UNDO / SID_REDO request under COKit.
+
+        With per-view undo, a view's Undo state is DISABLED whenever it has nothing of its
+        own it can take back now (target: the button reflects this user). But Ctrl+Z does not
+        look at the button, and the dispatcher drops a request for a disabled slot before the
+        exec method runs -- so the exec method could never answer WHY nothing was undone
+        (the JSON the browser turns into "Undo skipped ..." / "Revert AI changes"). The
+        shells whose undo exec methods re-run the per-view lookup and answer with JSON
+        return this from IsConditionalFastCall so the request still reaches them.
+        */
+    static bool IsKitPerViewUndoRedo( const SfxRequest &rReq );
+
     /**
 
         This method controls the activation of SfxShell instance. First, by calling

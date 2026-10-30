@@ -66,6 +66,11 @@ class KitQueueTests : public CPPUNIT_NS::TestFixture
     CPPUNIT_TEST(testTextInputBlockedByKeyMessage);
     CPPUNIT_TEST(testTextInputBlockedByMouse);
     CPPUNIT_TEST(testTextInputBlockedByRemoveText);
+    CPPUNIT_TEST(testTextInputBlockedByCommandValues);
+    CPPUNIT_TEST(testTextInputCombinesAdjacent);
+    CPPUNIT_TEST(testTextInputCombinesAcrossOtherSession);
+    CPPUNIT_TEST(testTextInputCombinesAcrossViewportChatter);
+    CPPUNIT_TEST(testRemoveTextBlockedByCommandValues);
     CPPUNIT_TEST(testTextInputDifferentId);
     CPPUNIT_TEST(testTextInputMissingTokens);
     CPPUNIT_TEST(testRemoveTextBlockedByKeyMessage);
@@ -119,6 +124,11 @@ class KitQueueTests : public CPPUNIT_NS::TestFixture
     void testTextInputBlockedByKeyMessage();
     void testTextInputBlockedByMouse();
     void testTextInputBlockedByRemoveText();
+    void testTextInputBlockedByCommandValues();
+    void testTextInputCombinesAdjacent();
+    void testTextInputCombinesAcrossOtherSession();
+    void testTextInputCombinesAcrossViewportChatter();
+    void testRemoveTextBlockedByCommandValues();
     void testTextInputDifferentId();
     void testTextInputMissingTokens();
     void testRemoveTextBlockedByKeyMessage();
@@ -1388,6 +1398,116 @@ void KitQueueTests::testTextInputBlockedByRemoveText()
     queue.put("sess textinput id=0 text=a");
     queue.put("sess removetextcontext id=0 before=1 after=0");
     queue.put("sess textinput id=0 text=b");
+
+    LOK_ASSERT_EQUAL(static_cast<size_t>(3), queue.size());
+}
+
+void KitQueueTests::testTextInputBlockedByCommandValues()
+{
+    constexpr std::string_view testname = __func__;
+
+    TilePrioritizer dummy;
+    KitQueue queue(dummy);
+
+    // A same-session commandvalues fetch between two textinputs must act as
+    // an ordering barrier: combining across it would hoist "a" to after the
+    // fetch, so the fetch's reply would no longer reflect input the client
+    // sent before issuing it (read-your-writes for the vector renderer).
+    queue.put("sess textinput id=0 text=a");
+    queue.put("sess commandvalues command=.uno:VectorPrimitives?part=0");
+    queue.put("sess textinput id=0 text=b");
+
+    LOK_ASSERT_EQUAL(static_cast<size_t>(3), queue.size());
+
+    KitQueue::Payload p;
+    p = queue.pop();
+    LOK_ASSERT_EQUAL_STR("sess textinput id=0 text=a", std::string_view(p.data(), p.size()));
+    p = queue.pop();
+    LOK_ASSERT_EQUAL_STR("sess commandvalues command=.uno:VectorPrimitives?part=0",
+                         std::string_view(p.data(), p.size()));
+    p = queue.pop();
+    LOK_ASSERT_EQUAL_STR("sess textinput id=0 text=b", std::string_view(p.data(), p.size()));
+}
+
+void KitQueueTests::testTextInputCombinesAdjacent()
+{
+    constexpr std::string_view testname = __func__;
+
+    TilePrioritizer dummy;
+    KitQueue queue(dummy);
+
+    // With nothing between them, same-session same-id textinputs combine.
+    queue.put("sess textinput id=0 text=a");
+    queue.put("sess textinput id=0 text=b");
+
+    LOK_ASSERT_EQUAL(static_cast<size_t>(1), queue.size());
+
+    KitQueue::Payload p = queue.pop();
+    LOK_ASSERT_EQUAL_STR("sess textinput id=0 text=ab", std::string_view(p.data(), p.size()));
+}
+
+void KitQueueTests::testTextInputCombinesAcrossViewportChatter()
+{
+    constexpr std::string_view testname = __func__;
+
+    TilePrioritizer dummy;
+    KitQueue queue(dummy);
+
+    // Same-session viewport/presence chatter neither reads nor mutates the
+    // document; it must not cost the burst-combining that matters exactly
+    // when the kit is loaded.
+    queue.put("sess textinput id=0 text=a");
+    queue.put("sess clientvisiblearea x=0 y=0 width=100 height=100");
+    queue.put("sess useractive");
+    queue.put("sess textinput id=0 text=b");
+
+    LOK_ASSERT_EQUAL(static_cast<size_t>(3), queue.size());
+
+    KitQueue::Payload p;
+    p = queue.pop();
+    LOK_ASSERT_EQUAL_STR("sess clientvisiblearea x=0 y=0 width=100 height=100",
+                         std::string_view(p.data(), p.size()));
+    p = queue.pop();
+    LOK_ASSERT_EQUAL_STR("sess useractive", std::string_view(p.data(), p.size()));
+    p = queue.pop();
+    LOK_ASSERT_EQUAL_STR("sess textinput id=0 text=ab", std::string_view(p.data(), p.size()));
+}
+
+void KitQueueTests::testTextInputCombinesAcrossOtherSession()
+{
+    constexpr std::string_view testname = __func__;
+
+    TilePrioritizer dummy;
+    KitQueue queue(dummy);
+
+    // Another session's message is not a barrier — it neither combines with
+    // nor orders against this session's input.
+    queue.put("sess textinput id=0 text=a");
+    queue.put("other commandvalues command=.uno:VectorPrimitives?part=0");
+    queue.put("sess textinput id=0 text=b");
+
+    LOK_ASSERT_EQUAL(static_cast<size_t>(2), queue.size());
+
+    KitQueue::Payload p;
+    p = queue.pop();
+    LOK_ASSERT_EQUAL_STR("other commandvalues command=.uno:VectorPrimitives?part=0",
+                         std::string_view(p.data(), p.size()));
+    p = queue.pop();
+    LOK_ASSERT_EQUAL_STR("sess textinput id=0 text=ab", std::string_view(p.data(), p.size()));
+}
+
+void KitQueueTests::testRemoveTextBlockedByCommandValues()
+{
+    constexpr std::string_view testname = __func__;
+
+    TilePrioritizer dummy;
+    KitQueue queue(dummy);
+
+    // Same barrier contract as textinput: a same-session commandvalues fetch
+    // between two removetextcontext messages prevents combining.
+    queue.put("sess removetextcontext id=0 before=3 after=0");
+    queue.put("sess commandvalues command=.uno:VectorPrimitives?part=0");
+    queue.put("sess removetextcontext id=0 before=2 after=0");
 
     LOK_ASSERT_EQUAL(static_cast<size_t>(3), queue.size());
 }

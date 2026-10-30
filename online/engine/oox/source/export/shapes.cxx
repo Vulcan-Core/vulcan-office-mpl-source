@@ -43,6 +43,8 @@
 #include <com/sun/star/document/XExporter.hpp>
 #include <com/sun/star/document/XStorageBasedDocument.hpp>
 #include <com/sun/star/drawing/CircleKind.hpp>
+#include <com/sun/star/awt/XBitmap.hpp>
+#include <com/sun/star/drawing/BitmapMode.hpp>
 #include <com/sun/star/drawing/FillStyle.hpp>
 #include <com/sun/star/drawing/ConnectorType.hpp>
 #include <com/sun/star/drawing/EnhancedCustomShapeParameterPair.hpp>
@@ -72,6 +74,7 @@
 #include <tools/globname.hxx>
 #include <comphelper/classids.hxx>
 #include <comphelper/propertysequence.hxx>
+#include <comphelper/sequenceashashmap.hxx>
 #include <comphelper/storagehelper.hxx>
 #include <comphelper/memorystream.hxx>
 #include <sot/exchange.hxx>
@@ -352,6 +355,65 @@ awt::Size ShapeExport::MapSize( const awt::Size& rSize ) const
     if ( !aRetSize.Height() )
         aRetSize.AdjustHeight( 1 );
     return awt::Size( aRetSize.Width(), aRetSize.Height() );
+}
+
+// helpers. A <p:pic> whose geometry is not a plain rect is turned into a
+// CustomShape at import; these recover that fact at export time.
+static bool lcl_hasPictureOrigin(const Reference<XPropertySet>& rXPropSet)
+{
+    if (!rXPropSet.is())
+        return false;
+    Reference<XPropertySetInfo> xInfo(rXPropSet->getPropertySetInfo());
+    if (!xInfo.is() || !xInfo->hasPropertyByName(u"InteropGrabBag"_ustr))
+        return false;
+    Sequence<PropertyValue> aGrabBag;
+    rXPropSet->getPropertyValue(u"InteropGrabBag"_ustr) >>= aGrabBag;
+    for (const auto& rProp : aGrabBag)
+    {
+        if (rProp.Name == "mso-pic-origin")
+        {
+            bool bMarked = false;
+            rProp.Value >>= bMarked;
+            return bMarked;
+        }
+    }
+    return false;
+}
+
+// The import BAKES rotation, mirroring and greyscale into the bitmap of a demoted
+// picture (fillproperties.cxx). The picture path writes the shape transformation
+// again, so promoting such a shape would apply the transform TWICE. Leave those as
+// <p:sp>: a wrong-looking image is worse than a shape that already renders correctly.
+static bool lcl_hasBakedTransform(const Reference<XPropertySet>& rXPropSet)
+{
+    if (!rXPropSet.is())
+        return true;
+    Reference<XPropertySetInfo> xInfo(rXPropSet->getPropertySetInfo());
+    if (!xInfo.is())
+        return true;
+    if (xInfo->hasPropertyByName(u"RotateAngle"_ustr))
+    {
+        sal_Int32 nAngle = 0;
+        rXPropSet->getPropertyValue(u"RotateAngle"_ustr) >>= nAngle;
+        if (nAngle != 0)
+            return true;
+    }
+    if (xInfo->hasPropertyByName(u"CustomShapeGeometry"_ustr))
+    {
+        Sequence<PropertyValue> aGeom;
+        rXPropSet->getPropertyValue(u"CustomShapeGeometry"_ustr) >>= aGeom;
+        for (const auto& rProp : aGeom)
+        {
+            if (rProp.Name == "MirroredX" || rProp.Name == "MirroredY")
+            {
+                bool bMirrored = false;
+                rProp.Value >>= bMirrored;
+                if (bMirrored)
+                    return true;
+            }
+        }
+    }
+    return false;
 }
 
 static bool IsNonEmptySimpleText(const Reference<XInterface>& xIface)
@@ -789,6 +851,49 @@ ShapeExport& ShapeExport::WriteCustomShape( const Reference< XShape >& xShape )
     {
         ShapeExport::WriteTextShape(xShape); // qualifier to prevent PowerPointShapeExport
         return *this;
+    }
+
+    // write a demoted picture back out as a <p:pic>. Same altitude and shape
+    // as the Fontwork check above: this CustomShape is really another kind of shape.
+    // Narrow on purpose - anything carrying text is an authored autoshape, and a baked
+    // transform would be applied twice (see lcl_hasBakedTransform).
+    if (GetDocumentType() == DOCUMENT_PPTX && lcl_hasPictureOrigin(rXPropSet)
+        && !IsNonEmptySimpleText(xShape) && !lcl_hasBakedTransform(rXPropSet))
+    {
+        FillStyle eFillStyle = FillStyle_NONE;
+        BitmapMode eBitmapMode = BitmapMode_NO_REPEAT;
+        if (GetProperty(rXPropSet, u"FillStyle"_ustr))
+            mAny >>= eFillStyle;
+        if (GetProperty(rXPropSet, u"FillBitmapMode"_ustr))
+            mAny >>= eBitmapMode;
+
+        if (eFillStyle == FillStyle_BITMAP && eBitmapMode == BitmapMode_STRETCH
+            && GetProperty(rXPropSet, u"FillBitmap"_ustr))
+        {
+            // Same read as DrawingML::WriteBlipFill: the property is typed XBitmap but
+            // carries the XGraphic the import stored.
+            Reference<graphic::XGraphic> xGraphic;
+            if (mAny.has<Reference<awt::XBitmap>>())
+            {
+                Reference<awt::XBitmap> xBitmap = mAny.get<Reference<awt::XBitmap>>();
+                if (xBitmap.is())
+                    xGraphic.set(xBitmap, UNO_QUERY);
+            }
+            else if (mAny.has<Reference<graphic::XGraphic>>())
+            {
+                xGraphic = mAny.get<Reference<graphic::XGraphic>>();
+            }
+
+            if (xGraphic.is())
+            {
+                // The two-argument form is REQUIRED: a CustomShape has no "Graphic"
+                // property, so the one-argument call would find no graphic and return
+                // early, silently dropping the image.
+                Graphic aGraphic(xGraphic);
+                WriteGraphicObjectShapePart(xShape, &aGraphic);
+                return *this;
+            }
+        }
     }
 
     bool bHasGeometrySeq(false);
@@ -1589,8 +1694,15 @@ void ShapeExport::WriteGraphicObjectShapePart( const Reference< XShape >& xShape
     if( !pGraphic && GetProperty( xShapeProps, u"FillBitmapStretch"_ustr ) )
         mAny >>= bStretch;
 
+    // emit the fillRect explicitly, as the media and math branches already
+    // do. An attribute-less fillRect is the full-area default, and re-import reads it
+    // back as a zero crop, so this changes no geometry.
     if ( pGraphic || bStretch )
-        pFS->singleElementNS(XML_a, XML_stretch);
+    {
+        pFS->startElementNS(XML_a, XML_stretch);
+        pFS->singleElementNS(XML_a, XML_fillRect);
+        pFS->endElementNS(XML_a, XML_stretch);
+    }
 
     if (bHasMediaURL)
     {
@@ -1610,8 +1722,47 @@ void ShapeExport::WriteGraphicObjectShapePart( const Reference< XShape >& xShape
         xShapeProps->getPropertyValue(u"IsMirrored"_ustr) >>= bFlipH;
     }
     WriteShapeTransformation( xShape, XML_a, bFlipH, false, false, false, true );
-    WritePresetShape( "rect"_ostr );
-    WriteFill(xShapeProps);
+    // a picture promoted back from a demoted CustomShape carries its mask
+    // geometry (ellipse, roundRect, ...). A genuine GraphicObjectShape has no
+    // CustomShapeGeometry, so this reads as "rect" for every ordinary picture.
+    OString sPicPreset = "rect"_ostr;
+    if (GetProperty(xShapeProps, u"CustomShapeGeometry"_ustr))
+    {
+        Sequence<PropertyValue> aPicGeomSeq;
+        if (mAny >>= aPicGeomSeq)
+        {
+            for (const PropertyValue& rPicProp : aPicGeomSeq)
+            {
+                if (rPicProp.Name == "Type")
+                {
+                    OUString sPicType;
+                    rPicProp.Value >>= sPicType;
+                    if (!sPicType.isEmpty())
+                    {
+                        OString sMapped = msfilter::util::GetOOXMLPresetGeometry(sPicType);
+                        if (!sMapped.isEmpty())
+                            sPicPreset = sMapped;
+                    }
+                }
+            }
+        }
+    }
+    WritePresetShape( sPicPreset );
+    // a picture promoted back from a demoted CustomShape still carries the
+    // bitmap fill the import gave that shape. It has already been written above as the
+    // picture's own <p:blipFill>; letting WriteFill run would put <a:blipFill> back
+    // inside <p:spPr> - the exact shape of the defect being fixed. An ordinary picture
+    // never has FillStyle BITMAP (the import sets it only on the demoted branch), so
+    // this changes nothing for them.
+    bool bPicBitmapFill = false;
+    if (GetProperty(xShapeProps, u"FillStyle"_ustr))
+    {
+        FillStyle ePicFillStyle = FillStyle_NONE;
+        mAny >>= ePicFillStyle;
+        bPicBitmapFill = (ePicFillStyle == FillStyle_BITMAP);
+    }
+    if (!bPicBitmapFill)
+        WriteFill(xShapeProps);
     // graphic object can come with the frame (bnc#654525)
     WriteOutline( xShapeProps );
 
@@ -2366,6 +2517,28 @@ ShapeExport& ShapeExport::WriteTextBox( const Reference< XInterface >& xIface, s
     return *this;
 }
 
+// VULCAN: whether the ppt/tableStyles.xml that oox PowerPointImport kept for this deck,
+// and PowerPointExport::WriteKeptParts writes back with it, names the table style rStyleId.
+static bool lcl_keptTableStylesName(XmlFilterBase* pFB, const OUString& rStyleId)
+{
+    if (!pFB)
+        return false;
+    Reference<XPropertySet> xDocProps(pFB->getModel(), UNO_QUERY);
+    if (!xDocProps.is())
+        return false;
+    Reference<XPropertySetInfo> xInfo(xDocProps->getPropertySetInfo());
+    if (!xInfo.is() || !xInfo->hasPropertyByName(u"InteropGrabBag"_ustr))
+        return false;
+    const comphelper::SequenceAsHashMap aDocGrabBag(
+        xDocProps->getPropertyValue(u"InteropGrabBag"_ustr));
+    const cpo::uno::Sequence<sal_Int8> aBytes = aDocGrabBag.getUnpackedValueOrDefault(
+        u"OOXTableStyles"_ustr, cpo::uno::Sequence<sal_Int8>());
+    const std::string_view aPart(reinterpret_cast<const char*>(aBytes.getConstArray()),
+                                 aBytes.getLength());
+    const OString aId(OUStringToOString(rStyleId, RTL_TEXTENCODING_UTF8));
+    return aPart.find(std::string_view(aId.getStr(), aId.getLength())) != std::string_view::npos;
+}
+
 void ShapeExport::WriteTable( const Reference< XShape >& rXShape  )
 {
     Reference< XTable > xTable;
@@ -2377,9 +2550,46 @@ void ShapeExport::WriteTable( const Reference< XShape >& rXShape  )
 
     if ( xPropSet.is() && ( xPropSet->getPropertyValue( u"Model"_ustr ) >>= xTable ) )
     {
+        // VULCAN: the table style an imported table cites, and the parts of it the
+        // table turns on (oox Shape::createAndInsert keeps them). Its cells hold that style's
+        // formatting as their own, so the table looks the same either way; the id keeps it on its
+        // style in PowerPoint, which ppt/tableStyles.xml defines (PowerPointExport::WriteKeptParts).
+        OUString aTableStyleId;
+        comphelper::SequenceAsHashMap aTableGrabBag;
+        if (const SdrObject* pTableObj = SdrObject::getSdrObjectFromXShape(rXShape))
+        {
+            cpo::uno::Any aGrabBag;
+            pTableObj->GetGrabBagItem(aGrabBag);
+            aTableGrabBag = comphelper::SequenceAsHashMap(aGrabBag);
+            aTableStyleId = aTableGrabBag.getUnpackedValueOrDefault(u"TableStyleId"_ustr, OUString());
+        }
+        // An id that names neither a built-in style nor one the tableStyles.xml written back with
+        // this deck defines (a table pasted from another deck, or a part that was not kept) would
+        // cite a style the saved deck lacks: write the table on no style, as it looks the same.
+        if (!aTableStyleId.isEmpty()
+            && !aTableGrabBag.getUnpackedValueOrDefault(u"TableStyleBuiltIn"_ustr, false)
+            && !lcl_keptTableStylesName(GetFB(), aTableStyleId))
+            aTableStyleId.clear();
+        auto styleFlag = [&aTableStyleId, &aTableGrabBag](const OUString& rName) {
+            return sax_fastparser::UseIf(
+                "1", !aTableStyleId.isEmpty() && aTableGrabBag.getUnpackedValueOrDefault(rName, false));
+        };
+
         mpFS->startElementNS(XML_a, XML_tbl);
-        mpFS->startElementNS(XML_a, XML_tblPr);
+        mpFS->startElementNS(XML_a, XML_tblPr,
+                             XML_firstRow, styleFlag(u"FirstRow"_ustr),
+                             XML_firstCol, styleFlag(u"FirstCol"_ustr),
+                             XML_lastRow, styleFlag(u"LastRow"_ustr),
+                             XML_lastCol, styleFlag(u"LastCol"_ustr),
+                             XML_bandRow, styleFlag(u"BandRow"_ustr),
+                             XML_bandCol, styleFlag(u"BandCol"_ustr));
         WriteShapeEffects(xPropSet);
+        if (!aTableStyleId.isEmpty())
+        {
+            mpFS->startElementNS(XML_a, XML_tableStyleId);
+            mpFS->writeEscaped(aTableStyleId);
+            mpFS->endElementNS(XML_a, XML_tableStyleId);
+        }
         mpFS->endElementNS(XML_a, XML_tblPr);
 
         Reference< container::XIndexAccess > xColumns( xTable->getColumns(), UNO_QUERY_THROW );

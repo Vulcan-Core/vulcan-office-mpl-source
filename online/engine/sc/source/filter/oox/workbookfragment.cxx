@@ -80,6 +80,14 @@
 #include <comphelper/processfactory.hxx>
 #include <officecfg/Office/Calc.hxx>
 
+#include <com/sun/star/document/XStorageBasedDocument.hpp>
+#include <com/sun/star/embed/ElementModes.hpp>
+#include <com/sun/star/embed/XStorage.hpp>
+#include <com/sun/star/embed/XTransactedObject.hpp>
+#include <comphelper/diagnose_ex.hxx>
+#include <comphelper/storagehelper.hxx>
+#include <oox/core/relations.hxx>
+
 #include <xestream.hxx>
 #include <ucbhelper/content.hxx>
 
@@ -96,6 +104,87 @@ using ::oox::drawingml::ThemeFragmentHandler;
 namespace {
 
 const double PROGRESS_LENGTH_GLOBALS        = 0.1;      /// 10% of progress bar for globals import.
+
+/*  The document storage elements the VBA project part is kept in for the save, as the .xls, .docx and .pptx imports
+    keep theirs (VbaProject::copyStorage): the project itself in "_MS_VBA_Macros", and each signature part its
+    relationships part (xl/_rels/vbaProject.bin.rels) names in "_MS_VBA_Signatures_" + the last segment of that
+    relationship's type (vbaProjectSignature, vbaProjectSignatureAgile, vbaProjectSignatureV3), which is also the name
+    Excel gives the part and the last segment of its content type. XclExpXmlStream::exportDocument writes them back. */
+constexpr OUString gaKeptVbaProject = u"_MS_VBA_Macros"_ustr;
+constexpr OUString gaKeptVbaSignaturePrefix = u"_MS_VBA_Signatures_"_ustr;
+
+/** Keeps the signatures of the VBA project part, byte for byte. A signature is valid only over the project's exact
+    bytes: the export writes them only with the kept project. A file without signatures keeps none. */
+void lclKeepVbaSignatures( XmlFilterBase& rFilter, const OUString& rProjectPath,
+                           const Reference< css::embed::XStorage >& rxDocStorage )
+{
+    RelationsRef xRelations = rFilter.importRelations( rProjectPath );
+    for( const auto& rEntry : *xRelations )
+    {
+        const Relation& rRelation = rEntry.second;
+        const OUString aKind = rRelation.maType.copy( rRelation.maType.lastIndexOf( '/' ) + 1 );
+        if( rRelation.mbExternal || ( aKind != "vbaProjectSignature" && aKind != "vbaProjectSignatureAgile"
+                && aKind != "vbaProjectSignatureV3" ) )
+            continue;
+        const OUString aElement = gaKeptVbaSignaturePrefix + aKind;
+        try
+        {
+            Reference< XInputStream > xSignature(
+                rFilter.openInputStream( xRelations->getFragmentPathFromRelation( rRelation ) ), UNO_SET_THROW );
+            const sal_Int32 nOpenMode = css::embed::ElementModes::SEEKABLE | css::embed::ElementModes::WRITE
+                                        | css::embed::ElementModes::TRUNCATE;
+            Reference< XOutputStream > xKept( rxDocStorage->openStreamElement( aElement, nOpenMode ), UNO_QUERY_THROW );
+            comphelper::OStorageHelper::CopyInputToOutput( xSignature, xKept );
+        }
+        catch( const Exception& )
+        {
+            TOOLS_WARN_EXCEPTION( "sc.filter", "WorkbookFragment: a VBA project signature is not kept for the save" );
+            try   // never leave a half-written signature for the save to write
+            {
+                if( rxDocStorage->hasByName( aElement ) )
+                    rxDocStorage->removeElement( aElement );
+            }
+            catch( const Exception& )
+            {
+            }
+        }
+    }
+}
+
+/** Keeps the VBA project part, byte for byte, and its signatures, for XclExpXmlStream::exportDocument to write back
+    (Filter/Import/VBA/UseExport=false). A raw copy, unlike VbaProject::copyStorage's re-serialised compound file, and
+    whether or not the project loads into Basic. */
+void lclKeepVbaProject( XmlFilterBase& rFilter, const OUString& rProjectPath )
+{
+    Reference< css::embed::XStorage > xDocStorage;
+    try
+    {
+        Reference< XInputStream > xProject( rFilter.openInputStream( rProjectPath ), UNO_SET_THROW );
+        Reference< css::document::XStorageBasedDocument > xStorageDoc( rFilter.getModel(), UNO_QUERY_THROW );
+        xDocStorage.set( xStorageDoc->getDocumentStorage(), UNO_SET_THROW );
+        {
+            const sal_Int32 nOpenMode = css::embed::ElementModes::SEEKABLE | css::embed::ElementModes::WRITE
+                                        | css::embed::ElementModes::TRUNCATE;
+            Reference< XOutputStream > xKept( xDocStorage->openStreamElement( gaKeptVbaProject, nOpenMode ),
+                                              UNO_QUERY_THROW );
+            comphelper::OStorageHelper::CopyInputToOutput( xProject, xKept );
+        }
+        lclKeepVbaSignatures( rFilter, rProjectPath, xDocStorage );
+        Reference< css::embed::XTransactedObject >( xDocStorage, UNO_QUERY_THROW )->commit();
+    }
+    catch( const Exception& )
+    {
+        TOOLS_WARN_EXCEPTION( "sc.filter", "WorkbookFragment: the VBA project is not kept for the save" );
+        try   // never leave a half-written project for the save to write
+        {
+            if( xDocStorage.is() && xDocStorage->hasByName( gaKeptVbaProject ) )
+                xDocStorage->removeElement( gaKeptVbaProject );
+        }
+        catch( const Exception& )
+        {
+        }
+    }
+}
 
 } // namespace
 
@@ -541,6 +630,9 @@ void WorkbookFragment::finalizeImport()
             setVbaProjectStorage( xPrjStrg );
             getBaseFilter().getVbaProject().readVbaModules( *xPrjStrg );
         }
+        // Filter/Import/VBA/Save: "the original VBA storage is preserved while editing"
+        if( officecfg::Office::Calc::Filter::Import::VBA::Save::get() )
+            lclKeepVbaProject( getOoxFilter(), aVbaFragmentPath );
     }
 
     // lock the model to prevent broadcasting, speeds up load a lot

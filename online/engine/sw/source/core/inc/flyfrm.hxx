@@ -149,6 +149,15 @@ protected:
     void Unlock()       { m_bLocked = false; }
 
     Size CalcRel( const SwFormatFrameSize &rSz ) const;
+    /** VULCAN: additionally reports in <rbFitTextToKitBrowseWidth> whether the
+        kit-browse-width fit narrowed this text fly's fixed width, i.e. whether
+        Format() has to treat the attribute height as a minimum height -- see
+        the block in the implementation. A separate overload, not a defaulted
+        parameter: the parameter list of the overload above must stay identical
+        to SwLayoutFrame::CalcRel so it keeps hiding the variant the
+        using-declaration above re-exposes. */
+    Size CalcRel( const SwFormatFrameSize &rSz,
+                  bool& rbFitTextToKitBrowseWidth ) const;
 
     SwFlyFrame( SwFlyFrameFormat*, SwFrame*, SwFrame *pAnchor, bool bFollow = false );
 

@@ -185,6 +185,47 @@ interface AppInterface {
 	dispatcher: any;
 	layoutingService: any;
 	serverConnectionService: any;
+	// Fork-side metadata-only telemetry batcher (src/app/VulcanTelemetry.ts);
+	// posts Vulcan_Telemetry batches to the host application over postMessage.
+	telemetry: any;
+	// Fork-side session-replay forwarder (src/app/VulcanReplay.ts); runs the
+	// bundled rrweb recorder in cross-origin child mode so the host page's
+	// PostHog replay can see inside the editor frame. Armed by vulcanReplay=1.
+	replay: any;
+	// Fork-side Calc agent bridge (src/app/VulcanCalcBridge.ts); answers the
+	// host's nonce-acked spreadsheet round-trips (capability calc_bridge_v1).
+	calcBridge: any;
+	// Fork-side Writer agent bridge (src/app/VulcanWriterBridge.ts);
+	// tracked-changes document round-trips (capability writer_bridge_v1).
+	writerBridge: any;
+	// Fork-side Impress agent bridge (src/app/VulcanImpressBridge.ts);
+	// deck inventory + FillApi slide round-trips (capability impress_bridge_v1).
+	impressBridge: any;
+	// Fork-side selection-based Writer/Impress bridge (src/app/VulcanDocBridge.ts);
+	// the doctype bridges delegate Vulcan_* verbs they don't own to it. It
+	// advertises no capability of its own (the doctype bridges are the sole
+	// Vulcan_Ready.Capabilities advertisers).
+	docBridge: any;
+	// Fork-side Writer web-view reflow controller
+	// (src/app/VulcanWriterReflow.ts): states the browse-mode reflow width to
+	// the engine in twips and owns the phone View row's toggle + zoom restore.
+	writerReflow: any;
+	// Fork-side phone caret reveal (src/app/VulcanCaretReveal.ts): scrolls the
+	// line you are typing on clear of the soft keyboard when the visible band
+	// shrinks.
+	caretReveal: any;
+	// Fork-side phone READ immersion (src/app/VulcanReadImmersion.ts): the
+	// scroll-direction chrome posture and the scrubber's visibility. Owned and
+	// constructed by ScrollSection (which feeds it from doMove); published here
+	// so Control.UIManager's posture stamp can force the chrome back when the
+	// document leaves read mode without waiting for a scroll.
+	readImmersion: any;
+	// CheckFileInfo-derived WOPI props cache + idempotent subscription
+	// (installed by Map.WOPI initialize/_setWopiProps): cb fires immediately
+	// when the props already arrived, and on every arrival/refresh.
+	wopiProps: any;
+	onWopiProps: (cb: (wopiInfo: any) => void) => void;
+	_wopiPropsSubscribers: Array<(wopiInfo: any) => void>;
 	timerRegistry: any;
 	twipsToPixels: number;
 	pixelsToTwips: number;
@@ -336,6 +377,27 @@ interface Window {
 	// window.open to its own handler. Used to open real slideshow and
 	// presenter console windows. Defined in js/global.js.
 	origOpen?: typeof window.open;
+	// Vulcan Office: the trimmed phone slide-layout set, shared by the
+	// Impress filmstrip '+' tile and the phone kebab's Slide ▸ Change layout
+	// so the two cannot drift. Defined in src/control/Control.MobileSlide.js.
+	getVulcanSlideLayouts(): Array<{
+		layout: number;
+		img: string;
+		text: string;
+	}>;
+	// Vulcan Office: phone Calc's two Return verbs (quick entry advances,
+	// in-cell edit mode inserts a newline). Optional because the mocha
+	// extraction rigs run door sites without it. Defined in
+	// src/app/VulcanCalcReturnKey.ts.
+	VulcanCalcReturnKey?: {
+		enterCellEditDoor(): void;
+		clear(): void;
+		returnInsertsNewline(): boolean;
+		newlineUnoKeyCode(): number;
+		noteCommitReturn(): void;
+		noteTyping(): void;
+		commitReturnPending(): boolean;
+	};
 	// coolParams defined in: js/global.js
 	coolParams: {
 		p: URLSearchParams;
@@ -390,6 +452,7 @@ interface Window {
 	mobileDialogId?: number;
 	sidebarId: number;
 	userInterfaceMode: string;
+	vulcanPhoneChrome: boolean;
 	ThisIsAMobileApp: boolean;
 	ThisIsTheAndroidApp: boolean;
 	ThisIsTheEmscriptenApp: boolean;
@@ -422,7 +485,9 @@ interface Window {
 		suffix?: string,
 		wopiSrcParam?: string,
 	): string;
-	createShapesPanel(shapeType: string): HTMLDivElement;
+	createShapesPanel(shapeType: string, groups?: string[]): HTMLDivElement;
+	// Slides' phone shape categories — see Control.Toolbar.js.
+	VulcanPhoneShapeGroups: string[];
 	initializedUI?: () => void; // initializedUI is an optional function, potentially defined in branding
 	setupToolbar(map: any): void; // TODO should be L.Map
 	makeWsUrl: (url: string) => string;
@@ -438,6 +503,7 @@ interface Window {
 	L: any;
 	createWebSocket(url: string): SockInterface;
 	getAccessibilityState(): boolean;
+	isAccessibilityStateEffective(): boolean;
 	makeClientVisibleArea(): string;
 	postMobileDebug(msg: string): void;
 

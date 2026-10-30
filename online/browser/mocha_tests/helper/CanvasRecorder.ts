@@ -24,20 +24,35 @@ interface CanvasRecorderCall {
 	depth: number;
 }
 
+interface CanvasRecorderMatrix {
+	a: number;
+	b: number;
+	c: number;
+	d: number;
+	e: number;
+	f: number;
+}
+
 /// Test helper that mimics a CanvasRenderingContext2D. Pass an instance of
 /// CanvasRecorder wherever production code expects a context. Every method
 /// invocation is recorded into calls, and every assigned drawing-state
 /// property is recorded into properties.
 ///
 /// The properties field holds the live "last set" value of each tracked
-/// canvas property. Save/restore do not pop these back. For an accurate
-/// "what was the state at the time of this call" view, read the
-/// properties field on the call entry returned by findCall/callsOf.
+/// canvas property. Save/restore bring back the transform and globalAlpha,
+/// which compose, and no other property. For an accurate "what was the
+/// state at the time of this call" view, read the properties field on the
+/// call entry returned by findCall/callsOf.
 class CanvasRecorder {
 	public readonly calls: CanvasRecorderCall[] = [];
 	public readonly properties: Record<string, any> = {};
 	public readonly canvas: { width: number; height: number };
 	private _depth: number = 0;
+	private _transform: CanvasRecorderMatrix = { a: 1, b: 0, c: 0, d: 1, e: 0, f: 0 };
+	private readonly _stateStack: {
+		transform: CanvasRecorderMatrix;
+		globalAlpha: number | undefined;
+	}[] = [];
 
 	private static readonly _PROPS = [
 		'fillStyle',
@@ -56,14 +71,19 @@ class CanvasRecorder {
 		'shadowOffsetY',
 		'globalCompositeOperation',
 		'filter',
+		'letterSpacing',
 	];
+	private static readonly _DEFAULTS: Record<string, any> = { globalAlpha: 1 };
 
 	constructor(width: number = 100, height: number = 100) {
 		this.canvas = { width: width, height: height };
 
 		for (const property of CanvasRecorder._PROPS) {
 			Object.defineProperty(this, property, {
-				get: () => this.properties[property],
+				get: () =>
+					property in this.properties
+						? this.properties[property]
+						: CanvasRecorder._DEFAULTS[property],
 				set: (value) => {
 					this.properties[property] = value;
 				},
@@ -148,8 +168,10 @@ class CanvasRecorder {
 		// Deterministic stub. Real canvases measure against the
 		// current font and OS font tables; for tests we just give
 		// each character a fixed advance so assertions can predict
-		// the result.
-		return { width: text.length * 10 } as TextMetrics;
+		// the result. Like a real canvas, the current letterSpacing
+		// adds to every character's advance.
+		const spacing = parseFloat(this.properties.letterSpacing ?? '0') || 0;
+		return { width: text.length * (10 + spacing) } as TextMetrics;
 	}
 	drawImage(...args: any[]): void {
 		this._record('drawImage', args);
@@ -162,32 +184,73 @@ class CanvasRecorder {
 		// one level deeper.
 		this._record('save', []);
 		this._depth++;
+		this._stateStack.push({
+			transform: { ...this._transform },
+			globalAlpha: this.properties.globalAlpha,
+		});
 	}
 	restore(): void {
 		// Pop the level first so the restore() entry itself sits at
 		// the outer depth, matching the save() entry that opened it.
 		if (this._depth > 0) this._depth--;
+		const state = this._stateStack.pop();
+		if (state) {
+			this._transform = state.transform;
+			if (state.globalAlpha === undefined) delete this.properties.globalAlpha;
+			else this.properties.globalAlpha = state.globalAlpha;
+		}
 		this._record('restore', []);
+	}
+	getTransform(): CanvasRecorderMatrix {
+		return { ...this._transform };
 	}
 	translate(...args: any[]): void {
 		this._record('translate', args);
+		this._compose(1, 0, 0, 1, args[0], args[1]);
 	}
 	scale(...args: any[]): void {
 		this._record('scale', args);
+		this._compose(args[0], 0, 0, args[1], 0, 0);
 	}
 	rotate(...args: any[]): void {
 		this._record('rotate', args);
+		const [cos, sin] = [Math.cos(args[0]), Math.sin(args[0])];
+		this._compose(cos, sin, -sin, cos, 0, 0);
 	}
 	transform(...args: any[]): void {
 		this._record('transform', args);
+		this._compose(args[0], args[1], args[2], args[3], args[4], args[5]);
 	}
 	setTransform(...args: any[]): void {
 		this._record('setTransform', args);
+		const m = args.length === 6 ? args : [];
+		const init = typeof args[0] === 'object' && args[0] ? args[0] : {};
+		this._transform = {
+			a: m[0] ?? init.a ?? 1,
+			b: m[1] ?? init.b ?? 0,
+			c: m[2] ?? init.c ?? 0,
+			d: m[3] ?? init.d ?? 1,
+			e: m[4] ?? init.e ?? 0,
+			f: m[5] ?? init.f ?? 0,
+		};
 	}
 	resetTransform(): void {
 		this._record('resetTransform', []);
+		this._transform = { a: 1, b: 0, c: 0, d: 1, e: 0, f: 0 };
 	}
 	setLineDash(...args: any[]): void {
 		this._record('setLineDash', args);
+	}
+
+	private _compose(a: number, b: number, c: number, d: number, e: number, f: number): void {
+		const t = this._transform;
+		this._transform = {
+			a: t.a * a + t.c * b,
+			b: t.b * a + t.d * b,
+			c: t.a * c + t.c * d,
+			d: t.b * c + t.d * d,
+			e: t.a * e + t.c * f + t.e,
+			f: t.b * e + t.d * f + t.f,
+		};
 	}
 }

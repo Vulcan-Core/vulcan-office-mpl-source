@@ -24,6 +24,7 @@
 #include <sfx2/objsh.hxx>
 #include <svx/svxids.hrc>
 #include <svx/sdmetitm.hxx>
+#include <svx/sdooitm.hxx>
 #include <editeng/flditem.hxx>
 #include <svx/svdogrp.hxx>
 #include <svx/svdograf.hxx>
@@ -54,6 +55,48 @@ void DrawViewShell::GetMenuStateSel( SfxItemSet &rSet )
     // Single selection
     const SdrMarkList& rMarkList = mpDrawView->GetMarkedObjectList();
     const size_t nMarkCount = rMarkList.GetMarkCount();
+
+    // Per-box resize-mode toggles (Vulcan fork): checked only when EVERY
+    // marked text object has the autogrow attribute on for that axis;
+    // disabled while no marked object can carry text.
+    if( SfxItemState::DEFAULT == rSet.GetItemState( SID_TOGGLE_AUTO_WIDTH ) ||
+        SfxItemState::DEFAULT == rSet.GetItemState( SID_TOGGLE_AUTO_HEIGHT ) )
+    {
+        bool bHasTextObj = false;
+        bool bAllAutoWidth = true;
+        bool bAllAutoHeight = true;
+        for( size_t i = 0; i < nMarkCount; ++i )
+        {
+            const SdrObject* pObj = rMarkList.GetMark(i)->GetMarkedSdrObj();
+            const SdrTextObj* pTextObj = DynCastSdrTextObj( pObj );
+            // Pictures and OLE objects derive from SdrRectObj, so the cast
+            // alone admits them - require a text frame or carried text.
+            if( !pTextObj || ( !pTextObj->IsTextFrame() && !pTextObj->HasText() ) )
+                continue;
+            // Tables answer HasText() unconditionally but the fit/autogrow
+            // verbs exclude them (they would relay the table from one
+            // cell's text) - do not advertise enabled state from a table
+            // selection either (review P1-6).
+            if( pTextObj->GetObjIdentifier() == SdrObjKind::Table )
+                continue;
+            bHasTextObj = true;
+            const SfxItemSet& rObjSet = pObj->GetMergedItemSet();
+            if( !rObjSet.GetItem<SdrOnOffItem>( SDRATTR_TEXT_AUTOGROWWIDTH )->GetValue() )
+                bAllAutoWidth = false;
+            if( !rObjSet.GetItem<SdrOnOffItem>( SDRATTR_TEXT_AUTOGROWHEIGHT )->GetValue() )
+                bAllAutoHeight = false;
+        }
+        if( bHasTextObj )
+        {
+            rSet.Put( SfxBoolItem( SID_TOGGLE_AUTO_WIDTH, bAllAutoWidth ) );
+            rSet.Put( SfxBoolItem( SID_TOGGLE_AUTO_HEIGHT, bAllAutoHeight ) );
+        }
+        else
+        {
+            rSet.DisableItem( SID_TOGGLE_AUTO_WIDTH );
+            rSet.DisableItem( SID_TOGGLE_AUTO_HEIGHT );
+        }
+    }
 
     if ( nMarkCount == 1 )
     {

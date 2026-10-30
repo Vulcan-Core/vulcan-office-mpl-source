@@ -18,14 +18,29 @@
  */
 
 #include <svdpdf.hxx>
+#include <cmath>
+#include <svx/svdpdfrawtext.hxx>
+#include <svx/vulcanprovenance.hxx>
+#include <comphelper/hash.hxx>
+#include <vcl/BitmapPalette.hxx>
+#include <vcl/BitmapWriteAccess.hxx>
+#include <basegfx/numeric/ftools.hxx>
+#include <limits>
+#include <map>
+#include <algorithm>
 
 #include <tools/UnitConversion.hxx>
 #include <vcl/canvastools.hxx>
 #include <vcl/embeddedfontsmanager.hxx>
 #include <vcl/graph.hxx>
+#include <vcl/graphicfilter.hxx>
+#include <vcl/BitmapReadAccess.hxx>
 #include <vcl/vectorgraphicdata.hxx>
+#include <tools/stream.hxx>
+#include <rtl/ustrbuf.hxx>
 
 #include <editeng/eeitem.hxx>
+#include <svx/sdtaitm.hxx>
 #include <editeng/fhgtitem.hxx>
 #include <editeng/wghtitem.hxx>
 #include <editeng/postitem.hxx>
@@ -46,10 +61,21 @@
 #include <editeng/kernitem.hxx>
 #include <svx/sdtfchim.hxx>
 #include <svx/sdtditm.hxx>
+#include <svx/sdasitm.hxx>
 #include <svx/sdtagitm.hxx>
 #include <svx/sdtfsitm.hxx>
 #include <svx/svdmodel.hxx>
 #include <svx/svdpage.hxx>
+#include <string>
+#include <string_view>
+#include <svx/svdouno.hxx>
+#include <svx/svdobjkind.hxx>
+#include <com/sun/star/beans/XPropertySet.hpp>
+#include <com/sun/star/beans/XPropertySetInfo.hpp>
+#include <cpo/uno/Any.hxx>
+#include <cpo/uno/Sequence.hxx>
+#include <vcl/pdf/PDFAnnotationSubType.hxx>
+#include <vcl/pdf/PDFFormFieldType.hxx>
 #include <svx/svdobj.hxx>
 #include <svx/svdotext.hxx>
 #include <svx/svdorect.hxx>
@@ -90,7 +116,8 @@ static OUString getPrefix(void* p)
 }
 
 ImpSdrPdfImport::ImpSdrPdfImport(SdrModel& rModel, SdrLayerID nLay, const tools::Rectangle& rRect,
-                                 Graphic const& rGraphic)
+                                 Graphic const& rGraphic, bool bSkipEmbeddedFonts,
+                                 std::shared_ptr<ImportedFontMap>* pSharedFonts)
     : maScaleRect(rRect)
     , mnMapScalingOfs(0)
     , mpModel(&rModel)
@@ -110,6 +137,7 @@ ImpSdrPdfImport::ImpSdrPdfImport(SdrModel& rModel, SdrLayerID nLay, const tools:
     , mbNoFill(false)
     , mnPageCount(0)
     , mdPageHeightPts(0)
+    , mbSkipEmbeddedFonts(bSkipEmbeddedFonts)
     , mpPDFium(vcl::pdf::PDFiumLibrary::get())
 {
     mpLineAttr = std::make_unique<SfxItemSet>(
@@ -130,14 +158,22 @@ ImpSdrPdfImport::ImpSdrPdfImport(SdrModel& rModel, SdrLayerID nLay, const tools:
     mnPageCount = mpPdfDocument->getPageCount();
 
     const std::shared_ptr<GfxLink> xGrfLink = rGraphic.GetSharedGfxLink();
-    if (xGrfLink)
+    if (xGrfLink && !mbSkipEmbeddedFonts)
         mxImportedFonts = xGrfLink->getImportedFonts();
+    else if (mbSkipEmbeddedFonts && pSharedFonts && *pSharedFonts)
+        mxImportedFonts = *pSharedFonts; // the previous page of this decompose collected it
     if (!mxImportedFonts)
     {
         mxImportedFonts
-            = std::make_shared<ImportedFontMap>(CollectFonts(getPrefix(this), *mpPdfDocument));
-        if (xGrfLink)
+            = std::make_shared<ImportedFontMap>(
+                CollectFonts(getPrefix(this), *mpPdfDocument, mbSkipEmbeddedFonts));
+        // A skip-fonts map is family-name-only; do not cache it onto the link
+        // where a later faithful render would reuse it — hand it to the
+        // caller's shared slot instead, so the next page skips the walk.
+        if (xGrfLink && !mbSkipEmbeddedFonts)
             xGrfLink->setImportedFonts(mxImportedFonts);
+        else if (mbSkipEmbeddedFonts && pSharedFonts)
+            *pSharedFonts = mxImportedFonts;
     }
 
     // Same as SdModule
@@ -203,14 +239,50 @@ bool writeFontFile(const OUString& fileUrl, const std::vector<uint8_t>& rFontDat
     return true;
 }
 
+// A PostScript style suffix names a point on the WHOLE weight ladder
+// ("Medium", "SemiBold", "Semi-Bold", "ExtraBold", "Black", "Light", "Thin"),
+// with or without a trailing Italic/Oblique. Mapping only Regular and Bold
+// re-exported every Medium/SemiBold run of the product's one-pagers as
+// Regular (WEIGHT_DONTKNOW -> the config default) — headline and stat
+// numerals came back visibly lighter after an edit.
 FontWeight toOfficeWeight(std::string_view style)
 {
-    if (o3tl::equalsIgnoreAsciiCase(style, "Regular"))
+    std::string aNorm;
+    aNorm.reserve(style.size());
+    for (char c : style)
+    {
+        if (c == ' ' || c == '-' || c == '_')
+            continue;
+        aNorm.push_back((c >= 'A' && c <= 'Z') ? static_cast<char>(c + ('a' - 'A')) : c);
+    }
+    for (const char* pSuffix : { "italic", "oblique" })
+    {
+        const std::string_view aSuffix(pSuffix);
+        if (aNorm.size() >= aSuffix.size()
+            && std::string_view(aNorm).substr(aNorm.size() - aSuffix.size()) == aSuffix)
+            aNorm.erase(aNorm.size() - aSuffix.size());
+    }
+    if (aNorm.empty() || aNorm == "regular" || aNorm == "normal" || aNorm == "book"
+        || aNorm == "roman" || aNorm == "text")
         return WEIGHT_NORMAL;
-    else if (o3tl::equalsIgnoreAsciiCase(style, "Bold"))
+    if (aNorm == "thin" || aNorm == "hairline")
+        return WEIGHT_THIN;
+    if (aNorm == "extralight" || aNorm == "ultralight")
+        return WEIGHT_ULTRALIGHT;
+    if (aNorm == "light")
+        return WEIGHT_LIGHT;
+    if (aNorm == "semilight" || aNorm == "demilight")
+        return WEIGHT_SEMILIGHT;
+    if (aNorm == "medium")
+        return WEIGHT_MEDIUM;
+    if (aNorm == "semibold" || aNorm == "demibold")
+        return WEIGHT_SEMIBOLD;
+    if (aNorm == "bold")
         return WEIGHT_BOLD;
-    else if (o3tl::equalsIgnoreAsciiCase(style, "BoldItalic"))
-        return WEIGHT_BOLD;
+    if (aNorm == "extrabold" || aNorm == "ultrabold")
+        return WEIGHT_ULTRABOLD;
+    if (aNorm == "black" || aNorm == "heavy" || aNorm == "extrablack" || aNorm == "ultrablack")
+        return WEIGHT_BLACK;
     return WEIGHT_DONTKNOW;
 }
 
@@ -241,8 +313,16 @@ OUString getFileUrlForTemporaryFont(std::u16string_view prefix, std::u16string_v
 
 // Possibly there is some alternative route to query pdfium for all fonts without
 // iterating through every object to see what font each uses
+namespace
+{
+// Defined with the segment helpers further down (same unnamed namespace).
+bool lcl_StandardFontFamily(const OUString& rName, OUString& rFamily, FontWeight& rWeight,
+                            bool& rItalic);
+}
+
 ImportedFontMap ImpSdrPdfImport::CollectFonts(std::u16string_view sPrefix,
-                                              vcl::pdf::PDFiumDocument& rPdfDocument)
+                                              vcl::pdf::PDFiumDocument& rPdfDocument,
+                                              bool bSkipEmbeddedFonts)
 {
     ImportedFontMap aImportedFonts;
 
@@ -260,7 +340,8 @@ ImportedFontMap ImpSdrPdfImport::CollectFonts(std::u16string_view sPrefix,
             SAL_WARN("sd.filter", "ImpSdrPdfImport missing page: " << nPageIndex);
             continue;
         }
-        auto pTextPage = pPdfPage->getTextPage();
+        // (No text page: the walk reads each text object's font, not its
+        // text, and building one per page doubled the cost of the walk.)
 
         const int nPageObjectCount = pPdfPage->getObjectCount();
         for (int nPageObjectIndex = 0; nPageObjectIndex < nPageObjectCount; ++nPageObjectIndex)
@@ -298,10 +379,29 @@ ImportedFontMap ImpSdrPdfImport::CollectFonts(std::u16string_view sPrefix,
                                  << sFontName);
                 }
 
-                if (!font->getIsEmbedded())
+                if (!font->getIsEmbedded() || bSkipEmbeddedFonts)
                 {
-                    SAL_WARN("sd.filter", "skipping not embedded font, map: "
-                                              << sFontName << " to " << sPostScriptFontFamily);
+                    SAL_WARN("sd.filter", "mapping font by family (embedded="
+                                              << font->getIsEmbedded() << ", skip="
+                                              << bSkipEmbeddedFonts << "): " << sFontName << " to "
+                                              << sPostScriptFontFamily);
+                    // A standard-14 family the PDF did not embed is recorded
+                    // as its bundled METRIC TWIN (Liberation Sans/Serif/Mono):
+                    // left as "Helvetica", the jail's fontconfig — no alias
+                    // rules — laid the text out in DejaVu Sans, up to 13%
+                    // wider, and the client drew Helvetica into those
+                    // advances ("m emos"). The style suffix keeps its weight;
+                    // the slant rides the name (see lcl_StandardFontFamily).
+                    OUString sMappedFamily = sPostScriptFontFamily;
+                    bool bNameItalic = false;
+                    FontWeight eMappedWeight = eFontWeight;
+                    if (lcl_StandardFontFamily(sPostScriptName, sMappedFamily, eMappedWeight,
+                                               bNameItalic))
+                    {
+                        sPostScriptFontFamily = sMappedFamily;
+                        if (eFontWeight == WEIGHT_DONTKNOW)
+                            eFontWeight = eMappedWeight;
+                    }
                     aImportedFonts.insert(OfficeFontInfo{ font->getFontDictObjNum(),
                                                           sPostScriptFontFamily, eFontWeight });
                     continue;
@@ -386,6 +486,329 @@ ImportedFontMap ImpSdrPdfImport::CollectFonts(std::u16string_view sPrefix,
     return aImportedFonts;
 }
 
+namespace
+{
+/// Does a BGRA pdfium bitmap hold any pixel that is not fully transparent?
+/// (Another format has no alpha to tell by: taken as drawn.)
+bool lcl_AnyPixelDrawn(vcl::pdf::PDFiumBitmap& rBitmap)
+{
+    if (rBitmap.getFormat() != vcl::pdf::PDFBitmapType::BGRA)
+        return true;
+    const ConstScanline pBuffer = rBitmap.getBuffer();
+    const int nWidth = rBitmap.getWidth();
+    const int nHeight = rBitmap.getHeight();
+    const int nStride = rBitmap.getStride();
+    if (!pBuffer || nWidth <= 0 || nHeight <= 0 || nStride < nWidth * 4)
+        return true;
+    for (int nY = 0; nY < nHeight; ++nY)
+    {
+        const sal_uInt8* pRow = pBuffer + static_cast<size_t>(nY) * nStride;
+        for (int nX = 0; nX < nWidth; ++nX)
+            if (pRow[4 * nX + 3] != 0)
+                return true;
+    }
+    return false;
+}
+
+/// Is every pixel of a BGRA pdfium bitmap fully opaque?
+bool lcl_AllPixelsOpaque(vcl::pdf::PDFiumBitmap& rBitmap)
+{
+    if (rBitmap.getFormat() != vcl::pdf::PDFBitmapType::BGRA)
+        return false;
+    const ConstScanline pBuffer = rBitmap.getBuffer();
+    const int nWidth = rBitmap.getWidth();
+    const int nHeight = rBitmap.getHeight();
+    const int nStride = rBitmap.getStride();
+    if (!pBuffer || nWidth <= 0 || nHeight <= 0 || nStride < nWidth * 4)
+        return false;
+    for (int nY = 0; nY < nHeight; ++nY)
+    {
+        const sal_uInt8* pRow = pBuffer + static_cast<size_t>(nY) * nStride;
+        for (int nX = 0; nX < nWidth; ++nX)
+            if (pRow[4 * nX + 3] != 0xFF)
+                return false;
+    }
+    return true;
+}
+
+/// JPEG passthrough: the image's own JPEG stream, when that is exactly what
+/// pdfium draws for it, as a Graphic that carries the bytes as its NativeJpg
+/// GfxLink (GraphicFilter::ImportGraphic sets the link for every linkable
+/// format). The PDF export can then write the stream through (see
+/// PDFExtOutDevData::HasAdequateCompression) instead of re-encoding the
+/// decoded pixels on every save: generation loss, and a bigger file. An
+/// empty Graphic means "take the rendered bitmap", as before.
+///
+/// Exactness is proven on the object, not assumed. pdfium's public API
+/// cannot read an image's /SMask, /Mask, /Decode or /DecodeParms, so the
+/// image is rendered once at exactly its own pixel size (an integer matrix:
+/// one device pixel per sample, no edge coverage) with everything pdfium
+/// applies - soft mask, colour key or stencil mask, clip, fill alpha,
+/// /Decode, the colour space. Every pixel must come out opaque (nothing is
+/// masked, clipped or transparent), and the JPEG as vcl decodes it must
+/// match that render within what two JPEG decoders differ by (an inverted
+/// /Decode, a /ColorTransform override, a non-sRGB ICC profile or a
+/// mislabelled colour space change what pdfium shows while the bytes stay
+/// the same).
+Graphic lcl_ImportPassthroughJpeg(vcl::pdf::PDFiumPageObject& rObject, vcl::pdf::PDFiumPage& rPage,
+                                  vcl::pdf::PDFiumDocument& rDoc)
+{
+    // The probe is a 32-bit render of the whole image: 64 MB at most (a
+    // 12 MP photo, a 300 dpi page scan), freed before the next image.
+    constexpr double fProbePixelBudget = 16.0e6;
+    // Mean absolute difference per channel (0-255) between vcl's decode and
+    // pdfium's render: decoder rounding and chroma upsampling stay near 1.
+    constexpr double fMaxMeanDifference = 3.0;
+    // Colour comparison on a grid of at most this many samples a side: every
+    // effect it looks for applies to the whole image.
+    constexpr int nCompareGrid = 256;
+
+    // One filter, DCTDecode ("DCT" is its inline-image abbreviation): the
+    // raw stream is then a JPEG file. A chain (Flate over DCT) is not.
+    const std::vector<OString> aFilters = rObject.getImageFilters();
+    if (aFilters.size() != 1 || (aFilters[0] != "DCTDecode" && aFilters[0] != "DCT"))
+        return Graphic();
+
+    // The export writes a JPEG as DeviceRGB or DeviceGray. An ICC-based
+    // image is let through to the comparison, which rejects any profile
+    // that moves colours; CMYK, Lab, Separation, DeviceN and the rest keep
+    // the rendered bitmap.
+    const vcl::pdf::PDFImageColorSpace eColorSpace = rObject.getImageColorSpace(rPage);
+    if (eColorSpace != vcl::pdf::PDFImageColorSpace::DeviceGray
+        && eColorSpace != vcl::pdf::PDFImageColorSpace::DeviceRGB
+        && eColorSpace != vcl::pdf::PDFImageColorSpace::ICCBased)
+        return Graphic();
+
+    // Upright: the JPEG's first row is the drawn image's top row only when
+    // the matrix neither rotates, shears nor mirrors it (image space puts
+    // the first sample row at the top of the unit square). ImportImage
+    // places the picture in the object's bounds, like the rendered bitmap.
+    const basegfx::B2DHomMatrix aMatrix = rObject.getMatrix();
+    if (!(aMatrix.a() > 0.0 && aMatrix.d() > 0.0 && aMatrix.b() == 0.0 && aMatrix.c() == 0.0))
+        return Graphic();
+
+    const Size aPixels = rObject.getImageSize(rPage);
+    const int nWidth = aPixels.Width();
+    const int nHeight = aPixels.Height();
+    if (nWidth <= 0 || nHeight <= 0
+        || static_cast<double>(nWidth) * static_cast<double>(nHeight) > fProbePixelBudget)
+        return Graphic();
+
+    std::vector<sal_uInt8> aJpeg = rObject.getImageDataRaw();
+    if (aJpeg.size() < 4 || aJpeg[0] != 0xFF || aJpeg[1] != 0xD8)
+        return Graphic();
+    SvMemoryStream aStream(aJpeg.data(), aJpeg.size(), StreamMode::READ);
+    {
+        // One or three components, at the size the PDF gives: a CMYK or
+        // YCCK JPEG never passes through (HasAdequateCompression refuses
+        // four components too, and vcl's CMYK conversion is not pdfium's).
+        GraphicDescriptor aDescriptor(aStream, nullptr);
+        if (!aDescriptor.Detect(true) || aDescriptor.GetFileFormat() != GraphicFileFormat::JPG
+            || (aDescriptor.GetNumberOfImageComponents() != 1
+                && aDescriptor.GetNumberOfImageComponents() != 3)
+            || aDescriptor.GetSizePixel() != aPixels)
+            return Graphic();
+    }
+    aStream.Seek(0);
+    Graphic aGraphic;
+    if (GraphicFilter::GetGraphicFilter().ImportGraphic(aGraphic, u"", aStream) != ERRCODE_NONE
+        || !aGraphic.IsGfxLink() || aGraphic.GetGfxLink().GetType() != GfxLinkType::NativeJpg)
+        return Graphic();
+    const Bitmap aDecoded = aGraphic.GetBitmap();
+    if (aDecoded.GetSizePixel() != aPixels)
+        return Graphic();
+
+    // The probe render, the object's matrix put back after it.
+    rObject.setMatrix(basegfx::B2DHomMatrix::abcdef(nWidth, 0.0, 0.0, nHeight, 0.0, 0.0));
+    std::unique_ptr<vcl::pdf::PDFiumBitmap> pProbe = rObject.getRenderedImage(rDoc, rPage);
+    rObject.setMatrix(aMatrix);
+    if (!pProbe || pProbe->getWidth() != nWidth || pProbe->getHeight() != nHeight
+        || !lcl_AllPixelsOpaque(*pProbe))
+        return Graphic();
+
+    BitmapScopedReadAccess pAccess(aDecoded);
+    if (!pAccess)
+        return Graphic();
+    const ConstScanline pProbeBuffer = pProbe->getBuffer();
+    const int nProbeStride = pProbe->getStride();
+    const int nStepX = std::max(1, nWidth / nCompareGrid);
+    const int nStepY = std::max(1, nHeight / nCompareGrid);
+    double fDifference = 0.0;
+    sal_Int64 nSamples = 0;
+    for (int nY = 0; nY < nHeight; nY += nStepY)
+    {
+        const sal_uInt8* pRow = pProbeBuffer + static_cast<size_t>(nY) * nProbeStride;
+        for (int nX = 0; nX < nWidth; nX += nStepX)
+        {
+            // pdfium's BGRA: blue, green, red, alpha.
+            const sal_uInt8* pPixel = pRow + 4 * nX;
+            const BitmapColor aColor = pAccess->GetColor(nY, nX);
+            fDifference += std::abs(static_cast<int>(aColor.GetRed()) - static_cast<int>(pPixel[2]))
+                           + std::abs(static_cast<int>(aColor.GetGreen()) - static_cast<int>(pPixel[1]))
+                           + std::abs(static_cast<int>(aColor.GetBlue()) - static_cast<int>(pPixel[0]));
+            ++nSamples;
+        }
+    }
+    if (nSamples == 0 || fDifference / (3.0 * nSamples) > fMaxMeanDifference)
+    {
+        SAL_INFO("sd.filter", "PDF image import: JPEG not passed through, its decode differs from "
+                              "pdfium's render by "
+                                  << (nSamples ? fDifference / (3.0 * nSamples) : 0.0));
+        return Graphic();
+    }
+    return aGraphic;
+}
+
+/// The largest image, in samples, imported at its own resolution: a letter
+/// page scanned at 400 dpi. Past it the importer's display budget applies.
+constexpr double fNativePixelBudget = 16.0e6;
+
+/// A fully opaque BGRA pdfium bitmap in the smallest form that holds it
+/// exactly: two colours as a two-entry palette (a bilevel scan: the PDF
+/// export writes it back at 1 bit per pixel), shades of grey as an 8-bit grey
+/// palette, anything else as 24-bit RGB - never as 32-bit with an alpha
+/// channel nobody uses (which the export writes as RGB plus a soft mask).
+/// A bitmap with any transparency comes back as the usual 32-bit bitmap.
+Bitmap lcl_CompactBitmap(vcl::pdf::PDFiumBitmap& rBitmap)
+{
+    if (!lcl_AllPixelsOpaque(rBitmap))
+        return rBitmap.createBitmapFromBuffer();
+    const ConstScanline pBuffer = rBitmap.getBuffer();
+    const int nWidth = rBitmap.getWidth();
+    const int nHeight = rBitmap.getHeight();
+    const int nStride = rBitmap.getStride();
+    // pdfium's BGRA: blue, green, red, alpha.
+    const auto colourAt = [&](int nX, int nY) {
+        const sal_uInt8* pPixel = pBuffer + static_cast<size_t>(nY) * nStride + 4 * nX;
+        return Color(pPixel[2], pPixel[1], pPixel[0]);
+    };
+    std::vector<Color> aColours;
+    bool bGrey = true;
+    for (int nY = 0; nY < nHeight && (aColours.size() <= 2 || bGrey); ++nY)
+        for (int nX = 0; nX < nWidth; ++nX)
+        {
+            const Color aColour = colourAt(nX, nY);
+            if (aColour.GetRed() != aColour.GetGreen() || aColour.GetRed() != aColour.GetBlue())
+                bGrey = false;
+            if (aColours.size() <= 2
+                && std::find(aColours.begin(), aColours.end(), aColour) == aColours.end())
+                aColours.push_back(aColour);
+            if (aColours.size() > 2 && !bGrey)
+                break;
+        }
+    const Size aSize(nWidth, nHeight);
+    if (aColours.size() <= 2)
+    {
+        if (aColours.empty())
+            aColours.push_back(COL_WHITE);
+        if (aColours.size() == 1)
+            aColours.push_back(aColours.front());
+        // darker first: index 0 is the ink of a bilevel scan
+        if (aColours[0].GetLuminance() > aColours[1].GetLuminance())
+            std::swap(aColours[0], aColours[1]);
+        const BitmapPalette aPalette{ BitmapColor(aColours[0]), BitmapColor(aColours[1]) };
+        Bitmap aOut(aSize, vcl::PixelFormat::N8_BPP, &aPalette);
+        {
+            BitmapScopedWriteAccess pWrite(aOut);
+            if (!pWrite)
+                return rBitmap.createBitmapFromBuffer();
+            for (int nY = 0; nY < nHeight; ++nY)
+            {
+                Scanline pLine = pWrite->GetScanline(nY);
+                for (int nX = 0; nX < nWidth; ++nX)
+                    pWrite->SetPixelOnData(
+                        pLine, nX,
+                        BitmapColor(static_cast<sal_uInt8>(colourAt(nX, nY) == aColours[0] ? 0 : 1)));
+            }
+        }
+        return aOut;
+    }
+    if (bGrey)
+    {
+        Bitmap aOut(aSize, vcl::PixelFormat::N8_BPP, &Bitmap::GetGreyPalette(256));
+        {
+            BitmapScopedWriteAccess pWrite(aOut);
+            if (!pWrite)
+                return rBitmap.createBitmapFromBuffer();
+            for (int nY = 0; nY < nHeight; ++nY)
+            {
+                Scanline pLine = pWrite->GetScanline(nY);
+                for (int nX = 0; nX < nWidth; ++nX)
+                    pWrite->SetPixelOnData(pLine, nX, BitmapColor(colourAt(nX, nY).GetRed()));
+            }
+        }
+        return aOut;
+    }
+    Bitmap aOut(aSize, vcl::PixelFormat::N24_BPP);
+    {
+        BitmapScopedWriteAccess pWrite(aOut);
+        if (!pWrite)
+            return rBitmap.createBitmapFromBuffer();
+        for (int nY = 0; nY < nHeight; ++nY)
+        {
+            Scanline pLine = pWrite->GetScanline(nY);
+            for (int nX = 0; nX < nWidth; ++nX)
+                pWrite->SetPixelOnData(pLine, nX, BitmapColor(colourAt(nX, nY)));
+        }
+    }
+    return aOut;
+}
+
+/// A bilevel image (1 bit per pixel: CCITT, JBIG2, a 1-bit Flate stream) at
+/// its own resolution, as a two-entry palette bitmap - never widened to
+/// 32-bit BGRA and never scaled to the display budget, so a fax or a
+/// black-and-white page scan keeps every sample and the PDF export writes it
+/// back losslessly at 1 bit per pixel (a 1-bit Flate stream).
+///
+/// As for the JPEG passthrough, exactness is proven on the object: the image
+/// is rendered once at exactly its own pixel size (an upright matrix, one
+/// device pixel per sample), with everything pdfium applies - /Decode,
+/// BlackIs1, the colour space, masks, clip. Every pixel must come out opaque
+/// and in at most two colours; a stencil mask (transparent where unpainted),
+/// a clipped or a rotated placement keeps the rendered bitmap.
+Graphic lcl_ImportBilevel(vcl::pdf::PDFiumPageObject& rObject, vcl::pdf::PDFiumPage& rPage,
+                          vcl::pdf::PDFiumDocument& rDoc)
+{
+    if (rObject.getImageBitsPerPixel(rPage) != 1)
+        return Graphic();
+    const basegfx::B2DHomMatrix aMatrix = rObject.getMatrix();
+    if (!(aMatrix.a() > 0.0 && aMatrix.d() > 0.0 && aMatrix.b() == 0.0 && aMatrix.c() == 0.0))
+        return Graphic();
+    const Size aPixels = rObject.getImageSize(rPage);
+    const int nWidth = aPixels.Width();
+    const int nHeight = aPixels.Height();
+    if (nWidth <= 0 || nHeight <= 0
+        || static_cast<double>(nWidth) * static_cast<double>(nHeight) > fNativePixelBudget)
+        return Graphic();
+    rObject.setMatrix(basegfx::B2DHomMatrix::abcdef(nWidth, 0.0, 0.0, nHeight, 0.0, 0.0));
+    std::unique_ptr<vcl::pdf::PDFiumBitmap> pProbe = rObject.getRenderedImage(rDoc, rPage);
+    rObject.setMatrix(aMatrix);
+    if (!pProbe || pProbe->getWidth() != nWidth || pProbe->getHeight() != nHeight
+        || !lcl_AllPixelsOpaque(*pProbe))
+        return Graphic();
+    Bitmap aBitmap = lcl_CompactBitmap(*pProbe);
+    if (aBitmap.getPixelFormat() != vcl::PixelFormat::N8_BPP || aBitmap.GetSizePixel() != aPixels)
+        return Graphic();
+    {
+        // two colours, not a grey ramp: the compaction's palette says which
+        BitmapScopedReadAccess pRead(aBitmap);
+        if (!pRead || !pRead->HasPalette() || pRead->GetPaletteEntryCount() != 2)
+            return Graphic();
+    }
+    return Graphic(aBitmap);
+}
+
+/// The innermost /VulcanImg mark's VulcanId, or empty.
+OUString lcl_VulcanImageId(vcl::pdf::PDFiumPageObject& rObject)
+{
+    OUString aId;
+    for (const auto& rMark : rObject.getMarks("VulcanId"_ostr))
+        if (rMark.first == "VulcanImg" && !rMark.second.isEmpty())
+            aId = rMark.second; // pdfium lists outermost first: the last one wins
+    return aId;
+}
+}
+
 void ImpSdrPdfImport::DoObjects(SvdProgressInfo* pProgrInfo, sal_uInt32* pActionsToReport,
                                 int nPageIndex)
 {
@@ -404,6 +827,10 @@ void ImpSdrPdfImport::DoObjects(SvdProgressInfo* pProgrInfo, sal_uInt32* pAction
 
     // Load the page text to extract it when we get text elements.
     auto pTextPage = pPdfPage->getTextPage();
+    maPageChars.clear();
+    maPageNonSpace.clear();
+    mnPageRunCursor = 0;
+    mpPageCharsFor = nullptr; // a new page's glyphs (the text page may reuse an address)
 
     const int nPageObjectCount = pPdfPage->getObjectCount();
     if (pProgrInfo)
@@ -425,6 +852,320 @@ void ImpSdrPdfImport::DoObjects(SvdProgressInfo* pProgrInfo, sal_uInt32* pAction
                 *pActionsToReport = 0;
             }
         }
+    }
+
+    // AcroForm widgets are annotations, not page content, so the object loop
+    // above never sees them: a fillable PDF used to open with its fields simply
+    // gone, and save back without them. Import EVERY widget as the Draw FORM
+    // CONTROL that the PDF export (ExportFormFields, set for drawing PDF saves)
+    // writes back as the same kind of AcroForm field, at the widget rect, with
+    // the field's name, value and flags: text fields, check boxes, radio
+    // buttons (one group per field name), combo and list boxes (options and
+    // selection) and push buttons. A signature field - and a widget pdfium
+    // cannot type - has no form control: its appearance (a signed field's
+    // signature, an unsigned field's box) comes in as a locked picture named
+    // after the field, so the page still shows it; the export writes no /Sig.
+    //
+    // AcroForm field flags (ISO 32000-1, 12.7.3.1 and 12.7.4): bit n is
+    // 1 << (n - 1); annotation flags (12.5.3) the same.
+    constexpr int nFieldReadOnly = 1 << 0;
+    constexpr int nFieldTextMultiLine = 1 << 12;
+    constexpr int nFieldTextPassword = 1 << 13;
+    constexpr int nFieldChoiceMultiSelect = 1 << 21;
+    constexpr int nAnnotHidden = 1 << 1;
+    constexpr int nAnnotNoView = 1 << 5;
+    // A widget appearance rendered as a picture: two pixels per point, within
+    // the same per-image pixel budget ImportImage keeps, and never wider or
+    // taller than the 2^14 pixels pdfium's bitmaps are limited to.
+    constexpr double fWidgetRenderScale = 2.0;
+    constexpr double fWidgetPixelBudget = 4.0e6;
+    constexpr int nWidgetMaxSide = 16384;
+    const auto toPixels = [](double f) {
+        return static_cast<int>(std::clamp(std::round(f), -1.0e9, 1.0e9));
+    };
+    const int nAnnotCount = pPdfPage->getAnnotationCount();
+    for (int nAnnot = 0; nAnnot < nAnnotCount; ++nAnnot)
+    {
+        auto pAnnot = pPdfPage->getAnnotation(nAnnot);
+        if (!pAnnot || pAnnot->getSubType() != vcl::pdf::PDFAnnotationSubType::Widget)
+            continue;
+
+        const basegfx::B2DRectangle aBounds = pAnnot->getRectangle();
+        if (aBounds.isEmpty())
+            continue;
+        const tools::Rectangle aRect = PointsToLogic(aBounds.getMinX(), aBounds.getMaxX(),
+                                                     aBounds.getMaxY(), aBounds.getMinY());
+        const OUString aName = pAnnot->getFormFieldName(mpPdfDocument.get());
+        // A Hidden or NoView widget (a script or calculation helper) is not
+        // imported. The PDF export writes only the form controls it paints,
+        // and it paints no invisible object, so a hidden control would be
+        // dropped from the file on the first save anyway; the canvas must not
+        // show (or report) a field that its save does not keep. Carrying /F
+        // through needs the export side (svx view contact, formpdfexport,
+        // AnyWidget, the PDF writer) to write a hidden widget; until then
+        // this is a known loss of the canvas save.
+        if ((pAnnot->getFlags() & (nAnnotHidden | nAnnotNoView)) != 0)
+        {
+            SAL_INFO("sd.filter", "PDF widget import: '" << aName
+                                      << "' is hidden (/F Hidden or NoView); not imported");
+            continue;
+        }
+
+        SdrObjKind eKind = SdrObjKind::NONE;
+        OUString sService;
+        const vcl::pdf::PDFFormFieldType eType = pAnnot->getFormFieldType(mpPdfDocument.get());
+        switch (eType)
+        {
+            case vcl::pdf::PDFFormFieldType::TextField:
+                eKind = SdrObjKind::FormEdit;
+                sService = u"com.sun.star.form.component.TextField"_ustr;
+                break;
+            case vcl::pdf::PDFFormFieldType::CheckBox:
+                eKind = SdrObjKind::FormCheckbox;
+                sService = u"com.sun.star.form.component.CheckBox"_ustr;
+                break;
+            case vcl::pdf::PDFFormFieldType::RadioButton:
+                eKind = SdrObjKind::FormRadioButton;
+                sService = u"com.sun.star.form.component.RadioButton"_ustr;
+                break;
+            case vcl::pdf::PDFFormFieldType::ComboBox:
+                eKind = SdrObjKind::FormCombobox;
+                sService = u"com.sun.star.form.component.ComboBox"_ustr;
+                break;
+            case vcl::pdf::PDFFormFieldType::ListBox:
+                eKind = SdrObjKind::FormListbox;
+                sService = u"com.sun.star.form.component.ListBox"_ustr;
+                break;
+            case vcl::pdf::PDFFormFieldType::PushButton:
+                eKind = SdrObjKind::FormButton;
+                sService = u"com.sun.star.form.component.CommandButton"_ustr;
+                break;
+            default:
+                break;
+        }
+
+        if (eKind == SdrObjKind::NONE)
+        {
+            // Signature (or untyped) widget: its appearance, as drawn.
+            if (!mpPDFium)
+                continue;
+            // A widget bound to no AcroForm field (pdfium's field type -1):
+            // FPDF_FFLDraw draws only widgets that have a form control, so
+            // there is nothing to picture.
+            if (static_cast<int>(eType) < 0)
+                continue;
+            const double fLongestPt = std::max(aBounds.getWidth(), aBounds.getHeight());
+            if (!std::isfinite(fLongestPt) || fLongestPt <= 0.0)
+                continue;
+            double fScale = fWidgetRenderScale;
+            const double fAreaPt = aBounds.getWidth() * aBounds.getHeight();
+            if (fAreaPt > 0.0 && fAreaPt * fScale * fScale > fWidgetPixelBudget)
+                fScale = std::sqrt(fWidgetPixelBudget / fAreaPt);
+            // Each side too, before any bitmap exists: a degenerate rect
+            // (1e9 x 0.001 pt) keeps within the area budget but asks for a
+            // 2e9-pixel-wide bitmap, which pdfium refuses, and the retry in
+            // PDFiumImpl::createBitmap then overflows its double-to-int
+            // rescale (or, near 5e8, allocates gigabytes).
+            if (fLongestPt * fScale > nWidgetMaxSide)
+                fScale = nWidgetMaxSide / fLongestPt;
+            int nWidth = std::clamp(toPixels(aBounds.getWidth() * fScale), 1, nWidgetMaxSide);
+            int nHeight = std::clamp(toPixels(aBounds.getHeight() * fScale), 1, nWidgetMaxSide);
+            // Where the widget lands on the page rendered at this scale, by
+            // pdfium's own page-to-device mapping - the one FPDF_FFLDraw
+            // draws with, CropBox origin and /Rotate applied. The page is
+            // drawn turned back by its /Rotate, so the picture shows the
+            // widget in the unrotated page space the rest of this import
+            // places objects in (aRect); pdfium's page size is the displayed
+            // one, so a quarter turn swaps it back. A mapping that does not
+            // come out as the widget's upright rect is skipped, not guessed.
+            const int nPageRotation = pPdfPage->getRotation();
+            if (nPageRotation < 0 || nPageRotation > 3)
+                continue;
+            const int nRenderRotate = (4 - nPageRotation) % 4;
+            const bool bQuarterTurn = (nPageRotation % 2) != 0;
+            const int nPageSizeX = toPixels(
+                (bQuarterTurn ? dPageSize.getHeight() : dPageSize.getWidth()) * fScale);
+            const int nPageSizeY = toPixels(
+                (bQuarterTurn ? dPageSize.getWidth() : dPageSize.getHeight()) * fScale);
+            int nLeft = 0;
+            int nTop = 0;
+            int nRight = 0;
+            int nBottom = 0;
+            const auto inDeviceRange = [](int n) { return n > -1000000000 && n < 1000000000; };
+            if (nPageSizeX <= 0 || nPageSizeY <= 0
+                || !pPdfPage->pageToDevice(0, 0, nPageSizeX, nPageSizeY, nRenderRotate,
+                                           aBounds.getMinX(), aBounds.getMaxY(), nLeft, nTop)
+                || !pPdfPage->pageToDevice(0, 0, nPageSizeX, nPageSizeY, nRenderRotate,
+                                           aBounds.getMaxX(), aBounds.getMinY(), nRight, nBottom)
+                || !inDeviceRange(nLeft) || !inDeviceRange(nTop) || !inDeviceRange(nRight)
+                || !inDeviceRange(nBottom) || std::abs((nRight - nLeft) - nWidth) > 2
+                || std::abs((nBottom - nTop) - nHeight) > 2)
+            {
+                SAL_INFO("sd.filter", "PDF widget import: '"
+                                          << aName << "' has no upright page mapping (page /Rotate "
+                                          << nPageRotation << "); its appearance is not imported");
+                continue;
+            }
+            const int nRequestedWidth = nWidth;
+            const int nRequestedHeight = nHeight;
+            std::unique_ptr<vcl::pdf::PDFiumBitmap> pBitmap
+                = mpPDFium->createBitmap(nWidth, nHeight, /*nAlpha=*/1);
+            // A bitmap createBitmap shrank would crop the appearance.
+            if (!pBitmap || nWidth != nRequestedWidth || nHeight != nRequestedHeight)
+                continue;
+            pBitmap->fillRect(0, 0, nWidth, nHeight, 0x00000000);
+            // The page shifted so the widget's top-left is the bitmap's origin.
+            pBitmap->renderFormFields(mpPdfDocument.get(), pPdfPage.get(), -nLeft, -nTop,
+                                      nPageSizeX, nPageSizeY, nRenderRotate);
+            // Nothing drawn (an unsigned signature field with no appearance,
+            // a field pdfium does not draw): no invisible locked picture.
+            if (!lcl_AnyPixelDrawn(*pBitmap))
+                continue;
+            const Bitmap aBitmap = pBitmap->createBitmapFromBuffer();
+            if (aBitmap.IsEmpty())
+                continue;
+            rtl::Reference<SdrGrafObj> pGraf = new SdrGrafObj(*mpModel, Graphic(aBitmap), aRect);
+            pGraf->SetMergedItem(XLineStyleItem(drawing::LineStyle_NONE));
+            pGraf->SetMergedItem(XFillStyleItem(drawing::FillStyle_NONE));
+            if (!aName.isEmpty())
+                pGraf->SetName(aName);
+            pGraf->SetMoveProtect(true);
+            pGraf->SetResizeProtect(true);
+            InsertObj(pGraf.get(), false);
+            continue;
+        }
+
+        // The form object factory (FmFormObj, attaches the model to the page's
+        // forms) when it is registered; else a plain control object with the
+        // same model.
+        rtl::Reference<SdrObject> pObj
+            = SdrObjFactory::MakeNewObject(*mpModel, SdrInventor::FmForm, eKind);
+        SdrUnoObj* pUno = dynamic_cast<SdrUnoObj*>(pObj.get());
+        if (!pUno)
+        {
+            rtl::Reference<SdrUnoObj> pPlain = new SdrUnoObj(*mpModel, sService);
+            pUno = pPlain.get();
+            pObj = pPlain.get();
+        }
+        pUno->SetLogicRect(aRect);
+
+        const OUString aValue = pAnnot->getFormFieldValue(mpPdfDocument.get());
+        const int nFieldFlags = pAnnot->getFormFieldFlags(mpPdfDocument.get());
+        css::uno::Reference<css::beans::XPropertySet> xProps(pUno->GetUnoControlModel(),
+                                                             css::uno::UNO_QUERY);
+        css::uno::Reference<css::beans::XPropertySetInfo> xInfo;
+        if (xProps.is())
+            xInfo = xProps->getPropertySetInfo();
+        // One property at a time, only where the model has it: a check box
+        // model has no Border, a button no Text, and one refusal must not
+        // cost the field its value.
+        const auto setProp = [&xProps, &xInfo](const OUString& rProp, const cpo::uno::Any& rValue) {
+            if (!xInfo.is() || !xInfo->hasPropertyByName(rProp))
+                return;
+            try
+            {
+                xProps->setPropertyValue(rProp, rValue);
+            }
+            catch (const css::uno::Exception&)
+            {
+                SAL_WARN("sd.filter", "PDF widget import: could not set " << rProp);
+            }
+        };
+        if (!aName.isEmpty())
+            setProp(u"Name"_ustr, cpo::uno::Any(aName));
+        // A flat frame only where the widget itself drew a border: a forced
+        // frame put boxes on every field of forms whose fields sit on printed
+        // rules or shaded bands.
+        setProp(u"Border"_ustr,
+                cpo::uno::Any(sal_Int16(pAnnot->getBorderWidth() > 0.0f ? 2 : 0)));
+        if (nFieldFlags & nFieldReadOnly)
+            setProp(u"ReadOnly"_ustr, cpo::uno::Any(true));
+        const OUString aTooltip = pAnnot->getFormFieldAlternateName(mpPdfDocument.get());
+        if (!aTooltip.isEmpty())
+            setProp(u"HelpText"_ustr, cpo::uno::Any(aTooltip));
+        switch (eKind)
+        {
+            case SdrObjKind::FormEdit:
+            {
+                setProp(u"MultiLine"_ustr, cpo::uno::Any((nFieldFlags & nFieldTextMultiLine) != 0));
+                if (nFieldFlags & nFieldTextPassword)
+                    setProp(u"EchoChar"_ustr, cpo::uno::Any(sal_Int16('*')));
+                float fMaxLen = 0.0f;
+                if (pAnnot->getNumberValue("MaxLen"_ostr, fMaxLen) && fMaxLen >= 1.0f
+                    && fMaxLen <= static_cast<float>(SAL_MAX_INT16))
+                    setProp(u"MaxTextLen"_ustr, cpo::uno::Any(static_cast<sal_Int16>(fMaxLen)));
+                setProp(u"Text"_ustr, cpo::uno::Any(aValue));
+                setProp(u"DefaultText"_ustr, cpo::uno::Any(aValue));
+                break;
+            }
+            case SdrObjKind::FormCheckbox:
+            case SdrObjKind::FormRadioButton:
+            {
+                // The radios of one field share its name: GroupName makes them
+                // one group, which the export writes back as one radio field.
+                if (eKind == SdrObjKind::FormRadioButton && !aName.isEmpty())
+                    setProp(u"GroupName"_ustr, cpo::uno::Any(aName));
+                // The widget's own "on" state name is its export value.
+                const OUString aOnValue = pAnnot->getFormFieldExportValue(mpPdfDocument.get());
+                if (!aOnValue.isEmpty())
+                    setProp(u"RefValue"_ustr, cpo::uno::Any(aOnValue));
+                const sal_Int16 nState = pAnnot->isChecked(mpPdfDocument.get()) ? 1 : 0;
+                setProp(u"Label"_ustr, cpo::uno::Any(OUString()));
+                setProp(u"State"_ustr, cpo::uno::Any(nState));
+                setProp(u"DefaultState"_ustr, cpo::uno::Any(nState));
+                break;
+            }
+            case SdrObjKind::FormCombobox:
+            case SdrObjKind::FormListbox:
+            {
+                const int nOptions
+                    = std::clamp(pAnnot->getOptionCount(mpPdfDocument.get()), 0, 10000);
+                std::vector<OUString> aItems;
+                std::vector<sal_Int16> aSelected;
+                for (int nOption = 0; nOption < nOptions; ++nOption)
+                {
+                    aItems.push_back(pAnnot->getOptionLabel(mpPdfDocument.get(), nOption));
+                    if (nOption <= SAL_MAX_INT16
+                        && pAnnot->isOptionSelected(mpPdfDocument.get(), nOption))
+                        aSelected.push_back(static_cast<sal_Int16>(nOption));
+                }
+                // The entries first: a selection is validated against them.
+                setProp(u"StringItemList"_ustr,
+                        cpo::uno::Any(cpo::uno::Sequence<OUString>(
+                            aItems.data(), static_cast<sal_Int32>(aItems.size()))));
+                if (eKind == SdrObjKind::FormCombobox)
+                {
+                    // /V holds an option's EXPORT value where options are
+                    // [export, display] pairs (a "0" behind "Instructions in
+                    // English"): show the selected option's label.
+                    const OUString aShown
+                        = aSelected.size() == 1 && aSelected.front() < nOptions
+                              ? aItems[aSelected.front()]
+                              : aValue;
+                    setProp(u"Dropdown"_ustr, cpo::uno::Any(true));
+                    setProp(u"Text"_ustr, cpo::uno::Any(aShown));
+                    setProp(u"DefaultText"_ustr, cpo::uno::Any(aShown));
+                }
+                else
+                {
+                    const cpo::uno::Sequence<sal_Int16> aSelection(
+                        aSelected.data(), static_cast<sal_Int32>(aSelected.size()));
+                    setProp(u"MultiSelection"_ustr,
+                            cpo::uno::Any((nFieldFlags & nFieldChoiceMultiSelect) != 0));
+                    setProp(u"Dropdown"_ustr, cpo::uno::Any(false));
+                    setProp(u"SelectedItems"_ustr, cpo::uno::Any(aSelection));
+                    setProp(u"DefaultSelection"_ustr, cpo::uno::Any(aSelection));
+                }
+                break;
+            }
+            case SdrObjKind::FormButton:
+                // A button's caption lives in its appearance (/MK /CA), which
+                // pdfium does not expose; the tooltip names it instead.
+                break;
+            default:
+                break;
+        }
+        InsertObj(pObj.get(), false);
     }
 }
 
@@ -795,7 +1536,7 @@ void ImpSdrPdfImport::ImportPdfObject(
             ImportPath(pPageObject, pPage, nPageObjectIndex);
             break;
         case vcl::pdf::PDFPageObjectType::Image:
-            ImportImage(pPageObject, nPageObjectIndex);
+            ImportImage(pPageObject, pPage, nPageObjectIndex);
             break;
         case vcl::pdf::PDFPageObjectType::Shading:
             SAL_WARN("sd.filter", "Got page object SHADING: " << nPageObjectIndex);
@@ -1802,6 +2543,7 @@ void ImpSdrPdfImport::ImportText(std::unique_ptr<vcl::pdf::PDFiumPageObject> con
 
     OUString sFontName;
     FontWeight eFontWeight(WEIGHT_DONTKNOW);
+    bool bNameItalic = false;
     auto xFont = pPageObject->getFont();
     auto itImportedFont
         = xFont ? mxImportedFonts->find(xFont->getFontDictObjNum()) : mxImportedFonts->end();
@@ -1816,6 +2558,18 @@ void ImpSdrPdfImport::ImportText(std::unique_ptr<vcl::pdf::PDFiumPageObject> con
     {
         sFontName = pPageObject->getFontName();
         SAL_WARN("sd.filter", "font: " << sFontName << " wasn't collected");
+        // One of the standard 14 the PDF did not embed (a Type1 Helvetica,
+        // Times or Courier, as ReportLab and many generators write). Name
+        // the run's font for the bundled METRIC-COMPATIBLE family straight
+        // away: left as "Helvetica", the jail's fontconfig (no alias rules)
+        // matched DejaVu Sans, whose glyphs are up to 13% wider, and the
+        // client — drawing Helvetica into those advances — showed gaps
+        // after every wide glyph ("m emos", "com parison"). Liberation Sans,
+        // Serif and Mono carry Helvetica/Arial, Times and Courier widths
+        // exactly, and the client already pairs them with Arial, Times New
+        // Roman and Courier New. Weight and slant ride the name's suffix.
+        if (lcl_StandardFontFamily(sFontName, sFontName, eFontWeight, bNameItalic))
+            SAL_INFO("sd.filter", "standard font mapped to " << sFontName);
     }
 
     const double dFontSize = pPageObject->getFontSize();
@@ -1848,6 +2602,8 @@ void ImpSdrPdfImport::ImportText(std::unique_ptr<vcl::pdf::PDFiumPageObject> con
     }
     aFnt.SetItalic(italicAngle == 0 ? ITALIC_NONE
                                     : (italicAngle < 0 ? ITALIC_NORMAL : ITALIC_OBLIQUE));
+    if (bNameItalic && aFnt.GetItalic() == ITALIC_NONE)
+        aFnt.SetItalic(ITALIC_NORMAL);
     aFnt.SetWeight(eFontWeight);
 
     if (aFnt != mpVD->GetFont())
@@ -1894,12 +2650,410 @@ void ImpSdrPdfImport::ImportText(std::unique_ptr<vcl::pdf::PDFiumPageObject> con
         mbFntDirty = true;
     }
 
-    InsertTextObject(aRect.TopLeft(), aRect.GetSize(), sText, bInvisible);
+    collectPageChars(pTextPage);
+    if (!InsertTextSegments(aRect, sText, bInvisible))
+        InsertTextObject(aRect.TopLeft(), aRect.GetSize(), sText, bInvisible);
+}
+
+namespace
+{
+bool lcl_IsSpace(sal_uInt32 nCode)
+{
+    return nCode == ' ' || nCode == '\t' || nCode == 0xA0 || nCode == '\n' || nCode == '\r';
+}
+
+/// A PDF standard-14 (or Arial) font name, as a base font is written
+/// ("Helvetica-BoldOblique", "Times-Roman", "Courier-Bold", "ABCDEF+Arial,Bold"),
+/// mapped to the bundled family with the same advance widths. Returns false
+/// for any other font, leaving the name alone.
+bool lcl_StandardFontFamily(const OUString& rName, OUString& rFamily, FontWeight& rWeight,
+                            bool& rItalic)
+{
+    OUString aName = rName;
+    const sal_Int32 nPlus = aName.indexOf('+');
+    if (nPlus == 6)
+        aName = aName.copy(7); // subset tag
+    const OUString aLower = aName.toAsciiLowerCase();
+    OUString aFamily;
+    if (aLower.startsWith("helvetica") || aLower.startsWith("arial"))
+        aFamily = u"Liberation Sans"_ustr;
+    else if (aLower.startsWith("times"))
+        aFamily = u"Liberation Serif"_ustr;
+    else if (aLower.startsWith("courier"))
+        aFamily = u"Liberation Mono"_ustr;
+    else
+        return false;
+    if (aLower.indexOf("bold") >= 0 || aLower.indexOf("black") >= 0
+        || aLower.indexOf("heavy") >= 0)
+        rWeight = WEIGHT_BOLD;
+    else if (rWeight == WEIGHT_DONTKNOW)
+        rWeight = WEIGHT_NORMAL;
+    rItalic = aLower.indexOf("italic") >= 0 || aLower.indexOf("oblique") >= 0;
+    rFamily = aFamily;
+    return true;
+}
+}
+
+void ImpSdrPdfImport::collectPageChars(
+    std::unique_ptr<vcl::pdf::PDFiumTextPage> const& pTextPage)
+{
+    if (mpPageCharsFor == pTextPage.get())
+        return;
+    mpPageCharsFor = pTextPage.get();
+    maPageChars.clear();
+    maPageNonSpace.clear();
+    mnPageRunCursor = 0;
+    if (!pTextPage)
+        return;
+    const double fPageHeight = convertPointToMm100(mdPageHeightPts);
+    const int nChars = pTextPage->countChars();
+    if (nChars > 0)
+        maPageChars.reserve(static_cast<size_t>(nChars));
+    for (int i = 0; i < nChars; ++i)
+        maPageChars.push_back({ pTextPage->getUnicode(i), pTextPage->getCharBox(i, fPageHeight) });
+    for (size_t k = 0; k < maPageChars.size(); ++k)
+        if (!lcl_IsSpace(maPageChars[k].nCode) && !maPageChars[k].aBox.isEmpty())
+            maPageNonSpace.push_back(k);
+}
+
+// pdfium hands the importer one text object per text-showing operator, with
+// the object's glyphs in content-stream order and ONE bounding box. A page
+// whose stream draws a line's text and then moves back to the margin for its
+// line number inside the same object arrives as "...a new section.3" placed
+// at the margin; a justified line arrives as one run whose extra word space
+// the importer would spread across every letter. The page's per-glyph boxes
+// know where each glyph is: cut the object where the glyph run jumps back,
+// jumps forward more than a wide space (three quarters of an em) or changes
+// line, and insert one text object per run, each at its own box.
+bool ImpSdrPdfImport::InsertTextSegments(const tools::Rectangle& rObjRect, const OUString& rText,
+                                         bool bInvisible)
+{
+    // Invisible text (render mode 3 — an OCR layer under a scan) is not
+    // something a person can see or edit: as an object it reached the canvas
+    // as white, hit-testable text over the picture. Leave it to the
+    // document's own bytes, which a text-only session keeps.
+    if (bInvisible)
+        return true;
+    if (maPageChars.empty() || rText.isEmpty())
+        return false;
+
+    tools::Long nEm = mpVD->GetFont().GetFontHeight();
+    if (nEm <= 0)
+        nEm = 423; // 12 pt
+    tools::Rectangle aRect(rObjRect);
+    aRect.Normalize();
+    const double fTol = nEm * 0.3;
+    const double fLeft = aRect.Left() - fTol, fRight = aRect.Right() + fTol;
+    const double fTop = aRect.Top() - fTol, fBottom = aRect.Bottom() + fTol;
+    auto inBox = [&](const basegfx::B2DRectangle& rBox) {
+        const double fCx = (rBox.getMinX() + rBox.getMaxX()) / 2.0;
+        const double fCy = (rBox.getMinY() + rBox.getMaxY()) / 2.0;
+        return fCx >= fLeft && fCx <= fRight && fCy >= fTop && fCy <= fBottom;
+    };
+
+    // The object's glyphs are one contiguous run of the page's glyphs in
+    // page order (spaces aside), and pdfium's text page keeps stream order,
+    // so the run is found by content and checked against the object's box.
+    // Another object's glyphs may sit inside that box (a word drawn on its
+    // own beside this one), which is why the box alone cannot pick them.
+    std::vector<sal_uInt32> aWanted;
+    for (sal_Int32 i = 0; i < rText.getLength();)
+    {
+        const sal_uInt32 nCode = rText.iterateCodePoints(&i);
+        if (!lcl_IsSpace(nCode))
+            aWanted.push_back(nCode);
+    }
+    if (aWanted.empty() || aWanted.size() > maPageNonSpace.size())
+        return false;
+    // Search from where the previous object's run ended, not from the top of
+    // the page: objects arrive in stream order and the text page keeps it,
+    // and a Chrome/HTML export draws every glyph as its own object, so the
+    // second "e" of "Three" — 0.05 em from the first, well inside the box
+    // tolerance — otherwise matched the FIRST "e" and was placed on top of
+    // it ("Thr" and a doubled "e"), while "al l" and "0 1" came apart the
+    // same way. The top-of-page search stays as the fallback for a page
+    // whose objects are not in text order.
+    auto findRun = [&](size_t nFrom) -> size_t {
+        for (size_t k = nFrom; k + aWanted.size() <= maPageNonSpace.size(); ++k)
+        {
+            bool bMatch = true;
+            for (size_t m = 0; m < aWanted.size() && bMatch; ++m)
+                bMatch = maPageChars[maPageNonSpace[k + m]].nCode == aWanted[m];
+            if (!bMatch)
+                continue;
+            bool bInside = true;
+            for (size_t m = 0; m < aWanted.size() && bInside; ++m)
+                bInside = inBox(maPageChars[maPageNonSpace[k + m]].aBox);
+            if (bInside)
+                return k;
+        }
+        return maPageNonSpace.size();
+    };
+    size_t nRunStart = findRun(mnPageRunCursor);
+    if (nRunStart >= maPageNonSpace.size() && mnPageRunCursor > 0)
+        nRunStart = findRun(0);
+    if (nRunStart >= maPageNonSpace.size())
+        return false;
+    mnPageRunCursor = nRunStart + aWanted.size();
+    const size_t nFirstChar = maPageNonSpace[nRunStart];
+    size_t nLastChar = maPageNonSpace[nRunStart + aWanted.size() - 1];
+    // The range ends on the last NON-space glyph, so a space the object
+    // draws after its last word — the word gap before the next object on
+    // the line ("ION WELL " then "PERMIT") — was never inside it, and the
+    // joined line read "WELLPERMIT". Take the object's own trailing
+    // spaces into the range; the segment builder emits them as spaces.
+    // A space whose box pdfium measured as (near) zero wide is a kerning
+    // device, not a word gap: a permit form's title draws "INJECT" then a
+    // zero-width space then "ION", and reads INJECTION. A box pdfium left
+    // uninitialised says nothing, and such a space stays a space.
+    auto lcl_IsZeroWidthSpace = [nEm](const PageChar& rChar) {
+        return lcl_IsSpace(rChar.nCode) && !rChar.aBox.isEmpty()
+               && rChar.aBox.getWidth() <= nEm * 0.05;
+    };
+    sal_Int32 nTrailing = 0;
+    for (sal_Int32 i = rText.getLength() - 1; i >= 0 && lcl_IsSpace(rText[i]); --i)
+        ++nTrailing;
+    // The object's text ends in a space ("MPH, " before "Executive
+    // Director"). The text page may offer it as a GENERATED space with a
+    // zero-width box (which the kerning rule below would drop), or not at
+    // all (an empty text object comes first) — but pdfium also ENDS a run's
+    // text with such a space where the next run merely kerns on ("INJECT"
+    // then "ION"). What the glyphs do decides: the run keeps a trailing
+    // space when the next glyph on the line stands a real gap away from its
+    // last one, and none when they touch.
+    // The run's own glyph-to-glyph gap (median): a letter-spaced title
+    // stands its glyphs a point apart everywhere, so a fixed fraction of an
+    // em read its own tracking as a word gap ("INJECT ION" once more). A
+    // gap is a word gap when it clearly exceeds what the run does between
+    // any two of its glyphs.
+    double fRunGap = 0.0;
+    {
+        std::vector<double> aGaps;
+        const PageChar* pPrevGlyph = nullptr;
+        for (size_t k = nFirstChar; k <= nLastChar; ++k)
+        {
+            const PageChar& rChar = maPageChars[k];
+            if (lcl_IsSpace(rChar.nCode) || rChar.aBox.isEmpty())
+                continue;
+            if (pPrevGlyph)
+                aGaps.push_back(rChar.aBox.getMinX() - pPrevGlyph->aBox.getMaxX());
+            pPrevGlyph = &rChar;
+        }
+        if (!aGaps.empty())
+        {
+            std::sort(aGaps.begin(), aGaps.end());
+            fRunGap = std::max(0.0, aGaps[aGaps.size() / 2]);
+        }
+    }
+    // The threshold is per run and does not need a floor: a one-glyph object
+    // (a Chrome/HTML export draws every glyph as its own) only reaches here
+    // when pdfium ended its text with a space, i.e. pdfium already judged a
+    // word gap from the font's advances, and the ink test merely rejects the
+    // zero-width kerning device. A floor of 0.15 em was tried and dropped the
+    // real space after "Three" (an "e" then a hooked "j" leave 0.126 em of
+    // ink gap under tight tracking).
+    auto lcl_IsWordGap = [nEm, fRunGap](double fGap) {
+        return fGap > 2.0 * fRunGap + nEm * 0.05;
+    };
+    bool bOwnTrailingSpace = false;
+    if (nTrailing > 0)
+    {
+        const PageChar& rLast = maPageChars[nLastChar];
+        const PageChar* pNextGlyph = nullptr;
+        for (size_t k = nLastChar + 1; k < maPageChars.size() && !pNextGlyph; ++k)
+            if (!lcl_IsSpace(maPageChars[k].nCode) && !maPageChars[k].aBox.isEmpty())
+                pNextGlyph = &maPageChars[k];
+        if (!pNextGlyph || rLast.aBox.isEmpty())
+            bOwnTrailingSpace = true; // nothing follows on the page: harmless
+        else
+        {
+            const double fLastCy = (rLast.aBox.getMinY() + rLast.aBox.getMaxY()) / 2.0;
+            const double fNextCy = (pNextGlyph->aBox.getMinY() + pNextGlyph->aBox.getMaxY()) / 2.0;
+            const bool bSameLine = std::abs(fNextCy - fLastCy) <= nEm * 0.4;
+            bOwnTrailingSpace
+                = !bSameLine || lcl_IsWordGap(pNextGlyph->aBox.getMinX() - rLast.aBox.getMaxX());
+        }
+    }
+    while (nTrailing > 0 && nLastChar + 1 < maPageChars.size()
+           && lcl_IsSpace(maPageChars[nLastChar + 1].nCode))
+    {
+        ++nLastChar;
+        --nTrailing;
+    }
+    std::vector<const PageChar*> aGlyphs;
+    aGlyphs.reserve(nLastChar - nFirstChar + 1);
+    double fRunTop = 0.0, fRunBottom = 0.0;
+    bool bRunExtent = false;
+    for (size_t k = nFirstChar; k <= nLastChar; ++k)
+    {
+        const PageChar& rChar = maPageChars[k];
+        if (lcl_IsSpace(rChar.nCode) || rChar.aBox.isEmpty())
+        {
+            if (lcl_IsSpace(rChar.nCode))
+                aGlyphs.push_back(&rChar);
+            continue;
+        }
+        aGlyphs.push_back(&rChar);
+        if (!bRunExtent)
+        {
+            fRunTop = rChar.aBox.getMinY();
+            fRunBottom = rChar.aBox.getMaxY();
+            bRunExtent = true;
+        }
+        else
+        {
+            fRunTop = std::min(fRunTop, rChar.aBox.getMinY());
+            fRunBottom = std::max(fRunBottom, rChar.aBox.getMaxY());
+        }
+    }
+    // The importer's placement was calibrated on pdfium's OBJECT box (font
+    // ascent/descent), not on glyph ink: give every run the object box's
+    // vertical extent relative to the glyphs, so a run lands where the
+    // whole object would have.
+    const double fTopDelta = aRect.Top() - fRunTop;
+    const double fBottomDelta = aRect.Bottom() - fRunBottom;
+
+    // Does this object carry real space glyphs? A Chrome/HTML export writes a
+    // space character between words; a justified legal line does not, and
+    // arrives as one run whose word breaks are only positional. The
+    // positional-space recovery below is for the latter and MUST NOT run for
+    // the former: there a wide forward gap is a glyph's own side bearing (an
+    // 'r' before an 'a', an apostrophe before 's'), and inserting a space
+    // there shatters the word ("Montserr at", "Sheriff 's").
+    bool bHasRealSpaces = false;
+    for (const PageChar* pChar : aGlyphs)
+        if (lcl_IsSpace(pChar->nCode))
+        {
+            bHasRealSpaces = true;
+            break;
+        }
+
+    // Cut into runs.
+    struct Segment
+    {
+        OUStringBuffer aText;
+        basegfx::B2DRectangle aBox;
+        const PageChar* pLast = nullptr;
+    };
+    std::vector<Segment> aSegments;
+    for (size_t nGlyph = 0; nGlyph < aGlyphs.size(); ++nGlyph)
+    {
+        const PageChar* pChar = aGlyphs[nGlyph];
+        if (lcl_IsSpace(pChar->nCode))
+        {
+            if (aSegments.empty() || aSegments.back().aText.isEmpty())
+                continue;
+            bool bWordGap = !lcl_IsZeroWidthSpace(*pChar);
+            if (!bWordGap)
+            {
+                // A zero-width space is a kerning device ("INJECT" + "ION")
+                // only when the glyphs around it touch. pdfium also marks a
+                // real word gap with a generated, zero-width space ("MPH,"
+                // then "Executive" 0.35 em on): the neighbours' distance
+                // tells the two apart.
+                const PageChar* pPrev = aSegments.back().pLast;
+                const PageChar* pNext = nullptr;
+                for (size_t k = nGlyph + 1; k < aGlyphs.size() && !pNext; ++k)
+                    if (!lcl_IsSpace(aGlyphs[k]->nCode) && !aGlyphs[k]->aBox.isEmpty())
+                        pNext = aGlyphs[k];
+                if (pPrev && pNext)
+                    bWordGap = lcl_IsWordGap(pNext->aBox.getMinX() - pPrev->aBox.getMaxX());
+            }
+            if (bWordGap)
+                aSegments.back().aText.append(' ');
+            continue;
+        }
+        // A new OBJECT only where the text jumps BACK (a run drawn to the
+        // left of where the previous ended — a line number returned to the
+        // margin, a second column) or drops to a NEW LINE. A wide FORWARD
+        // gap on the same line is a word space, not a new object: keep it in
+        // the run and insert a space, so "AN ACT Relating to designating"
+        // stays one object with its spaces instead of splitting into
+        // "Relating" / "to" and losing them.
+        bool bNewRun = aSegments.empty();
+        const PageChar* pPrev = aSegments.empty() ? nullptr : aSegments.back().pLast;
+        if (pPrev)
+        {
+            const double fPrevCy = (pPrev->aBox.getMinY() + pPrev->aBox.getMaxY()) / 2.0;
+            const double fCy = (pChar->aBox.getMinY() + pChar->aBox.getMaxY()) / 2.0;
+            if (pChar->aBox.getMinX() < pPrev->aBox.getMinX() - nEm * 0.25
+                || std::abs(fCy - fPrevCy) > nEm * 0.4)
+                bNewRun = true;
+        }
+        if (bNewRun)
+            aSegments.emplace_back();
+        Segment& rSeg = aSegments.back();
+        if (!bNewRun && !bHasRealSpaces && rSeg.pLast && !rSeg.aText.isEmpty())
+        {
+            // Word separated by position rather than a space glyph — only when
+            // the object has no real spaces (see bHasRealSpaces above), so a
+            // side-bearing gap inside a word is never mistaken for a space.
+            const double fGap = pChar->aBox.getMinX() - rSeg.pLast->aBox.getMaxX();
+            const sal_Int32 nLen = rSeg.aText.getLength();
+            if (fGap > nEm * 0.2 && rSeg.aText[nLen - 1] != ' ')
+                rSeg.aText.append(' ');
+        }
+        rSeg.aText.appendUtf32(pChar->nCode);
+        rSeg.aBox.expand(pChar->aBox);
+        rSeg.pLast = pChar;
+    }
+    if (aSegments.empty())
+        return false; // no glyphs matched: let the caller insert the object
+    if (bOwnTrailingSpace && !aSegments.back().aText.isEmpty()
+        && aSegments.back().aText[aSegments.back().aText.getLength() - 1] != ' ')
+        aSegments.back().aText.append(' ');
+
+    for (Segment& rSeg : aSegments)
+    {
+        // Text source. A split object rebuilds each run's text from its
+        // glyphs. A single run does too WHEN the object carries real space
+        // glyphs: pdfium's getText (rText) inserts a space at any wide
+        // positioning gap, which for a Chrome/HTML export is a glyph's own
+        // side bearing — an 'r' before an 'a', an 'f' before an apostrophe —
+        // so a word shatters mid-way ("Montserr at", "Sheriff 's"); the
+        // glyph-built text carries only the real spaces (fGap recovery is off
+        // once real spaces are present). A single run with NO space glyphs is
+        // a positional/justified line where only pdfium's getText knows where
+        // the words break, so trust rText there.
+        OUString aRaw = (aSegments.size() == 1 && !bHasRealSpaces)
+                            ? rText
+                            : rSeg.aText.makeStringAndClear();
+        // Trim leading whitespace and trailing tabs/newlines, but KEEP a
+        // trailing space. A Chrome/HTML export draws each glyph as its own text
+        // object and marks a word break with a trailing space on the word's
+        // last glyph ("s ", "e ", "t "); a plain trim() drops it, and the
+        // structuring pass then has to reconstruct word spaces from glyph gaps
+        // — which turns a side bearing into a space mid-word ("Sheriff 's").
+        // Keeping it lets the pass see the real spaces and skip that recovery.
+        sal_Int32 nTrimB = 0, nTrimE = aRaw.getLength();
+        while (nTrimB < nTrimE
+               && (aRaw[nTrimB] == ' ' || aRaw[nTrimB] == '\t'
+                   || aRaw[nTrimB] == '\n' || aRaw[nTrimB] == '\r'))
+            ++nTrimB;
+        while (nTrimE > nTrimB
+               && (aRaw[nTrimE - 1] == '\t' || aRaw[nTrimE - 1] == '\n'
+                   || aRaw[nTrimE - 1] == '\r'))
+            --nTrimE;
+        OUString aText = aRaw.copy(nTrimB, nTrimE - nTrimB);
+        if (aText.isEmpty() || rSeg.aBox.isEmpty())
+            continue;
+        // InsertTextObject takes the box as the importer's PointsToLogic
+        // hands it: the position is the visual bottom-left, the height
+        // negative (see ImportText).
+        const tools::Long nL = basegfx::fround(rSeg.aBox.getMinX());
+        const tools::Long nR = basegfx::fround(rSeg.aBox.getMaxX());
+        const tools::Long nT = basegfx::fround(rSeg.aBox.getMinY() + fTopDelta);
+        const tools::Long nB = basegfx::fround(rSeg.aBox.getMaxY() + fBottomDelta);
+        InsertTextObject(Point(nL, nB), Size(nR - nL, nT - nB), aText, bInvisible);
+    }
+    return true;
 }
 
 void ImpSdrPdfImport::InsertTextObject(const Point& rPos, const Size& rSize, const OUString& rStr,
                                        bool bInvisible)
 {
+    if (bInvisible)
+        return; // see InsertTextSegments
     FontMetric aFontMetric(mpVD->GetFontMetric());
     vcl::Font aFont(mpVD->GetFont());
     assert(aFont.GetAlignment() == ALIGN_BASELINE);
@@ -1939,15 +3093,56 @@ void ImpSdrPdfImport::InsertTextObject(const Point& rPos, const Size& rSize, con
     const sal_Int32 nChars = rStr.getLength();
     if (nChars > 1 && nVclInkedWidth > 0 && nPdfInkedWidth > 0)
     {
-        const tools::Long nKern = (nPdfInkedWidth - nVclInkedWidth) / (nChars - 1);
-        nExtraKerning = static_cast<short>(std::clamp<tools::Long>(nKern, 0, SAL_MAX_INT16));
+        // Round the per-character kern, never truncate. The kern is ONE
+        // integer 1/100 mm value applied to every character of the run, so a
+        // dropped fraction is paid once per character and walks the run off
+        // the end of the line it came from: a 114-character body line
+        // finished 3.2 pt short of where the PDF drew it. Rounding centres
+        // that error instead of accumulating it.
+        const double fKern = static_cast<double>(nPdfInkedWidth - nVclInkedWidth)
+                             / static_cast<double>(nChars - 1);
+        // The two directions need different bounds because they mean
+        // different things. LETTERSPACING is a design device and it is not
+        // small: the eyebrows, rules and footers of this corpus are drawn
+        // with 0.9 pt of character spacing on a 6.9 pt face — 0.13 em — and
+        // clamping the correction at zero left every one of those lines
+        // wider than the PDF drew it. Allow a quarter of an em. TIGHTENING,
+        // on the other hand, is rare and small, and a large negative
+        // correction almost always means the string and the box are not
+        // measuring the same run; cap it at a twentieth of an em AND at a
+        // tenth of the run, so a mismatch can never walk a line off its page
+        // position.
+        const double fEm = static_cast<double>(aFont.GetFontHeight());
+        const double fCeil = fEm * 0.25;
+        const double fFloor = std::max(-fEm / 20.0, -static_cast<double>(nPdfInkedWidth) / 10.0
+                                                        / static_cast<double>(nChars - 1));
+        // The kern is stored in a short: a quarter em of a font taller than
+        // ~3700 pt exceeds it, and the cast would wrap to a large negative
+        // kern. Clamp the bounds into the short's range first (and keep
+        // floor <= ceil, which std::clamp requires).
+        const tools::Long nCeil = std::clamp<tools::Long>(basegfx::fround<tools::Long>(fCeil),
+                                                          SAL_MIN_INT16, SAL_MAX_INT16);
+        const tools::Long nFloor = std::clamp<tools::Long>(basegfx::fround<tools::Long>(fFloor),
+                                                           SAL_MIN_INT16, nCeil);
+        nExtraKerning = static_cast<short>(
+            std::clamp<tools::Long>(basegfx::fround<tools::Long>(fKern), nFloor, nCeil));
     }
 
     // As per ImpEditEngine::CalcParaWidth the width of the text box has to be 1 unit wider than the text
     const tools::Long nTextWidth
-        = nVclTextWidth + static_cast<tools::Long>(nExtraKerning) * (nChars - 1) + 1;
-    // We work with font independent metrics, so use fontSize * 1.2 for line height.
-    auto nLineHeight = basegfx::fround<tools::Long>(aFont.GetFontHeight() * 1.2);
+        = std::max<tools::Long>(
+            1, nVclTextWidth + static_cast<tools::Long>(nExtraKerning) * (nChars - 1) + 1);
+    // The frame's height decides where the FIRST BASELINE lands: with zero
+    // text distances the layout puts it at frame top + ascent, and the frame
+    // bottom sits at baseline + descent (nYDiff above). A fixed 1.2 x size
+    // only lands the baseline where the PDF had it for fonts whose
+    // ascent + descent happens to be 1.2 em (Public Sans); Spectral's is
+    // ~1.46 em, so every Spectral run came back 0.26 em LOWER than the
+    // original (+7pt on a 27pt headline). Use the resolved font's own
+    // ascent + descent — the same metrics the layout will use.
+    tools::Long nLineHeight = aFontMetric.GetAscent() + aFontMetric.GetDescent();
+    if (nLineHeight <= 0)
+        nLineHeight = basegfx::fround<tools::Long>(aFont.GetFontHeight() * 1.2);
     Size aSize(nTextWidth, -nLineHeight);
 
     Point aSdrPos(basegfx::fround<tools::Long>(aPos.X() * mfScaleX + maOfs.X()),
@@ -1964,6 +3159,14 @@ void ImpSdrPdfImport::InsertTextObject(const Point& rPos, const Size& rSize, con
     pText->SetMergedItem(makeSdrTextLeftDistItem(0));
 
     pText->SetMergedItem(makeSdrTextAutoGrowHeightItem(false));
+    // The box is the run's own glyph extent and stays that way: never grow
+    // the width and never wrap. Growing measured with the fallback font,
+    // which is wider than the PDF's own, and inflated the box past the run's
+    // real width — so same-line runs looked like they overlapped and
+    // paragraph grouping fragmented. Word wrap off keeps the run on one line.
+    pText->SetMergedItem(SdrTextHorzAdjustItem(SDRTEXTHORZADJUST_LEFT));
+    pText->SetMergedItem(makeSdrTextAutoGrowWidthItem(false));
+    pText->SetMergedItem(makeSdrTextWordWrapItem(false));
 
     // We want font independent line spacing for PDF
     pText->SetMergedItem(SdrTextFixedCellHeightItem(true));
@@ -2041,20 +3244,141 @@ ImpSdrPdfImport::GetClip(const std::unique_ptr<vcl::pdf::PDFiumClipPath>& pClipP
 }
 
 void ImpSdrPdfImport::ImportImage(std::unique_ptr<vcl::pdf::PDFiumPageObject> const& pPageObject,
+                                  std::unique_ptr<vcl::pdf::PDFiumPage> const& pPage,
                                   int /*nPageObjectIndex*/)
 {
-    std::unique_ptr<vcl::pdf::PDFiumBitmap> bitmap = pPageObject->getImageBitmap();
-    if (!bitmap)
+    // The image AS DRAWN, not its bare samples: a logo is a JPEG with a
+    // soft mask, and the bare samples put it on a black field (the mask is
+    // what cut it out). pdfium renders the object with mask, colour key and
+    // decode applied, sized by its matrix in page points — so the matrix is
+    // scaled up to the source's own pixel size for the render and put back,
+    // or a 630 px logo would come back at its 151 pt width. Falls back to
+    // the bare samples when the render is refused.
+    //
+    // Except an image whose own JPEG stream is exactly what pdfium draws:
+    // that comes in as the JPEG itself (a NativeJpg GfxLink), so a save
+    // writes it through instead of re-encoding it (lcl_ImportPassthroughJpeg).
+    //
+    // Every image object carries where it came from (svx::vulcan::
+    // ImageProvenance): its own pixel size, and inside a processed PDF (P0)
+    // the innermost /VulcanImg mark's VulcanId with the raw stream's sha256.
+    // The page model builder keeps a scan by that reference (keep-by-mark).
+    // The raw stream is read and hashed only for a marked image.
+    auto pProvenance = std::make_unique<svx::vulcan::ImageProvenance>();
+    if (pPage)
+        pProvenance->maPixels = pPageObject->getImageSize(*pPage);
+    pProvenance->maId = lcl_VulcanImageId(*pPageObject);
+    if (!pProvenance->maId.isEmpty())
     {
-        SAL_WARN("sd.filter", "Failed to get IMAGE");
-        return;
+        const std::vector<sal_uInt8> aRaw = pPageObject->getImageDataRaw();
+        if (!aRaw.empty())
+        {
+            const std::string aHex = comphelper::hashToString(comphelper::Hash::calculateHash(
+                aRaw.data(), aRaw.size(), comphelper::HashType::SHA256));
+            pProvenance->maSha256 = OString(aHex.c_str(), static_cast<sal_Int32>(aHex.size()));
+        }
     }
 
-    const vcl::pdf::PDFBitmapType format = bitmap->getFormat();
-    if (format == vcl::pdf::PDFBitmapType::Unknown)
+    Graphic aGraphic;
+    if (pPage && mpPdfDocument)
+        aGraphic = lcl_ImportPassthroughJpeg(*pPageObject, *pPage, *mpPdfDocument);
+    // A bilevel image comes in bilevel, at its own resolution.
+    if (aGraphic.GetType() == GraphicType::NONE && pPage && mpPdfDocument)
+        aGraphic = lcl_ImportBilevel(*pPageObject, *pPage, *mpPdfDocument);
+    std::unique_ptr<vcl::pdf::PDFiumBitmap> bitmap;
+    bool bNative = false;
+    if (aGraphic.GetType() == GraphicType::NONE && pPage && mpPdfDocument)
     {
-        SAL_WARN("sd.filter", "Failed to get IMAGE format");
-        return;
+        const basegfx::B2DHomMatrix aImageMatrix = pPageObject->getMatrix();
+        const Size aPixels = pPageObject->getImageSize(*pPage);
+        const double fWidthPt = std::hypot(aImageMatrix.a(), aImageMatrix.b());
+        const double fHeightPt = std::hypot(aImageMatrix.c(), aImageMatrix.d());
+        // A page scan is held at its own resolution (within
+        // fNativePixelBudget), not at the display budget below: the cover
+        // under an edited line is a real edit of these pixels, and the save
+        // writes them - at the display budget an edited 300 dpi page would
+        // lose resolution for good. A page scan is an image a processed PDF
+        // marked, or a grey or palette image drawn over half the page or
+        // more (a scan the canvas saved before: the export writes an edited
+        // grey scan as 8-bit Indexed, and carries no marks). Unmarked colour
+        // pictures keep the display budget: a brochure's full-page photos,
+        // held natively on every decomposed page, would multiply the kit's
+        // memory.
+        const double fPageArea = pPage->getWidth() * pPage->getHeight();
+        const vcl::pdf::PDFImageColorSpace eColorSpace = pPageObject->getImageColorSpace(*pPage);
+        const bool bGreyOrPalette = eColorSpace == vcl::pdf::PDFImageColorSpace::DeviceGray
+                                    || eColorSpace == vcl::pdf::PDFImageColorSpace::CalGray
+                                    || eColorSpace == vcl::pdf::PDFImageColorSpace::Indexed;
+        bNative = !pProvenance->maId.isEmpty()
+                  || (bGreyOrPalette && fPageArea > 0.0
+                      && fWidthPt * fHeightPt >= 0.5 * fPageArea);
+        // The render's pixels per point: the source's own resolution, but
+        // never more than this (a tiny image drawn large must not explode).
+        // Held natively, the finer axis decides, so a 204 x 98 dpi fax keeps
+        // its 204 dpi across.
+        constexpr double fMaxRenderScale = 8.0;
+        double fScale = 1.0;
+        if (fWidthPt > 0.0 && fHeightPt > 0.0 && aPixels.Width() > 0 && aPixels.Height() > 0)
+        {
+            const double fX = aPixels.Width() / fWidthPt;
+            const double fY = aPixels.Height() / fHeightPt;
+            fScale = std::clamp(bNative ? std::max(fX, fY) : std::min(fX, fY), 1.0,
+                                fMaxRenderScale);
+        }
+        // A pixel budget per rendered image: the render is a 32-bit bitmap
+        // held for every page at once, and a full-page scan rendered at its
+        // own 300 dpi is 34 MB. Four megapixels keeps a letter page sharp at
+        // roughly 2x its point size and bounds the document's memory.
+        // The budget bounds the render in BOTH directions: pdfium sizes the
+        // bitmap by the object's MATRIX, not by the file's samples, so an
+        // image drawn at 30000 x 30000 pt would be a 3.6 GB render even at
+        // 1x - the budget scales the matrix below 1x for it.
+        const double fPixelBudget = bNative ? fNativePixelBudget : 4.0e6;
+        const double fDrawnPixels = fWidthPt * fHeightPt;
+        bool bRender = std::isfinite(fDrawnPixels) && fDrawnPixels > 0.0;
+        if (bRender && fDrawnPixels * fScale * fScale > fPixelBudget)
+            fScale = std::sqrt(fPixelBudget / fDrawnPixels);
+        // Scaled under a pixel on either side the render holds nothing: take
+        // the file's own samples below instead.
+        if (bRender && (fWidthPt * fScale < 1.0 || fHeightPt * fScale < 1.0))
+            bRender = false;
+        if (bRender)
+        {
+            const bool bRescale = std::abs(fScale - 1.0) > 0.01;
+            if (bRescale)
+            {
+                basegfx::B2DHomMatrix aScaled(aImageMatrix);
+                aScaled.scale(fScale, fScale);
+                pPageObject->setMatrix(aScaled);
+            }
+            bitmap = pPageObject->getRenderedImage(*mpPdfDocument, *pPage);
+            if (bRescale)
+                pPageObject->setMatrix(aImageMatrix);
+        }
+    }
+    if (aGraphic.GetType() == GraphicType::NONE)
+    {
+        if (!bitmap)
+            bitmap = pPageObject->getImageBitmap();
+        if (!bitmap)
+        {
+            SAL_WARN("sd.filter", "Failed to get IMAGE");
+            return;
+        }
+
+        const vcl::pdf::PDFBitmapType format = bitmap->getFormat();
+        if (format == vcl::pdf::PDFBitmapType::Unknown)
+        {
+            SAL_WARN("sd.filter", "Failed to get IMAGE format");
+            return;
+        }
+        // A page scan held natively is also held compactly: a grey scan as
+        // 8-bit grey, not 32-bit BGRA (the export would write that as RGB
+        // plus a soft mask).
+        if (bNative && format == vcl::pdf::PDFBitmapType::BGRA)
+            aGraphic = Graphic(lcl_CompactBitmap(*bitmap));
+        else
+            aGraphic = Graphic(bitmap->createBitmapFromBuffer());
     }
 
     basegfx::B2DRectangle aBounds = pPageObject->getBounds();
@@ -2096,8 +3420,7 @@ void ImpSdrPdfImport::ImportImage(std::unique_ptr<vcl::pdf::PDFiumPageObject> co
     aRect.AdjustRight(1);
     aRect.AdjustBottom(1);
 
-    Bitmap aBitmap = bitmap->createBitmapFromBuffer();
-    rtl::Reference<SdrGrafObj> pGraf = new SdrGrafObj(*mpModel, Graphic(aBitmap), aRect);
+    rtl::Reference<SdrGrafObj> pGraf = new SdrGrafObj(*mpModel, aGraphic, aRect);
 
     // This action is not creating line and fill, set directly, do not use SetAttributes(..)
     pGraf->SetMergedItem(XLineStyleItem(drawing::LineStyle_NONE));
@@ -2105,6 +3428,8 @@ void ImpSdrPdfImport::ImportImage(std::unique_ptr<vcl::pdf::PDFiumPageObject> co
 
     if (bEntirelyClippedOut)
         pGraf->SetVisible(false);
+
+    pGraf->AppendUserData(std::move(pProvenance));
 
     InsertObj(pGraf.get());
 }
@@ -2270,6 +3595,171 @@ tools::Rectangle ImpSdrPdfImport::PointsToLogic(double left, double right, doubl
     Size aSize(convertPointToMm100(right - left), convertPointToMm100(bottom - top));
 
     return tools::Rectangle(aPos, aSize);
+}
+
+
+// ── The page's text as pdfium reads it (svx/svdpdfrawtext.hxx) ─────────────
+namespace svx::pdf
+{
+namespace
+{
+struct RawChar
+{
+    sal_uInt32 nUnicode;
+    double fLeft, fRight, fBottom, fTop; // loose box, pt, y up; all 0 for a generated space
+    double fOx, fOy; // origin
+};
+
+void lcl_ReadTextObject(vcl::pdf::PDFiumPageObject& rObject, const basegfx::B2DHomMatrix& rCtm,
+                        const std::map<void*, std::vector<RawChar>>& rChars,
+                        const ImportedFontMap* pFonts, double fPageHeight,
+                        std::vector<RawTextRun>& rOut)
+{
+    const auto eType = rObject.getType();
+    if (eType == vcl::pdf::PDFPageObjectType::Form)
+    {
+        const basegfx::B2DHomMatrix aMatrix = rCtm * rObject.getMatrix();
+        const int nCount = rObject.getFormObjectCount();
+        for (int i = 0; i < nCount; ++i)
+        {
+            auto pChild = rObject.getFormObject(i);
+            if (pChild)
+                lcl_ReadTextObject(*pChild, aMatrix, rChars, pFonts, fPageHeight, rOut);
+        }
+        return;
+    }
+    if (eType != vcl::pdf::PDFPageObjectType::Text)
+        return;
+    // Invisible text (render mode 3 — an OCR layer under a scan) draws
+    // nothing, so it is not a run of the page. The importer skips it the
+    // same way (ImportText's bInvisible).
+    if (rObject.getTextRenderMode() == vcl::pdf::PDFTextRenderMode::Invisible)
+        return;
+    auto it = rChars.find(rObject.getPointer());
+    if (it == rChars.end())
+        return;
+    OUStringBuffer aText;
+    double fLeft = std::numeric_limits<double>::max();
+    double fRight = std::numeric_limits<double>::lowest();
+    double fLoose = 0.0, fOy = 0.0;
+    bool bReal = false;
+    for (const RawChar& rChar : it->second)
+    {
+        aText.appendUtf32(rChar.nUnicode);
+        if (rChar.fRight <= rChar.fLeft)
+            continue; // a generated space
+        if (!bReal)
+            fOy = rChar.fOy;
+        bReal = true;
+        fLeft = std::min(fLeft, rChar.fLeft);
+        fRight = std::max(fRight, rChar.fRight);
+        fLoose = std::max(fLoose, rChar.fTop - rChar.fBottom);
+    }
+    if (!bReal || aText.isEmpty())
+        return;
+    const basegfx::B2DHomMatrix aMatrix = rCtm * rObject.getMatrix();
+    RawTextRun aRun;
+    aRun.sText = aText.makeStringAndClear();
+    aRun.fX = fLeft;
+    aRun.fRight = fRight;
+    aRun.fBaseline = fPageHeight - fOy;
+    // the size from the object and its matrix; a glyph nested in a scaled
+    // form can carry the form's scale twice, so the loose box (ascent +
+    // descent, about 1.2 em) is the check
+    aRun.fSize = std::abs(rObject.getFontSize() * std::hypot(aMatrix.b(), aMatrix.d()));
+    if (fLoose > 0.0 && (aRun.fSize > 1.6 * fLoose || aRun.fSize < 0.5 * fLoose / 1.4))
+        aRun.fSize = fLoose / 1.2;
+    if (aRun.fSize <= 0.0)
+        aRun.fSize = 1.0;
+    aRun.fAngle = -basegfx::rad2deg(std::atan2(aMatrix.b(), aMatrix.a()));
+    // the face as the importer names it
+    OUString sFamily;
+    FontWeight eWeight = WEIGHT_DONTKNOW;
+    bool bNameItalic = false;
+    auto xFont = rObject.getFont();
+    if (pFonts && xFont)
+    {
+        auto itFont = pFonts->find(xFont->getFontDictObjNum());
+        if (itFont != pFonts->end())
+        {
+            sFamily = itFont->sFontName;
+            eWeight = itFont->eFontWeight;
+        }
+    }
+    if (sFamily.isEmpty())
+    {
+        sFamily = rObject.getFontName();
+        lcl_StandardFontFamily(sFamily, sFamily, eWeight, bNameItalic);
+    }
+    aRun.sFamily = sFamily;
+    aRun.eWeight = eWeight == WEIGHT_DONTKNOW ? WEIGHT_NORMAL : eWeight;
+    aRun.bItalic = bNameItalic || rObject.getFontAngle() != 0;
+    Color aColor = rObject.getFillColor();
+    if (aColor == COL_TRANSPARENT)
+        aColor = rObject.getStrokeColor();
+    aRun.aColor = aColor == COL_TRANSPARENT ? COL_BLACK : aColor.GetRGBColor();
+    rOut.push_back(std::move(aRun));
+}
+}
+
+std::vector<RawTextRun> ReadPdfPageRawText(const Graphic& rGraphic, const ImportedFontMap* pFonts)
+{
+    std::vector<RawTextRun> aOut;
+    auto const& pVectorGraphicData = rGraphic.getVectorGraphicData();
+    if (!pVectorGraphicData || pVectorGraphicData->getType() != VectorGraphicDataType::Pdf)
+        return aOut;
+    auto pPdfium = vcl::pdf::PDFiumLibrary::get();
+    if (!pPdfium)
+        return aOut;
+    const auto* pData = pVectorGraphicData->getBinaryDataContainer().getData();
+    const sal_Int32 nSize = pVectorGraphicData->getBinaryDataContainer().getSize();
+    auto pDocument = pPdfium->openDocument(pData, nSize, OString());
+    if (!pDocument)
+        return aOut;
+    const int nPageIndex = rGraphic.getPageNumber();
+    if (nPageIndex < 0 || nPageIndex >= pDocument->getPageCount())
+        return aOut;
+    auto pPage = pDocument->openPage(nPageIndex);
+    if (!pPage)
+        return aOut;
+    auto pTextPage = pPage->getTextPage();
+    if (!pTextPage)
+        return aOut;
+    const double fPageHeight = pPage->getHeight();
+    // chars by the object that drew them, in reading order
+    std::map<void*, std::vector<RawChar>> aChars;
+    void* pPrev = nullptr;
+    const int nChars = pTextPage->countChars();
+    for (int i = 0; i < nChars; ++i)
+    {
+        void* pObject = pTextPage->getTextObjectPointer(i);
+        const sal_uInt32 nUnicode = pTextPage->getUnicode(i);
+        if (!pObject)
+        {
+            // a space pdfium generated from a gap: a trailing space on the
+            // glyph before it, the way the importer reads it
+            if (pPrev && (nUnicode == 32 || nUnicode == 160))
+                aChars[pPrev].push_back({ 32, 0, 0, 0, 0, 0, 0 });
+            continue;
+        }
+        if (nUnicode == 0 || nUnicode == 13 || nUnicode == 10)
+            continue;
+        pPrev = pObject;
+        RawChar aChar{ nUnicode, 0, 0, 0, 0, 0, 0 };
+        if (!pTextPage->getLooseCharBox(i, aChar.fLeft, aChar.fRight, aChar.fBottom, aChar.fTop))
+            aChar.fLeft = aChar.fRight = aChar.fBottom = aChar.fTop = 0.0;
+        pTextPage->getCharOrigin(i, aChar.fOx, aChar.fOy);
+        aChars[pObject].push_back(aChar);
+    }
+    const int nObjects = pPage->getObjectCount();
+    for (int i = 0; i < nObjects; ++i)
+    {
+        auto pObject = pPage->getObject(i);
+        if (pObject)
+            lcl_ReadTextObject(*pObject, basegfx::B2DHomMatrix(), aChars, pFonts, fPageHeight, aOut);
+    }
+    return aOut;
+}
 }
 
 /* vim:set shiftwidth=4 softtabstop=4 expandtab: */

@@ -884,6 +884,10 @@ private:
     bool m_bOpenedSectPr;
     /// Did we have a section break in this paragraph? Set by StartSection(), reset by the next StartParagraph().
     bool m_bHadSectPr;
+    /// Does the section being written have a body paragraph whose lines are counted? Set by
+    /// StartParagraph(), read and reset by SectionLineNumbering(): Word numbers the lines of a
+    /// section only when its sectPr has lnNumType, Writer the lines of the whole document.
+    bool m_bSectionHasCountedLines = false;
     /// Flag indicating that the paragraph properties are being written
     bool m_bOpenedParaPr;
 

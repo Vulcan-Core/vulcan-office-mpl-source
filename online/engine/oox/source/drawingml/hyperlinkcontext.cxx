@@ -25,6 +25,7 @@
 #include <oox/helper/propertymap.hxx>
 #include <oox/core/relations.hxx>
 #include <oox/core/xmlfilterbase.hxx>
+#include <oox/ppt/pptimport.hxx>
 #include <oox/token/namespaces.hxx>
 #include <oox/token/properties.hxx>
 #include <oox/token/tokens.hxx>
@@ -101,6 +102,21 @@ HyperLinkContext::HyperLinkContext( ContextHandler2Helper const & rParent,
             {
                 sHref = sURL;
 
+                // The target is the slide the relationship names, at its position in
+                // p:sldIdLst. "#Slide N" means the N-th page (a shape's click action
+                // becomes pageN, and the export writes slideN.xml with parts renumbered
+                // by position), so reading N from the part name sent every link into an
+                // out-of-order part (slide40.xml shown 39th) one slide off, and the save
+                // wrote it back that way. The part-name number below is only
+                // the fallback for targets that are not imported slides (notes pages,
+                // or a filter other than PowerPoint's).
+                sal_Int32 nSlidePosition = 0;
+                if (auto* pPowerPointImport = dynamic_cast<oox::ppt::PowerPointImport*>(&getFilter()))
+                    nSlidePosition = pPowerPointImport->getSlidePosition(
+                        getRelations().getFragmentPathFromRelId(aRelId));
+                if (nSlidePosition)
+                    sURL = "#" + URLResId(STR_SLIDE_NAME) + " " + OUString::number(nSlidePosition);
+
                 sal_Int32 nIndex2 = 0;
                 while ( nIndex2 < sHref.getLength() )
                 {
@@ -109,7 +125,7 @@ HyperLinkContext::HyperLinkContext( ContextHandler2Helper const & rParent,
                         break;
                     nIndex2++;
                 }
-                if ( nIndex2 && ( nIndex2 != sHref.getLength() ) )
+                if ( !nSlidePosition && nIndex2 && ( nIndex2 != sHref.getLength() ) )
                 {
                     sal_Int32 nLength = 1;
                     while( ( nIndex2 + nLength ) < sHref.getLength() )

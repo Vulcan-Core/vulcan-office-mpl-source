@@ -531,6 +531,7 @@ PDFExtOutDevData::PDFExtOutDevData( const OutputDevice& rOutDev ) :
     mbTransitionEffects     ( true ),
     mbUseLosslessCompression( true ),
     mbReduceImageResolution ( false ),
+    mbExportInvisibleText   ( false ),
     mbExportFormFields      ( false ),
     mbExportBookmarks       ( false ),
     mbExportHiddenSlides    ( false ),
@@ -573,6 +574,10 @@ void PDFExtOutDevData::SetCompressionQuality( const sal_Int32 nQuality )
 void PDFExtOutDevData::SetIsReduceImageResolution( const bool bReduceImageResolution )
 {
     mbReduceImageResolution = bReduceImageResolution;
+}
+void PDFExtOutDevData::SetIsExportInvisibleText( const bool bExportInvisibleText )
+{
+    mbExportInvisibleText = bExportInvisibleText;
 }
 void PDFExtOutDevData::SetIsExportNotes( const bool bExportNotes )
 {

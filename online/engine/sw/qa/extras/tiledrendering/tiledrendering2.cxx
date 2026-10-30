@@ -40,8 +40,12 @@
 #include <ndtxt.hxx>
 #include <txtfrm.hxx>
 #include <view.hxx>
+#include <doc.hxx>
+#include <viewopt.hxx>
 #include <IDocumentLayoutAccess.hxx>
 #include <IDocumentLinksAdministration.hxx>
+#include <IDocumentSettingAccess.hxx>
+#include <IDocumentState.hxx>
 #include <IDocumentUndoRedo.hxx>
 #include <rootfrm.hxx>
 #include <pagefrm.hxx>
@@ -1177,6 +1181,261 @@ CPPUNIT_TEST_FIXTURE(SwTiledRenderingTest, testFormImageRemoteNotFetched)
     pDevice->SetOutputSizePixel(Size(1024, 1024));
     static_cast<SwViewShell*>(pWrtShell)->Paint(
         *pDevice, tools::Rectangle(Point(0, 0), pWrtShell->GetLayout()->getFrameArea().SSize()));
+}
+/*
+ * VULCAN (Lane W, W5): a reflow vote must not cost the document its ability
+ * to seat the next collaborator.
+ *
+ * Wet-proven defect (armonly local-rig repro on the build-#5 image): the
+ * phone's positive .uno:BrowseWidth vote armed browse mode, and
+ * SwDocShell::ToggleLayoutMode then set NewWindowAllowed(false) on the arming
+ * view. Every LOK join runs through KitHelper::createView -> SID_NEWWINDOW,
+ * which SfxViewFrame::ExecView_Impl silently refuses when the flag is off, so
+ * the next joiner was handed SfxViewShell::Current()'s id -- the PHONE'S view
+ * id, still held. Two sessions drove one SfxViewShell: view id issued twice,
+ * getViewsCount stuck at 1, no mutual visibility, the joiner's per-view
+ * settings stomping the voting session.
+ */
+CPPUNIT_TEST_FIXTURE(SwTiledRenderingTest, testKitReflowVoteKeepsJoinersJoinable)
+{
+    // Given a document whose sole (phone) view has voted for reflow:
+    SwXTextDocument* pXTextDocument = createDoc();
+    const int nView1 = KitHelper::getCurrentView();
+    SwWrtShell* pWrtShell1 = getSwDocShell()->GetWrtShell();
+    SwTestViewCallback aView1;
+
+    dispatchCommand(mxComponent, u".uno:BrowseWidth"_ustr,
+                    { comphelper::makePropertyValue(u"BrowseWidth"_ustr, sal_Int32(4116)) });
+    Scheduler::ProcessEventsToIdle();
+    // The arm must actually have happened, or the rest of this test asserts
+    // nothing (a check that cannot fail proves nothing).
+    CPPUNIT_ASSERT(pWrtShell1->GetViewOptions()->getBrowseMode());
+
+    // When a second (desktop) session joins:
+    const int nView2 = KitHelper::createView();
+
+    // Then the join must produce a NEW view. Without the fix, SID_NEWWINDOW
+    // was refused (NewWindowAllowed false on the armed view) and createView
+    // handed back view 1's own id: nView2 == nView1, and the count stayed 1.
+    CPPUNIT_ASSERT(nView2 >= 0);
+    CPPUNIT_ASSERT(nView2 != nView1);
+    CPPUNIT_ASSERT_EQUAL(static_cast<std::size_t>(2), KitHelper::getViewsCount(0));
+
+    pXTextDocument->initializeForTiledRendering(cpo::uno::Sequence<beans::PropertyValue>());
+    SwTestViewCallback aView2;
+
+    // And when the desktop joiner vetoes reflow, the tally must reach BOTH
+    // registered views: the mode leaves browse everywhere and every view's
+    // callback channel carries the resulting invalidation.
+    aView1.m_bTilesInvalidated = false;
+    aView2.m_bTilesInvalidated = false;
+    dispatchCommand(mxComponent, u".uno:BrowseWidth"_ustr,
+                    { comphelper::makePropertyValue(u"BrowseWidth"_ustr, sal_Int32(-1)) });
+    Scheduler::ProcessEventsToIdle();
+    CPPUNIT_ASSERT(!pWrtShell1->GetViewOptions()->getBrowseMode());
+    CPPUNIT_ASSERT(aView1.m_bTilesInvalidated);
+    CPPUNIT_ASSERT(aView2.m_bTilesInvalidated);
+
+    // Both ids must still be registered and addressable -- no id was ever
+    // reissued while a session held it.
+    CPPUNIT_ASSERT_EQUAL(static_cast<std::size_t>(2), KitHelper::getViewsCount(0));
+    KitHelper::setView(nView1);
+    CPPUNIT_ASSERT_EQUAL(nView1, KitHelper::getCurrentView());
+    KitHelper::setView(nView2);
+    CPPUNIT_ASSERT_EQUAL(nView2, KitHelper::getCurrentView());
+}
+
+/*
+ * VULCAN (Lane W, W5): the reflow verdict is presentation state; applying it
+ * must leave the MODEL untouched -- this test PINS that contract.
+ *
+ * The persisted BROWSE_MODE setting reaches saved bytes (xmlexp.cxx writes it
+ * into ODF settings.xml, wrtw8esh.cxx keys exported object geometry on it),
+ * so a phone's read-posture reflow flipping it would change what a
+ * colleague's save produces. Two independent layers currently keep it clean:
+ * the modified-flag bracket in lcl_TallyKitReflowVotes keeps IsModified()
+ * false, and ToggleLayoutMode/GotFocus no longer write the setting under
+ * COKit (DocumentSettingManager::set also pins it false under COKit, a
+ * pre-vote-lane guard this contract must survive without). This test fails
+ * if ANY of those layers regresses.
+ */
+CPPUNIT_TEST_FIXTURE(SwTiledRenderingTest, testKitReflowVoteLeavesModelUntouched)
+{
+    // Given a freshly loaded, unmodified document:
+    createDoc();
+    SwWrtShell* pWrtShell = getSwDocShell()->GetWrtShell();
+    SwDoc* pDoc = getSwDocShell()->GetDoc();
+    CPPUNIT_ASSERT(!pDoc->getIDocumentState().IsModified());
+    CPPUNIT_ASSERT(!pDoc->getIDocumentSettingAccess().get(DocumentSettingId::BROWSE_MODE));
+
+    // When the phone's vote arms reflow:
+    dispatchCommand(mxComponent, u".uno:BrowseWidth"_ustr,
+                    { comphelper::makePropertyValue(u"BrowseWidth"_ustr, sal_Int32(4116)) });
+    Scheduler::ProcessEventsToIdle();
+
+    // Then the arm is real (known positive)...
+    CPPUNIT_ASSERT(pWrtShell->GetViewOptions()->getBrowseMode());
+    // ...but the model is untouched: not dirtied, and the persisted document
+    // setting -- what a save would write -- never flipped.
+    CPPUNIT_ASSERT(!pDoc->getIDocumentState().IsModified());
+    CPPUNIT_ASSERT(!pDoc->getIDocumentSettingAccess().get(DocumentSettingId::BROWSE_MODE));
+
+    // And when the vote is withdrawn, the unwind is just as clean.
+    dispatchCommand(mxComponent, u".uno:BrowseWidth"_ustr,
+                    { comphelper::makePropertyValue(u"BrowseWidth"_ustr, sal_Int32(-1)) });
+    Scheduler::ProcessEventsToIdle();
+    CPPUNIT_ASSERT(!pWrtShell->GetViewOptions()->getBrowseMode());
+    CPPUNIT_ASSERT(!pDoc->getIDocumentState().IsModified());
+    CPPUNIT_ASSERT(!pDoc->getIDocumentSettingAccess().get(DocumentSettingId::BROWSE_MODE));
+}
+
+/*
+ * VULCAN (R6-12, phone-Writer canvas tearing): a tile's rasterisation scale
+ * must never reach the text FORMATTER.
+ *
+ * In browse mode the window is the formatter's reference device
+ * (SwViewShell::GetRefDev), and SwViewShell::PaintTile swaps that window's
+ * MapMode to the tile's rasterisation scale around each tile's paint. An
+ * earlier fix (9c8551ea63) stopped the swap from TRIGGERING a reformat; the
+ * hole this test pins is formatting the document already OWES running UNDER
+ * the swap: after an edit, CheckInvalidForPaint formats the pending frames
+ * inside PaintTile, glyph advances get measured against the swapped device
+ * and cached wrong in the layout -- silently, because InvalidateWindows
+ * early-returns while isTiledPainting(). Every later repaint of the region
+ * then draws overprinted glyph bands.
+ *
+ * Wet-measured on slot-02 (build #8) with a calibrated pixel detector: one
+ * Backspace in a reflowed docx tears every band below the edit; the identical
+ * Backspace in page layout is clean; fresh tiles re-render torn (the
+ * corruption is layout-resident, not stale client tiles); one full
+ * browse-mode reformat heals it. Evidence:
+ * ~/.cache/voffice-evidence/round6/r6-12-writer-tearing/.
+ */
+CPPUNIT_TEST_FIXTURE(SwTiledRenderingTest, testBrowseModePaintTileFormatsAtRestingZoom)
+{
+    // Given a reflowed (browse-mode, client-stated width) document with a few
+    // paragraphs, fully laid out, its first line's advance-width recorded:
+    SwXTextDocument* pXTextDocument = createDoc();
+    SwWrtShell* pWrtShell = getSwDocShell()->GetWrtShell();
+    for (int i = 0; i < 6; ++i)
+        pWrtShell->Insert(
+            u"Every large theropod of the era was a predator and the era had many. "_ustr);
+    dispatchCommand(mxComponent, u".uno:BrowseWidth"_ustr,
+                    { comphelper::makePropertyValue(u"BrowseWidth"_ustr, sal_Int32(4116)) });
+    Scheduler::ProcessEventsToIdle();
+    // The arm must actually have happened, and the stated width must be
+    // binding, or the equality below compares page layout with page layout
+    // and passes vacuously (a check that cannot fail proves nothing).
+    CPPUNIT_ASSERT(pWrtShell->GetViewOptions()->getBrowseMode());
+    pWrtShell->Reformat();
+    Scheduler::ProcessEventsToIdle();
+    xmlDocUniquePtr pXmlAtRest = parseLayoutDump();
+    const sal_Int32 nRestWidth
+        = getXPath(pXmlAtRest, "//body/txt[1]/SwParaPortion/SwLineLayout[1]", "width").toInt32();
+    CPPUNIT_ASSERT_GREATER(sal_Int32(0), nRestWidth);
+    CPPUNIT_ASSERT_LESS(sal_Int32(4750), nRestWidth);
+
+    // When frames are invalid at tile-paint time (after an edit the eager
+    // pass under COKit covers only the tile-sized maVisArea, so the rest
+    // formats lazily inside PaintTile) and the requested tile's rasterisation
+    // scale differs from the window's resting scale (256 px over 1600 twips
+    // = 2.4 against 1.0 -- the phone's dpr 3 at reflow zoom):
+    pWrtShell->GetLayout()->InvalidateAllContent(SwInvalidateFlags::PrtArea
+                                                 | SwInvalidateFlags::Table | SwInvalidateFlags::Pos
+                                                 | SwInvalidateFlags::Size);
+    int nCanvasWidth = 256;
+    int nCanvasHeight = 256;
+    std::vector<unsigned char> aBuffer(nCanvasWidth * nCanvasHeight * 4);
+    ScopedVclPtrInstance<VirtualDevice> pDevice(DeviceFormat::WITHOUT_ALPHA);
+    pDevice->SetOutputSizePixelScaleOffsetAndKitBuffer(Size(nCanvasWidth, nCanvasHeight), 1.0,
+                                                       Point(), aBuffer.data());
+    pXTextDocument->paintTile(*pDevice, nCanvasWidth, nCanvasHeight, /*nTilePosX=*/0,
+                              /*nTilePosY=*/0, /*nTileWidth=*/1600, /*nTileHeight=*/1600);
+
+    // Then the line the tile's CheckInvalidForPaint formatted must carry the
+    // SAME advances the resting layout gave it. Without the fix the paint
+    // formatted it against the swapped window MapMode and the cached line
+    // width diverges -- which on a phone is a paragraph collapsing into an
+    // overprinted band on the next repaint.
+    xmlDocUniquePtr pXmlPainted = parseLayoutDump();
+    const sal_Int32 nPaintedWidth
+        = getXPath(pXmlPainted, "//body/txt[1]/SwParaPortion/SwLineLayout[1]", "width").toInt32();
+    CPPUNIT_ASSERT_EQUAL(nRestWidth, nPaintedWidth);
+}
+
+/*
+ * VULCAN (R6-15, browse border through the tile device): the width a
+ * browse-mode document is formatted to must not depend on the rasterisation
+ * scale of a tile that happens to be painting.
+ *
+ * GetBrowseBorder() is a PIXEL size (8x12), and SwContentFrame::MakePrtArea
+ * converts it with PixelToLogic against GetOut() -- which during PaintTile is
+ * the tile VirtualDevice, because PaintTile sets mpOut UNGATED (the R6-12 fix
+ * guarded the window's MapMode, not mpOut). The resting layout converts the
+ * same border through the mapmode-disabled kit window and gets the raw pixel
+ * value, so the paragraph budget (VisArea minus 2 * border) swings with
+ * whichever device was current when formatting ran: through a zoomed-out
+ * tile's device (256 px over 15360 twips, MapMode scale 0.25) the 8 px border
+ * inflates to 480 twips and MakePrtArea's clamp narrows the paragraph by
+ * hundreds of twips -- a reformat caused by nothing but tile scale. On the
+ * phone this is the ~140-twip page/paragraph wobble the client's
+ * correctForChrome absorbs with its 120-twip hysteresis (chrome overhead
+ * oscillating 584-808 on the wire). The fix routes the conversion through
+ * the FORMATTING reference device (SwViewShell::GetBrowseBorderTwips), the
+ * same reference glyph advances already follow (R6-12).
+ */
+CPPUNIT_TEST_FIXTURE(SwTiledRenderingTest, testBrowseBorderIgnoresTileScale)
+{
+    // Given a reflowed (browse-mode, client-stated width) document with a few
+    // paragraphs, fully laid out, its first paragraph's formatted print width
+    // recorded:
+    SwXTextDocument* pXTextDocument = createDoc();
+    SwWrtShell* pWrtShell = getSwDocShell()->GetWrtShell();
+    for (int i = 0; i < 6; ++i)
+        pWrtShell->Insert(u"The quick brown fox jumps over the lazy dog. "_ustr);
+    dispatchCommand(mxComponent, u".uno:BrowseWidth"_ustr,
+                    { comphelper::makePropertyValue(u"BrowseWidth"_ustr, sal_Int32(4116)) });
+    Scheduler::ProcessEventsToIdle();
+    // The arm must actually have happened, or nothing below is browse-mode
+    // territory at all (a check that cannot fail proves nothing).
+    CPPUNIT_ASSERT(pWrtShell->GetViewOptions()->getBrowseMode());
+    pWrtShell->Reformat();
+    Scheduler::ProcessEventsToIdle();
+    xmlDocUniquePtr pXmlAtRest = parseLayoutDump();
+    const sal_Int32 nRestPrtWidth
+        = getXPath(pXmlAtRest, "//body/txt[1]/infos/prtBounds", "width").toInt32();
+    // Anti-vacuity: the paragraph really formatted to (about) the stated
+    // width. If it rested anywhere near the tile-clamped width already, the
+    // equality below could not fail on any tree.
+    CPPUNIT_ASSERT_GREATER(sal_Int32(4000), nRestPrtWidth);
+
+    // When frames are invalid at tile-paint time (after an edit the eager
+    // pass under COKit covers only the tile-sized maVisArea, so the rest
+    // formats lazily inside PaintTile) and the tile being painted is a
+    // zoomed-out one -- 256 px over 15360 twips, MapMode scale 0.25, a 25%
+    // phone overview zoom -- so the border converted through the tile device
+    // (480 twips) dwarfs the resting conversion (8):
+    pWrtShell->GetLayout()->InvalidateAllContent(SwInvalidateFlags::PrtArea
+                                                 | SwInvalidateFlags::Size);
+    int nCanvasWidth = 256;
+    int nCanvasHeight = 256;
+    std::vector<unsigned char> aBuffer(nCanvasWidth * nCanvasHeight * 4);
+    ScopedVclPtrInstance<VirtualDevice> pDevice(DeviceFormat::WITHOUT_ALPHA);
+    pDevice->SetOutputSizePixelScaleOffsetAndKitBuffer(Size(nCanvasWidth, nCanvasHeight), 1.0,
+                                                       Point(), aBuffer.data());
+    pXTextDocument->paintTile(*pDevice, nCanvasWidth, nCanvasHeight, /*nTilePosX=*/0,
+                              /*nTilePosY=*/0, /*nTileWidth=*/15360, /*nTileHeight=*/15360);
+
+    // Then the paragraph the tile's CheckInvalidForPaint formatted must carry
+    // the SAME print width the resting layout gave it. Without the fix,
+    // MakePrtArea read the border through the tile device and clamped the
+    // paragraph hundreds of twips narrower -- re-wrapped words, shifted
+    // pagination, and on the next honest repaint a column whose width tracks
+    // tile scale instead of the stated browse width.
+    xmlDocUniquePtr pXmlPainted = parseLayoutDump();
+    const sal_Int32 nPaintedPrtWidth
+        = getXPath(pXmlPainted, "//body/txt[1]/infos/prtBounds", "width").toInt32();
+    CPPUNIT_ASSERT_EQUAL(nRestPrtWidth, nPaintedPrtWidth);
 }
 }
 

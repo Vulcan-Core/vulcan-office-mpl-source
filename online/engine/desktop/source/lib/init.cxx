@@ -173,6 +173,7 @@
 #include <sfx2/dispatch.hxx>
 #include <sfx2/kit/componenthelpers.hxx>
 #include <sfx2/DocumentSigner.hxx>
+#include <sfx2/sidebar/Deck.hxx>
 #include <sfx2/sidebar/Sidebar.hxx>
 #include <sfx2/kit/unocommandlist.hxx>
 #include <svl/numformat.hxx>
@@ -861,6 +862,29 @@ OUString lcl_getCurrentDocumentMimeType(const LibLODocument_Impl* pDocument)
         return u""_ustr;
 
     return pFilter->GetMimeType();
+}
+
+/// The name of the filter the document was loaded with (the import filter,
+/// e.g. "draw_pdf_import" for a PDF opened into Draw), or "" if unknown.
+OUString lcl_getCurrentDocumentFilterName(const LibLODocument_Impl* pDocument)
+{
+    SfxBaseModel* pBaseModel = dynamic_cast<SfxBaseModel*>(pDocument->mxComponent.get());
+    if (!pBaseModel)
+        return u""_ustr;
+
+    SfxObjectShell* pObjectShell = pBaseModel->GetObjectShell();
+    if (!pObjectShell)
+        return u""_ustr;
+
+    SfxMedium* pMedium = pObjectShell->GetMedium();
+    if (!pMedium)
+        return u""_ustr;
+
+    auto pFilter = pMedium->GetFilter();
+    if (!pFilter)
+        return u""_ustr;
+
+    return pFilter->GetFilterName();
 }
 
 // Gets an undo manager to enter and exit undo context. Needed by ToggleOrientation
@@ -2072,6 +2096,10 @@ void CallbackFlushHandler::queue(const int type, CallbackData& aCallbackData)
             case KIT_CALLBACK_TOOLTIP:
             case KIT_CALLBACK_SHAPE_INNER_TEXT:
             case KIT_CALLBACK_SHAPE_DRAG_PREVIEW:
+            // Vulcan fork: every payload is the whole document's "w, h" — only the latest matters. Appended unmerged, a
+            // relayout that changes page heights thousands of times queued one per change, and each INVALIDATE_TILES
+            // then scanned back over all of them (processInvalidateTilesEvent): quadratic, inside the layout action.
+            case KIT_CALLBACK_DOCUMENT_SIZE_CHANGED:
             {
                 if (removeAll(type))
                     SAL_INFO("kit", "Removed dups of [" << type << "]: [" << aCallbackData.getPayload() << "].");
@@ -2921,16 +2949,72 @@ void setLanguageAndLocale(OUString const & aLangISO)
     LanguageTag::setConfiguredSystemLanguage(aTag.getLanguageType(false));
 }
 
-void setFormatSpecificFilterData(std::u16string_view sFormat, comphelper::SequenceAsHashMap & rFilterDataMap)
+void setFormatSpecificFilterData(std::u16string_view sFormat, comphelper::SequenceAsHashMap & rFilterDataMap,
+                                 bool bDrawingDocument)
 {
     if (sFormat == u"pdf")
     {
         // always export bookmarks, which is needed for annotations
-        rFilterDataMap[u"ExportBookmarks"_ustr] <<= true;
+        // (only where the caller's own filter data did not already decide:
+        // doc_saveAs merges these into parsed JSON options too)
+        rFilterDataMap.createItemIfMissing(u"ExportBookmarks"_ustr, true);
+        // Form controls (the AcroForm widgets the PDF importer turns into
+        // Draw form controls) must save back as AcroForm fields, not flat
+        // graphics — otherwise editing a fillable PDF destroys its form.
+        // Drawing documents only: a Writer or Calc document with form
+        // controls keeps the export default (flat), as it always did.
+        if (bDrawingDocument)
+            rFilterDataMap.createItemIfMissing(u"ExportFormFields"_ustr, true);
     }
 }
 
 } // anonymous namespace
+
+// Defined outside the surrounding extern "C" block: it is declared in
+// desktop/inc/lib/init.hxx with C++ linkage.
+} // extern "C"
+
+bool desktop::setPdfSourceSaveFilterData(std::u16string_view rImportFilterName,
+                                         comphelper::SequenceAsHashMap& rFilterDataMap)
+{
+    // Vulcan PDF canvas. A PDF opened into Draw has no native save: every
+    // .uno:Save of it (the canvas autosave, the host's save, the exit save,
+    // the background-save fork) rewrites the file through draw_pdf_Export
+    // (doc_postUnoCommand), and that export IS the stored file the next open
+    // decomposes again. For the keys the FilterData lacks, PDFExport uses
+    // its own defaults, and those cost the file something on every save.
+    // Draw's own PDF import only: a hybrid PDF (the *_pdf_addstream_import
+    // filters open it into Writer, Calc or Impress) and every PDF export
+    // that is not such a save keep the export defaults.
+    if (rImportFilterName != u"draw_pdf_import")
+        return false;
+
+    // The AcroForm widgets decompose imports as form controls go back out as
+    // real fields with their values (PDFExport default: flattened).
+    rFilterDataMap.createItemIfMissing(u"ExportFormFields"_ustr, true);
+    // No downsampling (default: every image capped at 300 DPI) and lossless
+    // encoding only (default: JPEG at quality 90). Together they make
+    // PDFExtOutDevData::HasAdequateCompression pass an imported JPEG through
+    // byte for byte, and every other image is written as Flate, so repeated
+    // saves never lose pixels.
+    rFilterDataMap.createItemIfMissing(u"ReduceImageResolution"_ustr, false);
+    rFilterDataMap.createItemIfMissing(u"UseLosslessCompression"_ustr, true);
+    // Comments (sd annotations, from .uno:InsertAnnotation and from the
+    // PDF's own annotations on import) are written as PDF annotations
+    // (SdXImpressDocument::render, ImplPDFExportComments). PDFExport already
+    // defaults to that once any FilterData is passed; named so it cannot
+    // depend on which default applies.
+    rFilterDataMap.createItemIfMissing(u"ExportNotes"_ustr, true);
+    // Editable scanned PDFs: a hidden-ink OCR line (alpha-0 text over its
+    // scan) goes out as invisible render-mode-3 text, so a saved scan stays
+    // searchable and selectable. Only objects the page model named "ocr:"
+    // are affected; every other export drops fully transparent text as
+    // before.
+    rFilterDataMap.createItemIfMissing(u"ExportInvisibleText"_ustr, true);
+    return true;
+}
+
+extern "C" {
 
 static COKitDocument* lo_documentLoad(COKit* pThis, const char* pURL)
 {
@@ -3840,7 +3924,11 @@ static SfxObjectShell* getSfxObjectShell(COKitDocument* pThis)
     return pBaseModel->GetObjectShell();
 }
 
-static int doc_saveAs(COKitDocument* pThis, const char* sUrl, const char* pFormat, const char* pFilterOptions)
+/// doc_saveAs; bPdfSourceSave: this is doc_postUnoCommand's .uno:Save of a
+/// PDF document (its own file rewritten as PDF), which adds
+/// setPdfSourceSaveFilterData for a PDF opened into Draw.
+static int doc_saveAsImpl(COKitDocument* pThis, const char* sUrl, const char* pFormat,
+                          const char* pFilterOptions, bool bPdfSourceSave)
 {
     comphelper::ProfileZone aZone("doc_saveAs");
 
@@ -4047,10 +4135,42 @@ static int doc_saveAs(COKitDocument* pThis, const char* sUrl, const char* pForma
 
         // If filter options is JSON string, then make sure aFilterDataMap stays empty, otherwise we
         // would ignore the filter options.
+        const bool bDrawingDocument = doc_getDocumentType(pThis) == KIT_DOCTYPE_DRAWING;
         if (!aFilterOptions.startsWith("{"))
         {
-            setFormatSpecificFilterData(sFormat, aFilterDataMap);
+            setFormatSpecificFilterData(sFormat, aFilterDataMap, bDrawingDocument);
         }
+        else if (bDrawingDocument && sFormat == u"pdf")
+        {
+            // Vulcan: the browser's own Download as PDF passes JSON options
+            // ({"ExportNotes":...}), and the pdf filter reads JSON options as
+            // FilterData only when no FilterData is passed - so a drawing
+            // (a decomposed PDF with its AcroForm controls) saved this way
+            // flattened its form. Parse the JSON here instead and add the
+            // drawing defaults only where the caller named no value, so an
+            // explicit ExportFormFields false (print) still wins. Malformed
+            // JSON is left to the filter, exactly as before.
+            try
+            {
+                comphelper::SequenceAsHashMap aJsonFilterData;
+                for (const beans::PropertyValue& rProp :
+                     comphelper::JsonToPropertyValues(aFilterOptions.toUtf8()))
+                    aJsonFilterData[rProp.Name] = rProp.Value;
+                setFormatSpecificFilterData(sFormat, aJsonFilterData, bDrawingDocument);
+                aFilterDataMap.update(aJsonFilterData);
+            }
+            catch (const boost::property_tree::json_parser::json_parser_error& rError)
+            {
+                SAL_WARN("kit", "doc_saveAs: pdf filter options are not valid JSON: "
+                                    << rError.message());
+            }
+        }
+
+        // A .uno:Save of a PDF: for one opened into Draw, the canvas save
+        // options (see setPdfSourceSaveFilterData), after everything above so
+        // any value the filter options named wins.
+        if (bPdfSourceSave && sFormat == u"pdf")
+            setPdfSourceSaveFilterData(lcl_getCurrentDocumentFilterName(pDocument), aFilterDataMap);
 
         if (!watermarkText.isEmpty())
             aFilterDataMap[u"TiledWatermark"_ustr] <<= watermarkText;
@@ -4092,6 +4212,11 @@ static int doc_saveAs(COKitDocument* pThis, const char* sUrl, const char* pForma
         SetLastExceptionMsg("exception: " + exception.Message);
     }
     return false;
+}
+
+static int doc_saveAs(COKitDocument* pThis, const char* sUrl, const char* pFormat, const char* pFilterOptions)
+{
+    return doc_saveAsImpl(pThis, sUrl, pFormat, pFilterOptions, /*bPdfSourceSave=*/false);
 }
 
 /**
@@ -4455,9 +4580,12 @@ static void doc_paintTile(COKitDocument* pThis,
 
     // Online uses the KIT_TILEMODE_RGBA by default so flip the normal flags
     // to kCGImageAlphaPremultipliedLast | kCGImageByteOrder32Big
+    CGColorSpaceRef pColorSpace = CGColorSpaceCreateDeviceRGB();
     CGContextRef pCGContext = CGBitmapContextCreate(pBuffer, nCanvasWidth, nCanvasHeight, 8,
-                                                    nCanvasWidth * 4, CGColorSpaceCreateDeviceRGB(),
+                                                    nCanvasWidth * 4, pColorSpace,
                                                     kCGImageAlphaPremultipliedLast | kCGImageByteOrder32Big);
+    // The context retains the colour space; drop our creating reference or it leaks one per tile.
+    CGColorSpaceRelease(pColorSpace);
 
     CGContextTranslateCTM(pCGContext, 0, nCanvasHeight);
     CGContextScaleCTM(pCGContext, fDPIScale, -fDPIScale);
@@ -5333,14 +5461,16 @@ namespace {
 class DispatchResultListener : public cppu::WeakImplHelper<css::frame::XDispatchResultListener>
 {
     const OString maCommand; ///< Command for which this is the result.
+    const OString maResponseChannel; ///< Opaque transport correlation token.
     const std::shared_ptr<CallbackFlushHandler> mpCallback; ///< Callback to call.
     const std::chrono::steady_clock::time_point mSaveTime; //< The time we started saving.
     const bool mbWasModified; //< Whether or not the document was modified before saving.
 
 public:
     DispatchResultListener(const char* pCommand, std::shared_ptr<CallbackFlushHandler> pCallback,
-                           bool bWasModified)
+                           bool bWasModified, OString aResponseChannel)
         : maCommand(pCommand)
+        , maResponseChannel(std::move(aResponseChannel))
         , mpCallback(std::move(pCallback))
         , mSaveTime(std::chrono::steady_clock::now())
         , mbWasModified(bWasModified)
@@ -5352,6 +5482,8 @@ public:
     {
         tools::JsonWriter aJson;
         aJson.put("commandName", maCommand);
+        if (!maResponseChannel.isEmpty())
+            aJson.put("responseChannel", maResponseChannel);
 
         if (rEvent.State != frame::DispatchResultState::DONTKNOW)
         {
@@ -5691,6 +5823,8 @@ static void doc_postUnoCommand(COKitDocument* pThis, const char* pCommand, const
 
     OUString aCommand(pCommand, strlen(pCommand), RTL_TEXTENCODING_UTF8);
 
+    // Preserve the historical deny/no-op behavior without parsing untrusted
+    // arguments. TransformDocumentStructure is allowed through this gate.
     if (!isCommandAllowed(aCommand))
         return;
 
@@ -5700,6 +5834,41 @@ static void doc_postUnoCommand(COKitDocument* pThis, const char* pCommand, const
     LibLODocument_Impl* pDocument = static_cast<LibLODocument_Impl*>(pThis);
 
     std::vector<beans::PropertyValue> aPropertyValuesVector(jsonToPropertyValuesVector(pArguments));
+    OUString aResponseChannel;
+    std::erase_if(aPropertyValuesVector,
+                  [&aResponseChannel](const beans::PropertyValue& rProperty) {
+                      if (rProperty.Name != "ResponseChannel")
+                          return false;
+
+                      if (aResponseChannel.isEmpty())
+                          rProperty.Value >>= aResponseChannel;
+                      return true;
+                  });
+    const OString aResponseChannelUtf8
+        = OUStringToOString(aResponseChannel, RTL_TEXTENCODING_UTF8);
+    const int nView = KitHelper::getViewId(pDocument->mnDocumentId);
+    std::shared_ptr<CallbackFlushHandler> pResultCallback;
+    if (bNotifyWhenFinished)
+    {
+        auto aCallback = pDocument->mpCallbackFlushHandlers.find(nView);
+        if (aCallback != pDocument->mpCallbackFlushHandlers.end())
+            pResultCallback = aCallback->second;
+    }
+
+    // Once a notified transport token has reached desktop, every return path
+    // is terminal for its owning session. Keep a correlated failure armed
+    // until normal dispatch has accepted the result listener.
+    comphelper::ScopeGuard aPendingResponse([&]() {
+        if (!pResultCallback || aResponseChannelUtf8.isEmpty())
+            return;
+
+        tools::JsonWriter aJson;
+        aJson.put("commandName", pCommand);
+        aJson.put("responseChannel", aResponseChannelUtf8);
+        aJson.put("success", false);
+        pResultCallback->queue(KIT_CALLBACK_UNO_COMMAND_RESULT,
+                               aJson.finishAndGetAsOString());
+    });
 
     if (!vcl::kit::isUnipoll())
     {
@@ -5709,7 +5878,6 @@ static void doc_postUnoCommand(COKitDocument* pThis, const char* pCommand, const
         aPropertyValuesVector.push_back(aSynchronMode);
     }
 
-    const int nView = KitHelper::getViewId(pDocument->mnDocumentId);
     SfxViewShell* pViewShell = KitHelper::getViewOfId(nView);
     if (!pViewShell)
         return;
@@ -5737,7 +5905,11 @@ static void doc_postUnoCommand(COKitDocument* pThis, const char* pCommand, const
             uno::Reference<frame::XStorable> xStorable(pDocument->mxComponent, uno::UNO_QUERY_THROW);
             OUString aURL = xStorable->getLocation();
             OString aURLUtf8 = OUStringToOString(aURL, RTL_TEXTENCODING_UTF8);
-            bool bResult = doc_saveAs(pThis, aURLUtf8.getStr(), "pdf", nullptr);
+            // Vulcan: this export is the saved file itself, so a PDF opened
+            // into Draw (the PDF canvas) keeps its form fields, images and
+            // comments across saves (setPdfSourceSaveFilterData).
+            bool bResult = doc_saveAsImpl(pThis, aURLUtf8.getStr(), "pdf", nullptr,
+                                          /*bPdfSourceSave=*/true);
 
             // Send the result of save
             tools::JsonWriter aJson;
@@ -5888,6 +6060,23 @@ static void doc_postUnoCommand(COKitDocument* pThis, const char* pCommand, const
         }
         return;
     }
+    else if (gImpl && aCommand == ".uno:KitSidebarMasterSlides")
+    {
+        if (!sfx2::sidebar::Sidebar::Setup(u"SdMasterPagesDeck"))
+        {
+            SetLastExceptionMsg(u"failed to set up sidebar"_ustr);
+        }
+        else
+        {
+            // A phone wizard close leaves the core deck open. Send a fresh
+            // snapshot even when Setup() therefore reuses the same deck.
+            // Reopening an unchanged deck needs to bypass the JSDialog full-
+            // snapshot deduper; otherwise the phone receives only incremental
+            // updates and has no window to apply them to.
+            sfx2::sidebar::Deck::KitSendSidebarFullUpdate(true);
+        }
+        return;
+    }
     else if (gImpl && aCommand == ".uno:SidebarShow")
     {
         if (!sfx2::sidebar::Sidebar::Setup(u""))
@@ -5968,19 +6157,52 @@ static void doc_postUnoCommand(COKitDocument* pThis, const char* pCommand, const
         }
     }
     bool bResult = false;
-    if (bNotifyWhenFinished && pDocument->mpCallbackFlushHandlers.count(nView))
+    try
     {
-        bResult = comphelper::dispatchCommand(aCommand, comphelper::containerToSequence(aPropertyValuesVector),
-                new DispatchResultListener(pCommand, pDocument->mpCallbackFlushHandlers[nView],
-                                           pDocSh && pDocSh->IsModified()));
+        if (pResultCallback)
+        {
+            bResult = comphelper::dispatchCommand(
+                aCommand, comphelper::containerToSequence(aPropertyValuesVector),
+                new DispatchResultListener(pCommand, pResultCallback,
+                                           pDocSh && pDocSh->IsModified(),
+                                           aResponseChannelUtf8));
+        }
+        else
+            bResult = comphelper::dispatchCommand(
+                aCommand, comphelper::containerToSequence(aPropertyValuesVector));
     }
-    else
-        bResult = comphelper::dispatchCommand(aCommand, comphelper::containerToSequence(aPropertyValuesVector));
+    catch (const uno::Exception& rException)
+    {
+        if (!pResultCallback || aResponseChannelUtf8.isEmpty())
+            throw;
+        SetLastExceptionMsg(rException.Message);
+        TOOLS_WARN_EXCEPTION("lok", "Failed to dispatch " << aCommand);
+        return;
+    }
+    catch (const std::exception& rException)
+    {
+        if (!pResultCallback || aResponseChannelUtf8.isEmpty())
+            throw;
+        SetLastExceptionMsg(OUString::fromUtf8(rException.what()));
+        SAL_WARN("lok", "Failed to dispatch " << aCommand << ": " << rException.what());
+        return;
+    }
+    catch (...)
+    {
+        if (!pResultCallback || aResponseChannelUtf8.isEmpty())
+            throw;
+        SetLastExceptionMsg("Unknown exception while dispatching " + aCommand);
+        SAL_WARN("lok", "Unknown exception while dispatching " << aCommand);
+        return;
+    }
 
     if (!bResult)
     {
         SetLastExceptionMsg("Failed to dispatch " + aCommand);
+        return;
     }
+
+    aPendingResponse.dismiss();
 }
 
 static void doc_postMouseEvent(COKitDocument* pThis, int nType, int nX, int nY, int nCount, int nButtons, int nModifier)
@@ -7890,7 +8112,10 @@ static void doc_paintWindowForView(COKitDocument* pThis, unsigned nKitWindowId,
 #if defined(IOS)
     // Online uses the KIT_TILEMODE_RGBA by default so flip the normal flags
     // to kCGImageAlphaNoneSkipLast | kCGImageByteOrder32Big
-    CGContextRef cgc = CGBitmapContextCreate(pBuffer, nWidth, nHeight, 8, nWidth*4, CGColorSpaceCreateDeviceRGB(), kCGImageAlphaNoneSkipLast | kCGImageByteOrder32Big);
+    CGColorSpaceRef pColorSpace = CGColorSpaceCreateDeviceRGB();
+    CGContextRef cgc = CGBitmapContextCreate(pBuffer, nWidth, nHeight, 8, nWidth*4, pColorSpace, kCGImageAlphaNoneSkipLast | kCGImageByteOrder32Big);
+    // The context retains the colour space; drop our creating reference or it leaks one per paint.
+    CGColorSpaceRelease(pColorSpace);
 
     CGContextTranslateCTM(cgc, 0, nHeight);
     CGContextScaleCTM(cgc, fDPIScale, -fDPIScale);

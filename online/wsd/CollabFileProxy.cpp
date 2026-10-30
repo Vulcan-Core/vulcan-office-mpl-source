@@ -228,6 +228,30 @@ void CollabFileProxy::doUpload(const std::shared_ptr<TerminatingPoll>& poll,
 
     httpRequest.setVerb(http::Request::VERB_POST);
     httpRequest.set("X-WOPI-Override", "PUT");
+
+    // Vulcan: the WOPI save attributes every other PutFile carries.  This
+    // proxy used to send none of them, which made it the host's one
+    // header-less save lane: the lock check, the timestamp conflict check and
+    // the IsModifiedByUser fence all stood down at once, so a stale buffer
+    // could last-writer-win over a newer head.  The host now REQUIRES the
+    // attributes on this lane and refuses a save that carries none.
+    //
+    // A collab upload exists only because the client explicitly saved
+    // modified content it holds (COWASM / CODA fire it on save), never on a
+    // machine schedule — so IsModifiedByUser is true and the save-kind
+    // attributes are false by construction.
+    //
+    // X-COOL-WOPI-Timestamp is deliberately NOT sent.  Its only source here
+    // would be a live DocumentBroker's stored timestamp, which belongs to
+    // that broker's poll thread: DocBrokersMutex protects the MAP, not the
+    // broker's internals, and this lane needs the value synchronously, so the
+    // addCallback hand-off used everywhere else in this file cannot supply
+    // it.  The host's content-sync marker is this lane's conflict fence, as
+    // it is today.
+    httpRequest.set("X-COOL-WOPI-IsModifiedByUser", "true");
+    httpRequest.set("X-COOL-WOPI-IsAutosave", "false");
+    httpRequest.set("X-COOL-WOPI-IsExitSave", "false");
+
     httpRequest.setContentType("application/octet-stream");
     httpRequest.setContentLength(body.size());
     httpRequest.setBody(body);

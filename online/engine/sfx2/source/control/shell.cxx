@@ -418,6 +418,12 @@ bool SfxShell::IsConditionalFastCall( const SfxRequest &rReq )
     return bRet;
 }
 
+bool SfxShell::IsKitPerViewUndoRedo( const SfxRequest &rReq )
+{
+    const sal_uInt16 nId = rReq.GetSlot();
+    return (nId == SID_UNDO || nId == SID_REDO) && comphelper::COKit::isActive();
+}
+
 
 static void ShellCall_Impl( void* pObj, void* pArg )
 {

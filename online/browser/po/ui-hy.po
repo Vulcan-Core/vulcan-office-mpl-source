@@ -5152,7 +5152,7 @@ msgid ""
 "Unlinking citations will prevent Collabora Online from updating citations "
 "and bibliography in this document."
 msgstr ""
-"Մեջբերումներ կապերի անջատումը կխանգարի Collabora Online-ին թարմացնել այս "
+"Մեջբերումներ կապերի անջատումը կխանգարի Vulcan Office-ին թարմացնել այս "
 "փաստաթղթի հղումները և մատենագիտությունը։"
 
 #: src/control/HRuler.ts:321
@@ -6719,7 +6719,7 @@ msgstr "Թարմացնել սահիկները"
 #: src/map/handler/Map.VersionBar.js:50
 msgid "Your Collabora Online server needs updating. Version {0} is available."
 msgstr ""
-"Ձեր Collabora Online սերվերը կարիք ունի թարմացման: Հասանելի է {0} տարբերակը:"
+"Ձեր Vulcan Office սերվերը կարիք ունի թարմացման: Հասանելի է {0} տարբերակը:"
 
 #: src/map/handler/Map.WOPI.js:194
 msgid "Creating new file from template..."
@@ -7004,7 +7004,7 @@ msgstr "Դեղին գաղափար"
 
 #: welcome/welcome.html%2Bhtml.head.title:9-3
 msgid "Collabora Online Welcome"
-msgstr "Collabora Online ողջույն"
+msgstr "Vulcan Office ողջույն"
 
 #: welcome/welcome.html%2Bhtml.body.div.div.div.div.h1:26-7
 msgid "Explore The New {coolversion}"
@@ -7013,7 +7013,7 @@ msgstr "Ուսումնասիրեք նոր {coolversion} -ը"
 #: welcome/welcome.html%2Bhtml.body.div.div.div.div.h2:27-7
 #: welcome/welcome.html%2Bhtml.body.div.div.div.div.h2:38-7
 msgid "Collabora Online Development Edition"
-msgstr "Collabora Online Զարգացման տարբերակ"
+msgstr "Vulcan Office Զարգացման տարբերակ"
 
 #: welcome/welcome.html%2Bhtml.body.div.div.div.div.p:28-7
 msgid ""
@@ -7042,7 +7042,7 @@ msgid ""
 msgstr ""
 "Ստուգեք <a target=\"_blank\" rel=\"noopener\" href=\"https://www."
 "collaboraonline.com/code-26-04-release-notes/\">թողարկման նշումները</a> և "
-"իմացեք ամեն ինչ Collabora-ի առցանց մշակման վերջին տարբերակի մասին, որը "
+"իմացեք ամեն ինչ Vulcan Office-ի առցանց մշակման վերջին տարբերակի մասին, որը "
 "նախատեսված է տանը օգտագործման և փոքր թիմերի համար:"
 
 #: welcome/welcome.html%2Bhtml.body.div.div.div.div.h1:48-7

@@ -46,6 +46,8 @@
 #include <sfx2/viewsh.hxx>
 
 #include <svx/svditer.hxx>
+#include <VulcanHiddenInk.hxx>
+#include <vcl/commandevent.hxx>
 
 #include <editeng/editeng.hxx>
 
@@ -951,6 +953,10 @@ IMPL_LINK_NOARG(FuPoor, DragHdl, Timer *, void)
 
 bool FuPoor::Command(const CommandEvent& rCEvt)
 {
+    // Editable scanned PDFs: IME and kit text input (ExtTextInput) change
+    // a hidden-ink OCR line like a key does.
+    if (rCEvt.GetCommand() == CommandEventId::ExtTextInput && mpView && mpView->IsTextEdit())
+        sd::hiddenink::BeforeTextChange(*mpView);
     return mpView->Command(rCEvt,mpWindow);
 }
 

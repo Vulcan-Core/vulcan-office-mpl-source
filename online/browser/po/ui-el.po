@@ -5102,7 +5102,7 @@ msgid ""
 "Unlinking citations will prevent Collabora Online from updating citations "
 "and bibliography in this document."
 msgstr ""
-"Η αποσύνδεση των παραπομπών θα εμποδίσει το Collabora Online να ενημερώσει "
+"Η αποσύνδεση των παραπομπών θα εμποδίσει το Vulcan Office να ενημερώσει "
 "τις αναφορές και τη βιβλιογραφία σε αυτό το έγγραφο."
 
 #: src/control/HRuler.ts:321
@@ -6681,7 +6681,7 @@ msgstr ""
 #: src/map/handler/Map.VersionBar.js:50
 msgid "Your Collabora Online server needs updating. Version {0} is available."
 msgstr ""
-"Ο διακομιστής σας Collabora Online χρειάζεται ενημέρωση. Η έκδοση {0} είναι "
+"Ο διακομιστής σας Vulcan Office χρειάζεται ενημέρωση. Η έκδοση {0} είναι "
 "διαθέσιμη."
 
 #: src/map/handler/Map.WOPI.js:194
@@ -6971,7 +6971,7 @@ msgstr ""
 
 #: welcome/welcome.html%2Bhtml.head.title:9-3
 msgid "Collabora Online Welcome"
-msgstr "Καλώς ήρθατε στο Collabora Online"
+msgstr "Καλώς ήρθατε στο Vulcan Office"
 
 #: welcome/welcome.html%2Bhtml.body.div.div.div.div.h1:26-7
 msgid "Explore The New {coolversion}"
@@ -6980,7 +6980,7 @@ msgstr "Εξερευνήστε τη Νέα {coolversion}"
 #: welcome/welcome.html%2Bhtml.body.div.div.div.div.h2:27-7
 #: welcome/welcome.html%2Bhtml.body.div.div.div.div.h2:38-7
 msgid "Collabora Online Development Edition"
-msgstr "Collabora Online Development Edition"
+msgstr "Vulcan Office Development Edition"
 
 #: welcome/welcome.html%2Bhtml.body.div.div.div.div.p:28-7
 #, fuzzy
@@ -7011,7 +7011,7 @@ msgid ""
 msgstr ""
 "Ελέγξτε τις <a target=\"_blank\" href=\"https://www.collaboraonline.com/"
 "code-26-04-release-notes/\">σημειώσεις έκδοσης</a> και μάθετε τα πάντα για: "
-"Την τελευταία έκδοση Collabora Online Development Edition, που απευθύνεται "
+"Την τελευταία έκδοση Vulcan Office Development Edition, που απευθύνεται "
 "σε οικιακούς χρήστες και μικρές ομάδες."
 
 #: welcome/welcome.html%2Bhtml.body.div.div.div.div.h1:48-7
@@ -7471,7 +7471,7 @@ msgstr ""
 
 #, fuzzy
 #~ msgid "Oops, there is a problem connecting to Collabora Online : "
-#~ msgstr "Όπα, υπάρχει πρόβλημα στη σύνδεση με το διαδικτυακό LibreOffice : "
+#~ msgstr "Όπα, υπάρχει πρόβλημα στη σύνδεση με το διαδικτυακό Vulcan Office : "
 
 #~ msgid "Number of views"
 #~ msgstr "Αριθμός προβολών"

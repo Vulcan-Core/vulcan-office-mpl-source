@@ -81,6 +81,7 @@ class VCL_DLLPUBLIC PDFExtOutDevData final : public ExtOutDevData
     bool                        mbTransitionEffects;
     bool                        mbUseLosslessCompression;
     bool                        mbReduceImageResolution;
+    bool                        mbExportInvisibleText;
     bool                        mbExportFormFields;
     bool                        mbExportBookmarks;
     bool                        mbExportHiddenSlides;
@@ -151,6 +152,13 @@ public:
 
     bool        GetIsReduceImageResolution() const { return mbReduceImageResolution;}
     void        SetIsReduceImageResolution( const bool bReduceImageResolution );
+
+    /// Write fully transparent text of hidden-ink OCR lines (objects named
+    /// "ocr:...") as invisible text (render mode 3): searchable and
+    /// selectable, painting nothing. Off by default: only the PDF canvas's
+    /// own save asks for it (FilterData ExportInvisibleText).
+    bool        GetIsExportInvisibleText() const { return mbExportInvisibleText;}
+    void        SetIsExportInvisibleText( const bool bExportInvisibleText );
 
     const css::lang::Locale& GetDocumentLocale() const { return maDocLocale;}
     void        SetDocumentLocale( const css::lang::Locale& rLoc );

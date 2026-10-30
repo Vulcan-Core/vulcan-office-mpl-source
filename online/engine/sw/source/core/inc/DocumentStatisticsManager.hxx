@@ -25,10 +25,17 @@
 #include <memory>
 
 class SwDoc;
+class SwRootFrame;
 struct SwDocStat;
 
 namespace sw
 {
+/** Under COKit, is this layout's page count the viewer's window (browse/web
+    layout) rather than the document's? Then neither writer of
+    SwDocStat::nPage may store it: IncrementalDocStatCalculate and
+    SwDocStatFieldType::Expand (NUMPAGES). */
+bool LayoutPageCountIsViewState(const SwRootFrame* pLayout);
+
 class DocumentStatisticsManager final : public IDocumentStatistics
 {
 public:

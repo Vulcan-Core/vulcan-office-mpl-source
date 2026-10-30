@@ -19,7 +19,9 @@
 #include <com/sun/star/chart/XChartDataArray.hpp>
 
 #include <sfx2/dispatch.hxx>
+#include <sfx2/request.hxx>
 #include <sfx2/viewfrm.hxx>
+#include <svl/stritem.hxx>
 #include <svx/svdpage.hxx>
 #include <editeng/eeitem.hxx>
 #include <editeng/adjustitem.hxx>
@@ -46,6 +48,7 @@
 #include <ndtxt.hxx>
 #include <ftnidx.hxx>
 #include <txtftn.hxx>
+#include <textsh.hxx>
 #include <unotxdoc.hxx>
 #include <tools/json_writer.hxx>
 
@@ -1358,6 +1361,86 @@ CPPUNIT_TEST_FIXTURE(SwUibaseShellsTest, testDocumentStructureUnoCommand)
                     { comphelper::makePropertyValue(u"DataJson"_ustr, aJson) });
 
     CPPUNIT_ASSERT(getSwDoc()->getIDocumentRedlineAccess().IsRedlineOn());
+}
+
+CPPUNIT_TEST_FIXTURE(SwUibaseShellsTest, testDocumentStructureResponseChannel)
+{
+    createSwDoc();
+    getSwDocShell()->GetWrtShell()->Insert(u"seed"_ustr);
+
+    // Let nested UnoCommands resolve against this Writer frame.
+    auto xDesktop = frame::Desktop::create(comphelper::getProcessComponentContext());
+    auto pFrame = getSwDocShell()->GetFrame();
+    CPPUNIT_ASSERT(pFrame);
+    xDesktop->setActiveFrame(pFrame->GetFrame().GetFrameInterface());
+
+    // Repeated top-level keys are intentional: the broker marker must be
+    // echoed without normalizing away either transform or changing its order.
+    static constexpr OUString aJson = uR"json(
+{
+    "ResponseChannel": "writer-special-channel",
+    "UnoCommand": {
+        "name": ".uno:SelectAll"
+    },
+    "UnoCommand": {
+        "name": ".uno:Cut"
+    }
+}
+)json"_ustr;
+
+    SwView* pView = getSwDocShell()->GetView();
+    CPPUNIT_ASSERT(pView);
+    SwTextShell aShell(*pView);
+    SfxRequest aRequest(pView->GetViewFrame(), FN_TRANSFORM_DOCUMENT_STRUCTURE);
+    aRequest.AppendItem(SfxStringItem(FN_PARAM_1, aJson));
+    aShell.Execute(aRequest);
+
+    uno::Reference<text::XTextDocument> xTextDocument(mxComponent, uno::UNO_QUERY);
+    CPPUNIT_ASSERT(xTextDocument.is());
+    CPPUNIT_ASSERT_EQUAL(OUString(), xTextDocument->getText()->getString());
+
+    const auto* pResult
+        = dynamic_cast<const SfxStringItem*>(aRequest.GetReturnValue().getItem());
+    CPPUNIT_ASSERT(pResult);
+    boost::property_tree::ptree aResult;
+    std::stringstream aResultStream(std::string(pResult->GetValue().toUtf8()));
+    boost::property_tree::read_json(aResultStream, aResult);
+    CPPUNIT_ASSERT(aResult.get<bool>("success"));
+    CPPUNIT_ASSERT_EQUAL(std::string("writer-special-channel"),
+                         aResult.get<std::string>("responseChannel"));
+
+    static constexpr OUString aFailingJson = uR"json(
+{
+    "ResponseChannel": "writer-failure-channel",
+    "UnoCommand": {}
+}
+)json"_ustr;
+    SfxRequest aFailingRequest(pView->GetViewFrame(), FN_TRANSFORM_DOCUMENT_STRUCTURE);
+    aFailingRequest.AppendItem(SfxStringItem(FN_PARAM_1, aFailingJson));
+    aShell.Execute(aFailingRequest);
+
+    pResult = dynamic_cast<const SfxStringItem*>(
+        aFailingRequest.GetReturnValue().getItem());
+    CPPUNIT_ASSERT(pResult);
+    aResult.clear();
+    aResultStream.clear();
+    aResultStream.str(std::string(pResult->GetValue().toUtf8()));
+    boost::property_tree::read_json(aResultStream, aResult);
+    CPPUNIT_ASSERT(!aResult.get<bool>("success"));
+    CPPUNIT_ASSERT_EQUAL(std::string("writer-failure-channel"),
+                         aResult.get<std::string>("responseChannel"));
+
+    static constexpr OUString aUnmarkedFailingJson = uR"json(
+{
+    "UnoCommand": {}
+}
+)json"_ustr;
+    SfxRequest aUnmarkedFailingRequest(
+        pView->GetViewFrame(), FN_TRANSFORM_DOCUMENT_STRUCTURE);
+    aUnmarkedFailingRequest.AppendItem(
+        SfxStringItem(FN_PARAM_1, aUnmarkedFailingJson));
+    CPPUNIT_ASSERT_THROW(aShell.Execute(aUnmarkedFailingRequest),
+                         boost::property_tree::ptree_bad_path);
 }
 
 CPPUNIT_TEST_FIXTURE(SwUibaseShellsTest, testUpdateRefmarks)

@@ -61,6 +61,11 @@ public:
     /// What's the requested view? E.g. "web".
     Id GetView() const;
 
+    bool IsOOXMLImport() const;
+
+    /// Original OOXML view/zoom elements, including element and attribute absence.
+    cpo::uno::Sequence<css::beans::PropertyValue> GetOOXMLViewSettings() const;
+
     bool GetEvenAndOddHeaders() const;
 
     bool GetUsePrinterMetrics() const;
@@ -109,6 +114,9 @@ public:
 
     bool GetRecordChanges() const;
 
+    /// w:updateFields: the file asks for its fields to be updated when it is opened.
+    bool GetUpdateFields() const;
+
     bool GetEndnoteIsCollectAtSectionEnd() const;
 
     bool GetDoNotVertAlignCellWithSp() const;
@@ -130,10 +138,16 @@ private:
     bool m_bShowFormattingChanges;
     bool m_bShowMarkupChanges;
     std::optional<bool> m_oLinkStyles;
+    bool m_bIsOOXMLImport;
     sal_Int16 m_nZoomFactor;
     sal_Int16 m_nZoomType = 0;
     sal_Int32 m_nWordCompatibilityMode;
     Id m_nView;
+    bool m_bOOXMLViewPresent = false;
+    bool m_bOOXMLZoomPresent = false;
+    std::optional<Id> m_oOOXMLViewValue;
+    std::optional<Id> m_oOOXMLZoomValue;
+    std::optional<sal_Int32> m_oOOXMLZoomPercent;
     bool m_bEvenAndOddHeaders;
     bool m_bUsePrinterMetrics;
     bool embedTrueTypeFonts;
@@ -172,6 +186,7 @@ private:
     std::shared_ptr<DocumentProtection> m_pDocumentProtection;
     std::shared_ptr<WriteProtection> m_pWriteProtection;
     bool m_bGutterAtTop = false;
+    bool m_bUpdateFields = false;
     bool m_bDoNotBreakWrappedTables = false;
     bool m_bAllowTextAfterFloatingTableBreak = false;
     /// Endnotes at section end, not at document end.

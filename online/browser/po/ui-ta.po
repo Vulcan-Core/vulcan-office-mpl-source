@@ -7053,7 +7053,7 @@ msgstr ""
 "<a target=\"_blank\" rel=\"noopener\" href=\"https://www.collaboraonline.com/"
 "code-26-04-release-notes/\">வெளியீட்டுக் குறிப்புகளைச்</a> சரிபார்த்து, "
 "வீட்டுப் பயனர்களையும் சிறிய குழுக்களையும் இலக்காகக் கொண்ட அண்மைக் கால "
-"Collabora நிகழ்நிலை டெவலப்மென்ட் பதிப்பைப் பற்றி அனைத்தையும் அறியவும்."
+"Vulcan Office நிகழ்நிலை டெவலப்மென்ட் பதிப்பைப் பற்றி அனைத்தையும் அறியவும்."
 
 #: welcome/welcome.html%2Bhtml.body.div.div.div.div.h1:48-7
 msgid "Get Involved"

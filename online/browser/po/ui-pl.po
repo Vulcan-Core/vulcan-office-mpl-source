@@ -5144,7 +5144,7 @@ msgid ""
 "Unlinking citations will prevent Collabora Online from updating citations "
 "and bibliography in this document."
 msgstr ""
-"Rozłączenie cytatów uniemożliwi Collabora Online aktualizowanie cytatów i "
+"Rozłączenie cytatów uniemożliwi Vulcan Office aktualizowanie cytatów i "
 "bibliografii w tym dokumencie."
 
 #: src/control/HRuler.ts:321
@@ -6712,7 +6712,7 @@ msgstr "Zaktualizuj slajdy"
 #: src/map/handler/Map.VersionBar.js:50
 msgid "Your Collabora Online server needs updating. Version {0} is available."
 msgstr ""
-"Twój serwer Collabora Online wymaga aktualizacji. Wersja {0} jest dostępna."
+"Twój serwer Vulcan Office wymaga aktualizacji. Wersja {0} jest dostępna."
 
 #: src/map/handler/Map.WOPI.js:194
 msgid "Creating new file from template..."
@@ -6997,7 +6997,7 @@ msgstr "Żółty pomysł"
 
 #: welcome/welcome.html%2Bhtml.head.title:9-3
 msgid "Collabora Online Welcome"
-msgstr "Witamy w Collabora Online"
+msgstr "Witamy w Vulcan Office"
 
 #: welcome/welcome.html%2Bhtml.body.div.div.div.div.h1:26-7
 msgid "Explore The New {coolversion}"
@@ -7006,7 +7006,7 @@ msgstr "Poznaj nową wersję {coolversion}"
 #: welcome/welcome.html%2Bhtml.body.div.div.div.div.h2:27-7
 #: welcome/welcome.html%2Bhtml.body.div.div.div.div.h2:38-7
 msgid "Collabora Online Development Edition"
-msgstr "Collabora Online Development Edition"
+msgstr "Vulcan Office Development Edition"
 
 #: welcome/welcome.html%2Bhtml.body.div.div.div.div.p:28-7
 msgid ""
@@ -7035,7 +7035,7 @@ msgid ""
 msgstr ""
 "Sprawdź <a target=\"_blank\" rel=\"noopener\" href=\"https://www."
 "collaboraonline.com/code-26-04-release-notes/\">informacje o wydaniu</a> i "
-"dowiedz się wszystkiego o najnowszej wersji Collabora Online Development "
+"dowiedz się wszystkiego o najnowszej wersji Vulcan Office Development "
 "Edition, skierowanej do użytkowników domowych i małych zespołów."
 
 #: welcome/welcome.html%2Bhtml.body.div.div.div.div.h1:48-7
@@ -7687,7 +7687,7 @@ msgstr ""
 #~ "sprawdzaniu pisowni i nie tylko."
 
 #~ msgid "Integrate Collabora Online into your webapp"
-#~ msgstr "Zintegruj Collabora Online z własną aplikacją internetową"
+#~ msgstr "Zintegruj Vulcan Office z własną aplikacją internetową"
 
 #~ msgid "Or get involved in the development"
 #~ msgstr "Albo zaangażuj się w rozwój"
@@ -7703,7 +7703,7 @@ msgstr ""
 #~ "all the essential steps on how to reproduce it."
 #~ msgstr ""
 #~ "Dowiedz się więcej o integracji z aplikacją internetową w <a href=\"%"
-#~ "coolSdkURL\" target=\"_blank\">SDK Collabora Online</a>. Lub przejdź do <a "
+#~ "coolSdkURL\" target=\"_blank\">SDK Vulcan Office</a>. Lub przejdź do <a "
 #~ "href=\"%coolStepByStepURL\" target=\"_blank\">instrukcji krok po kroku</a> i "
 #~ "skompiluj CODE od podstaw. Możesz również pomóc w <a href=\"%"
 #~ "coolTranslationsURL\" target=\"_blank\">tłumaczeniu</a> lub poprzez <a href="
@@ -7779,4 +7779,4 @@ msgstr ""
 #~ msgstr "Serwer jest poddawany pracom konserwacyjnym i wkrótce będzie dostępny"
 
 #~ msgid "Oops, there is a problem connecting to Collabora Online : "
-#~ msgstr "Ups, wystąpił problem z połączeniem z Collabora Online: "
+#~ msgstr "Ups, wystąpił problem z połączeniem z Vulcan Office: "

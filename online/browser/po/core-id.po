@@ -40,8 +40,8 @@ msgid ""
 "Technology, provided by Collabora Productivity. See "
 "https://collaboraoffice.com"
 msgstr ""
-"Collabora Office, keluarga produktivitas perkantoran berdasarkan Teknologi "
-"LibreOffice, disediakan oleh Collabora Productivity. Lihat "
+"Vulcan Office, keluarga produktivitas perkantoran berdasarkan Teknologi "
+"Vulcan Office, disediakan oleh Vulcan AI. Lihat "
 "https://collaboraoffice.com"
 
 #. 4rBwc
@@ -165,7 +165,7 @@ msgid ""
 "href=\"https://collaboraoffice.com\">https://CollaboraOffice.com/</a>."
 msgstr ""
 "Untuk informasi lebih lanjut silakan kunjungi beranda ${PRODUCTNAME} di <a "
-"href=\"https://collaboraoffice.com\">https://CollaboraOffice.com/</a>."
+"href=\"https://collaboraoffice.com\">https://Vulcan OfficeOffice.com/</a>."
 
 #. SbQew
 #: chart2/inc/strings.hrc:51

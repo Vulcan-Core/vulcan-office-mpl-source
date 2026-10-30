@@ -24,6 +24,7 @@
 #include <com/sun/star/linguistic2/XSpellChecker.hpp>
 
 #include <View.hxx>
+#include <VulcanHiddenInk.hxx>
 #include <slideshow.hxx>
 #include <avmedia/mediawindow.hxx>
 #include <editeng/outlobj.hxx>
@@ -35,6 +36,10 @@
 #include <svx/svdograf.hxx>
 #include <svx/svdoole2.hxx>
 #include <svx/svdundo.hxx>
+#include <svx/sdtagitm.hxx>
+#include <svx/sdtfsitm.hxx>
+#include <svx/sdtmfitm.hxx>
+#include <com/sun/star/drawing/TextFitToSizeType.hpp>
 
 #include <vcl/settings.hxx>
 
@@ -142,6 +147,7 @@ void View::ImplClearDrawDropMarker()
 
 View::~View()
 {
+    sd::hiddenink::ForgetView(*this);
     maSmartTags.Dispose();
 
     // release content of selection clipboard, if we own the content
@@ -523,7 +529,25 @@ void View::MarkListHasChanged()
 
 bool View::SetAttributes(const SfxItemSet& rSet, bool bReplaceAll, bool /*bSlide*/, bool /*bMaster*/)
 {
-    bool bOk = FmFormView::SetAttributes(rSet, bReplaceAll);
+    // Editable scanned PDFs: restyling a hidden-ink OCR line is its first
+    // real change - it becomes visible and the scan under it is covered,
+    // in the same undo as the restyle.
+    if (IsTextEdit())
+    {
+        sd::hiddenink::BeforeTextChange(*this);
+        return FmFormView::SetAttributes(rSet, bReplaceAll);
+    }
+    const SdrMarkList& rMarkList = GetMarkedObjectList();
+    bool bHiddenLineMarked = false;
+    for (size_t n = 0; n < rMarkList.GetMarkCount() && !bHiddenLineMarked; ++n)
+        if (const SdrObject* pMarked = rMarkList.GetMark(n)->GetMarkedSdrObj())
+            bHiddenLineMarked = sd::hiddenink::IsHiddenLine(*pMarked);
+    if (!bHiddenLineMarked)
+        return FmFormView::SetAttributes(rSet, bReplaceAll);
+    BegUndo(u"Edit scanned text"_ustr);
+    sd::hiddenink::BeforeSetAttributesOnMarked(*this);
+    const bool bOk = FmFormView::SetAttributes(rSet, bReplaceAll);
+    EndUndo();
     return bOk;
 }
 
@@ -701,6 +725,12 @@ bool View::SdrBeginTextEdit(
 
         SetSpellOptions( mrDoc, nCntrl );
 
+        // A hidden-ink OCR line paints nothing over its scan; spelling
+        // squiggles under it would. BeforeTextChange turns spelling back on
+        // when the line becomes visible.
+        if (pObj && sd::hiddenink::IsHiddenLine(*pObj))
+            nCntrl &= ~EEControlBits::ONLINESPELLING;
+
         pOutl->SetControlWord(nCntrl);
 
         Reference< linguistic2::XSpellChecker > xSpellChecker( LinguMgr::GetSpellChecker() );
@@ -719,10 +749,62 @@ bool View::SdrBeginTextEdit(
         setInteractiveSlideShow(false);
     }
 
+    // VULCAN: text boxes hug while typing. Any box entering text edit
+    // is armed to grow with its text, so typing never spills past the
+    // frame — uniform with the fit verb and InsertTextBox, which arm
+    // the same way. The arm happens BEFORE the base call because
+    // BegTextEdit configures the edit outliner's paper bounds from the
+    // autogrow state — armed after, the paper stays clamped to the
+    // frame and the outliner never reports growth. pObj is never null
+    // on a successful begin (the base rejects null), and bIsNewObj is
+    // NOT a guard: FuText::SetInEditMode hardcodes it true for every
+    // interactive edit (it drives default-text deletion, not newness).
+    // pGivenOutlinerView marks the search/spell re-entry path, which
+    // must not mutate the boxes it visits. Shrink-autofit boxes keep
+    // their own overflow handling, vertical text grows on the other
+    // axis, tables own their text flow, and master pages keep their
+    // layout geometry. First keystroke settles an already-overflowing
+    // box.
+    SdrTextObj* pVulcanArmedObj = nullptr;
+    tools::Long nVulcanPrevMinHeight = 0;
+    if (comphelper::COKit::isActive() && !bMasterPage && !pGivenOutlinerView)
+    {
+        SdrTextObj* pVulcanTextObj = DynCastSdrTextObj(pObj);
+        if (pVulcanTextObj && !pVulcanTextObj->IsAutoGrowHeight()
+            && !pVulcanTextObj->IsVerticalWriting()
+            && pVulcanTextObj->GetObjIdentifier() != SdrObjKind::Table
+            && pVulcanTextObj->GetMergedItemSet()
+                       .GetItem<SdrTextFitToSizeTypeItem>(SDRATTR_TEXT_FITTOSIZE)
+                       ->GetValue()
+                   == drawing::TextFitToSizeType_NONE)
+        {
+            pVulcanArmedObj = pVulcanTextObj;
+            nVulcanPrevMinHeight
+                = pVulcanTextObj->GetMergedItem(SDRATTR_TEXT_MINFRAMEHEIGHT)
+                      .GetValue();
+            pVulcanTextObj->SetMergedItem(makeSdrTextAutoGrowHeightItem(true));
+            // Zero the floor AFTER the flip: enabling the mode reseeds
+            // the minimum from the current rect.
+            pVulcanTextObj->SetMergedItem(makeSdrTextMinFrameHeightItem(0));
+        }
+    }
+
     bool bReturn = FmFormView::SdrBeginTextEdit(
         pObj, pPV, pWin, bIsNewObj, pOutl,
         pGivenOutlinerView, bDontDeleteOutliner,
         bOnlyOneView, bGrabFocus);
+
+    if (bReturn)
+        sd::hiddenink::AfterBeginTextEdit(*this, pObj);
+
+    if (pVulcanArmedObj && !bReturn)
+    {
+        // The edit did not begin (locked layer, no window or page
+        // view): put the arm back the way it was.
+        pVulcanArmedObj->SetMergedItem(makeSdrTextAutoGrowHeightItem(false));
+        pVulcanArmedObj->SetMergedItem(
+            makeSdrTextMinFrameHeightItem(nVulcanPrevMinHeight));
+    }
 
     if ( mpViewSh )
     {
@@ -804,7 +886,20 @@ SdrEndTextEditKind View::SdrEndTextEdit(bool bDontDeleteReally)
             mpDocSh->EnableSetModified(false);
     }
 
+    // Editable scanned PDFs: a hidden-ink line made visible in this edit
+    // owes the scan's cover to the document undo, in ONE action with the
+    // text: one Ctrl+Z puts back the text and the printed ink together. One
+    // whose text came back unchanged is put back first and owes nothing.
+    sd::hiddenink::BeforeEndTextEdit(*this);
+    const bool bHiddenInkGroup = sd::hiddenink::HasPendingEdit(*this);
+    if (bHiddenInkGroup)
+        BegUndo(u"Edit scanned text"_ustr);
     SdrEndTextEditKind eKind = FmFormView::SdrEndTextEdit(bDontDeleteReally);
+    if (bHiddenInkGroup)
+    {
+        sd::hiddenink::AfterEndTextEdit(*this, pObj);
+        EndUndo();
+    }
 
     if( bDefaultTextRestored )
     {

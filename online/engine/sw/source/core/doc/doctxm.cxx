@@ -56,6 +56,7 @@
 #include <fmtcol.hxx>
 #include <fldbas.hxx>
 #include <fmtfld.hxx>
+#include <fmtline.hxx>
 #include <txtfld.hxx>
 #include <expfld.hxx>
 #include <mvsave.hxx>
@@ -1095,6 +1096,8 @@ void SwTOXBaseSection::Update(const SfxItemSet* pAttr,
 
     // remove old content an insert one empty textnode (to hold the layout!)
     SwTextNode* pFirstEmptyNd;
+    // Did the old index have text and count none of its lines?
+    bool bNoLineCount = false;
 
     SwUndoUpdateIndex * pUndo(nullptr);
     {
@@ -1102,6 +1105,19 @@ void SwTOXBaseSection::Update(const SfxItemSet* pAttr,
 
         SwNodeIndex aSttIdx( *pSectNd, +1 );
         SwNodeIndex aEndIdx( *pSectNd->EndOfSectionNode() );
+        // A DOCX contents list in a section without w:lnNumType is imported with line counting
+        // off on each of its paragraphs (DomainMapper_Impl::SuppressLineNumbers); the paragraphs
+        // made below replace them and must not count either, or the margin numbers them and the
+        // DOCX export gives that section lnNumType.
+        for (SwNodeOffset n = aSttIdx.GetIndex(); n < aEndIdx.GetIndex(); ++n)
+        {
+            if (const SwTextNode* pTextNd = rDoc.GetNodes()[n]->GetTextNode())
+            {
+                bNoLineCount = !pTextNd->GetSwAttrSet().GetLineNumber().IsCount();
+                if (!bNoLineCount)
+                    break;
+            }
+        }
         pFirstEmptyNd = rDoc.GetNodes().MakeTextNode( aEndIdx.GetNode(),
                         rDoc.getIDocumentStylePoolAccess().GetTextCollFromPool( SwPoolFormatId::COLL_TEXT ) );
 
@@ -1259,6 +1275,22 @@ void SwTOXBaseSection::Update(const SfxItemSet* pAttr,
     // don't delete if index is empty
     if(nIdx + SwNodeOffset(2) < pSectNd->EndOfSectionIndex())
         rDoc.GetNodes().Delete( aInsPos );
+
+    // The new paragraphs count no lines when the old ones counted none (see above). Each keeps
+    // its own item with only the count flag off: an old paragraph's item could carry a start
+    // value and restart the numbering there.
+    if (bNoLineCount)
+    {
+        for (SwNodeOffset n = nIdx + 1; n < pSectNd->EndOfSectionIndex(); ++n)
+        {
+            SwTextNode* pTextNd = rDoc.GetNodes()[n]->GetTextNode();
+            if (!pTextNd || !pTextNd->GetSwAttrSet().GetLineNumber().IsCount())
+                continue;
+            SwFormatLineNumber aLineNumber(pTextNd->GetSwAttrSet().GetLineNumber());
+            aLineNumber.SetCountLines(false);
+            pTextNd->SetAttr(aLineNumber);
+        }
+    }
 
     aN2L.RestoreUpperFrames( rDoc.GetNodes(), nIdx, nIdx + 1 );
     o3tl::sorted_vector<SwRootFrame*> aAllLayouts = rDoc.GetAllLayouts();

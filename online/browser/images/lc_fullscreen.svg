@@ -1,8 +1,8 @@
 <?xml-stylesheet type="text/css" href="icons.css" ?>
 <svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
   <g id="symbol"
-     fill="#63BBEE" 
-     stroke="#0369A3" 
+     fill="currentColor" 
+     stroke="currentColor" 
 	 stroke-linecap="round" 
 	 stroke-linejoin="round"
       >

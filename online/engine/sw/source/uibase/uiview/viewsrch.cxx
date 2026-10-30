@@ -45,6 +45,10 @@
 #include <uitool.hxx>
 #include <cmdid.h>
 #include <docsh.hxx>
+// Vulcan: doc.hxx for SwDoc::CreateUnoCursor()/GetNodes(), unocrsr.hxx for the
+// private counting cursor -- both only for lcl_PublishPhoneMatchOrdinal below.
+#include <doc.hxx>
+#include <unocrsr.hxx>
 #include <COKit/COKitEnums.h>
 #include <comphelper/kit.hxx>
 #include <comphelper/string.hxx>
@@ -128,6 +132,267 @@ static void lcl_emitSearchResultCallbacks(SvxSearchItem const * pSearchItem, SwW
         KitHelper::notifyUpdate(pNotifySh,KIT_CALLBACK_TEXT_SELECTION);
         KitHelper::notifyOtherViewsUpdatePerViewId(pNotifySh, KIT_CALLBACK_TEXT_VIEW_SELECTION);
     }
+}
+
+/* Vulcan: WHY a phone FIND produced no ordinal.
+ *
+ * These ride the `total` field of the `.uno:SearchOrdinal` state change. The
+ * client's rule is unchanged and needs no knowledge of them: anything below 1
+ * means "no ordinal, clear the label" (Control.MobileSearchBar.parseOrdinal
+ * rejects a non-digit outright). So the diagnosis is carried in a field the
+ * consumer already ignores, and costs the client nothing.
+ *
+ * THIS EXISTS BECAUSE 0;0 WAS AMBIGUOUS, and the ambiguity cost a whole build
+ * cycle: a phone find on a real slot returned 0;0 with a match plainly found
+ * (one rectangle in the searchresultselection alongside it), and every one of
+ * the declines below is indistinguishable from every other -- and from the
+ * legitimate "this search has no ordinal" answer. A wire that says which
+ * branch fired turns a guess into a reading.
+ *
+ * PERMANENT, not scaffolding to be pulled out after the next build. The
+ * ambiguity is a defect in its own right: 0 remains the value nothing sets on
+ * purpose, so a 0 in the wild now means the producer never ran at all, which
+ * is itself the most useful thing that field could say.
+ *
+ * The FIRST field (`current`) carries an auxiliary number during a decline --
+ * also ignored by the client, for the same reason -- chosen per branch to be
+ * the number a reader would ask for next. Most importantly it carries the
+ * SWEEP'S OWN COUNT on the two reconciliation failures, which is what
+ * separates "the sweep found nothing" from "the sweep worked and the two walks
+ * disagreed". */
+constexpr sal_Int32 PHONE_ORDINAL_SEARCH_ATTRIBUTES = -1;
+constexpr sal_Int32 PHONE_ORDINAL_SELECTION_SCOPED = -2;
+constexpr sal_Int32 PHONE_ORDINAL_NODE_BUDGET = -3;
+constexpr sal_Int32 PHONE_ORDINAL_SWEEP_CANCELLED = -4;
+constexpr sal_Int32 PHONE_ORDINAL_SWEEP_FOUND_NOTHING = -5;
+constexpr sal_Int32 PHONE_ORDINAL_MATCH_OUTSIDE_BODY = -6;
+constexpr sal_Int32 PHONE_ORDINAL_RING_ENTRY_OUTSIDE_BODY = -7;
+constexpr sal_Int32 PHONE_ORDINAL_MATCH_NOT_IN_RING = -8;
+constexpr sal_Int32 PHONE_ORDINAL_NO_SHELL_CURSOR = -9;
+
+/* Vulcan: the phone's "N of M" match count -- the Writer producer for
+ * SvxSearchDialogWrapper::SetSearchLabel(sal_Int32, sal_Int32). Calc's producer
+ * is lcl_PublishPhoneMatchOrdinal in sc/source/ui/view/viewfun2.cxx; this is
+ * the same shape on Writer's data.
+ *
+ * TWO CONSUMERS, ONE COMPUTATION. SetSearchLabel feeds the find & replace
+ * SHEET, which is the only sink that existed when this was written and which
+ * only receives anything while that sheet is OPEN. The caller also puts the
+ * pair returned through rOutCurrent/rOutTotal on the wire as
+ * `.uno:SearchOrdinal`, for the phone find BAR -- the surface a phone Writer
+ * user actually reaches from Ctrl-F and from the kebab's Search row. Neither
+ * sink may be given a number this function did not produce.
+ *
+ * WHY A SECOND SWEEP IS UNAVOIDABLE. A total is a total, and nothing on the
+ * FIND path knows one: SearchAndWrap resolves a single match and stops.
+ * SearchAll() below does return a count, but it is the FIND_ALL command -- it
+ * selects every match, so there is no "current" left to be Nth of, and it
+ * moves the user's cursor.
+ *
+ * WHY THIS CURSOR AND NOT THE SHELL'S. SwDoc::CreateUnoCursor hands out an
+ * SwUnoCursor that is not in the shell's cursor ring, so nothing the sweep
+ * does can move the caret, the selection or the visible area -- the same
+ * primitive SwXTextDocument::findAll uses. It is read-only by construction
+ * too: SwCursor::Find_Text opens an undo object and sets the modified flag
+ * only when bReplace is true, and SwFindParaText::DoFind's replace arm -- the
+ * only writer -- is behind that same flag (sw/source/core/crsr/findtxt.cxx).
+ *
+ * WHY IT IS AFFORDABLE: it is phone-only (isKitMobilePhone), it is the same
+ * work as tapping "Find All", and it is capped by the node budget below, so a
+ * phone that opens a book loses the count rather than the frame rate. The
+ * count is a nicety; the search is not.
+ *
+ * THREE KNOBS ARE MATCHED TO THE SHELL CURSOR DELIBERATELY, because a sweep
+ * that saw a different match set would produce a confidently wrong number:
+ *  - the layout, because SwCursorShell::Find_Text forwards GetLayout() to
+ *    SwCursor::Find_Text (sw/source/core/crsr/crsrsh.cxx); without it the
+ *    sweep counts text the layout hides from the user's own search;
+ *  - IsSkipOverHiddenSections(), which SwCursor -- the shell cursor's
+ *    implementation -- returns true while SwUnoCursor defaults it to false;
+ *  - IsSkipOverProtectSections(), which SwCursor derives from
+ *    IsReadOnlyAvailable(). SwUnoCursor hardcodes IsReadOnlyAvailable() to
+ *    true, so the two agree only when the shell agrees, which is why the
+ *    caller tests SwCursorShell::IsReadOnlyAvailable() before coming here.
+ */
+static void lcl_PublishPhoneMatchOrdinal(SwDoc& rDoc, SwRootFrame* pLayout,
+                                         const SvxSearchItem& rSearchItem,
+                                         bool bHasSearchAttributes,
+                                         const SwPaM& rFound,
+                                         sal_Int32& rOutCurrent, sal_Int32& rOutTotal)
+{
+    /* Every `return` below goes through this, so a branch that forgets to say
+     * why cannot compile to a silent 0. */
+    auto decline = [&rOutCurrent, &rOutTotal](sal_Int32 nAux, sal_Int32 nReason) {
+        rOutCurrent = nAux;
+        rOutTotal = nReason;
+    };
+
+    /* Only a plain text search can be reproduced from here. An attribute or
+     * paragraph-style search goes through FindAttrs()/FindFormat() with item
+     * sets built in FUNC_Search below, and a second copy of that set-building
+     * would cost more than the count is worth. */
+    if (bHasSearchAttributes || rSearchItem.GetPattern()
+        || rSearchItem.GetSearchString().isEmpty())
+    {
+        decline(0, PHONE_ORDINAL_SEARCH_ATTRIBUTES);
+        return;
+    }
+
+    /* A selection-scoped search cannot be counted from here either:
+     * SwCursor::Find_Text ORs FindRanges::InSel into the ranges (findtxt.cxx,
+     * off searchFlag's REG_NOT_BEGINOFLINE, which SvxSearchItem::SetSelection
+     * mirrors), which walks
+     * the ring of the cursor it is called on -- and the private cursor below
+     * has a ring of one, not the view's selection. No ordinal beats a wrong
+     * one. */
+    if (rSearchItem.GetSelection())
+    {
+        decline(0, PHONE_ORDINAL_SELECTION_SCOPED);
+        return;
+    }
+
+    /* Cost budget, the analogue of Calc's used-area cap. SwNodes::Count() is
+     * O(1), so the guard itself is free. */
+    if (rDoc.GetNodes().Count() > SwNodeOffset(20000))
+    {
+        decline(sal_Int32(rDoc.GetNodes().Count()), PHONE_ORDINAL_NODE_BUDGET);
+        return;
+    }
+
+    /* Exactly FUNC_Search's option handling, so the sweep matches what the
+     * user is walking. The replace string is cleared there on every non-replace
+     * command, and this is only ever reached on FIND. */
+    i18nutil::SearchOptions2 aSearchOpt(rSearchItem.GetSearchOptions());
+    aSearchOpt.Locale = GetAppLanguageTag().getLocale();
+    aSearchOpt.replaceString.clear();
+
+    /* Seeded at the match just found only because that is a position certain
+     * to be valid -- the InSelAll arm of SwCursor::FindAll re-spans the range
+     * itself from the flags below. SetRemainInSection(false) is what
+     * SwXTextDocument::CreateCursorForSearch does and for the same reason: an
+     * SwUnoCursor otherwise refuses to leave its seed section. */
+    const SwPosition& rFoundStart = *rFound.Start();
+    auto pCountCursor(rDoc.CreateUnoCursor(rFoundStart));
+    pCountCursor->SetRemainInSection(false);
+    pCountCursor->SetSkipOverHiddenSections(true);
+    pCountCursor->SetSkipOverProtectSections(false);
+
+    /* ⚠ InSelAll ALONE IS THE WRONG RANGE FOR THIS FUNCTION, and it is what
+     * shipped first. sw's own table states the vocabulary
+     * (sw/source/uibase/uno/unotxdoc.cxx, above SwXTextDocument::findFirst):
+     *
+     *     Search all in the body:  FindRanges::InBodyOnly | FindRanges::InSelAll
+     *     Search everywhere all:   FindRanges::InSelAll
+     *
+     * and this function is the first line, not the second: every guard below
+     * REJECTS a match outside the body, because document order only agrees
+     * with SearchAndWrap's walk order inside it. Asking for everywhere and
+     * then discarding everything that is not the body is not a filter, it is a
+     * contradiction -- on any document with the term in a header, a footer, a
+     * frame or a footnote the sweep returns those matches, the ring check
+     * below trips on the first of them, and the ordinal is declined for a
+     * perfectly ordinary body search. SwCursor::FindAll reads the flag
+     * directly: InBodyOnly starts the span at GetEndOfContent()'s section
+     * node, i.e. the body, instead of GetEndOfPostIts()'s, i.e. everything.
+     *
+     * The body guards below are kept even so. They are cheap, and they now
+     * assert the range rather than substitute for it -- if a future edit drops
+     * InBodyOnly, they turn the mistake into a declined ordinal with a reason
+     * code on the wire instead of a confidently wrong number. */
+    bool bCancel = false;
+    const sal_Int32 nTotal = pCountCursor->Find_Text(aSearchOpt, rSearchItem.GetNotes(),
+                                                     SwDocPositions::Start, SwDocPositions::End,
+                                                     bCancel,
+                                                     FindRanges::InSelAll
+                                                         | FindRanges::InBodyOnly,
+                                                     /*bReplace*/false, pLayout);
+    if (bCancel)
+    {
+        decline(nTotal, PHONE_ORDINAL_SWEEP_CANCELLED);
+        return;
+    }
+    if (nTotal < 1)
+    {
+        /* The aux is searchFlag, not 0, because a zero sweep next to a found
+         * match has one prime suspect and this settles it without another
+         * build: Find_Text ORs FindRanges::InSel in when searchFlag carries
+         * REG_NOT_BEGINOFLINE (0x800), and FindAll's InSel arm searches the
+         * cursor's OWN selection ring -- which for this private, collapsed
+         * cursor is empty, so it returns 0 every time. SvxSearchItem keeps
+         * that bit in step with GetSelection(), which is already refused
+         * above, but the two can only be trusted to agree while nothing sets
+         * the flags field directly, and the client does send
+         * SearchItem.SearchFlags on every search. A non-zero aux here with
+         * 0x800 set is that desync, caught. */
+        decline(aSearchOpt.searchFlag, PHONE_ORDINAL_SWEEP_FOUND_NOTHING);
+        return;
+    }
+
+    /* Document order is the walk order only inside the body. InSelAll spans
+     * the extras -- headers, footers, footnotes, frames -- and SwNodes sorts
+     * those BEFORE the body (GetEndOfExtras() is documented as the last node
+     * before the body text), while SearchAndWrap visits the body first and the
+     * extras afterwards through a static, s_bExtra, whose order is not
+     * reproducible from here. So publish nothing unless every match, and the
+     * one being numbered, lies in the body, where the two orders do agree. The
+     * body test is the one lcl_IsOutlineMoveAndCopyable already uses
+     * (sw/source/core/edit/ednumber.cxx). */
+    const SwNodeOffset nBodyStart = rDoc.GetNodes().GetEndOfExtras().GetIndex();
+    if (rFoundStart.GetNodeIndex() < nBodyStart)
+    {
+        decline(sal_Int32(rFoundStart.GetNodeIndex()),
+                PHONE_ORDINAL_MATCH_OUTSIDE_BODY);
+        return;
+    }
+
+    /* Here the ring size IS the count, unlike Calc's joined ScRangeList:
+     * SwCursor::FindAll's InSelAll arm drops its own ring, adopts the found
+     * ring and deletes the head it copied from, and lcl_FindSelection only
+     * omits a ring entry on FIND_NO_RING, which the text matcher returns from
+     * its replace arm alone. The ordinal is still computed positionally rather
+     * than by ring index, because that merge decides the order and the search
+     * direction does not. */
+    const bool bBackward = rSearchItem.GetBackward();
+    sal_Int32 nBefore = 0;
+    bool bFoundInRing = false;
+    for (SwPaM& rMatch : pCountCursor->GetRingContainer())
+    {
+        const SwPosition& rStart = *rMatch.Start();
+        if (rStart.GetNodeIndex() < nBodyStart)
+        {
+            decline(nTotal, PHONE_ORDINAL_RING_ENTRY_OUTSIDE_BODY);
+            return;
+        }
+        if (rStart == rFoundStart)
+            bFoundInRing = true;
+        else if (bBackward ? rFoundStart < rStart : rStart < rFoundStart)
+            ++nBefore;
+    }
+
+    /* If the sweep never landed on the match the view is actually showing, the
+     * two walks disagree and any ordinal would be invented. */
+    if (!bFoundInRing)
+    {
+        decline(nTotal, PHONE_ORDINAL_MATCH_NOT_IN_RING);
+        return;
+    }
+
+    SvxSearchDialogWrapper::SetSearchLabel(nBefore + 1, nTotal);
+
+    /* Vulcan: hand the SAME pair back to the caller, which puts it on the wire
+     * for the phone find BAR (the label above only ever reaches the find
+     * SHEET -- see the caller for why those are two different surfaces).
+     *
+     * Written as two out-params after the label call rather than as a return
+     * value, so that every `return` above -- attribute search, pattern search,
+     * selection-scoped search, the node budget, a match outside the body, a
+     * ring that does not contain the match the view is showing -- keeps
+     * leaving them at the caller's 0, which is this file's existing "no
+     * ordinal" answer. There is exactly ONE computation behind both sinks, so
+     * the bar and the sheet cannot disagree, and a future early return is
+     * correct here for free instead of needing to be remembered. */
+    rOutCurrent = nBefore + 1;
+    rOutTotal = nTotal;
 }
 
 void SwView::ExecSearch(SfxRequest& rReq)
@@ -258,6 +523,103 @@ void SwView::ExecSearch(SfxRequest& rReq)
                     Scroll(m_pWrtShell->GetCharRect().SVRect());
                     if (comphelper::COKit::isActive())
                         lcl_emitSearchResultCallbacks(s_pSrchItem, m_pWrtShell.get(), /* bHighlightAll = */ false);
+
+                    /* Vulcan: "3 of 12", for BOTH phone find surfaces -- the
+                     * `searchlabel` in the Find & Replace sheet, and (below)
+                     * the wire for the phone find bar. See
+                     * lcl_PublishPhoneMatchOrdinal above for how the count is
+                     * taken and what it costs. Written as its own block rather
+                     * than folded into the COKit `if` above so that no upstream
+                     * line changes, which is one fewer rebase conflict every
+                     * time this file moves.
+                     *
+                     * LAST WRITER WINS, DELIBERATELY. This overwrites the
+                     * "Reached the end of the document" notice SearchAndWrap
+                     * just set. That is Google's phone behaviour: the search
+                     * wraps silently and the ordinal restarts at 1. On
+                     * NOT-FOUND bRet is false, so SearchLabel::NotFound stands.
+                     *
+                     * The gates are Calc's, one for one (viewfun2.cxx): COKit,
+                     * FIND, not-api -- Calc's bIsApi is rReq.IsAPI() at
+                     * sc/source/ui/view/tabvwshe.cxx -- and phone. The
+                     * IsReadOnlyAvailable() test is the extra one the helper's
+                     * header explains. */
+                    SfxViewShell* pPhoneSh = comphelper::COKit::isActive() && !rReq.IsAPI()
+                                                 ? m_pWrtShell->GetSfxViewShell()
+                                                 : nullptr;
+                    if (pPhoneSh && pPhoneSh->isKitMobilePhone()
+                        && m_pWrtShell->IsReadOnlyAvailable())
+                    {
+                        /* GetCursor() is fetched only inside the gate: on a
+                         * phone lcl_emitSearchResultCallbacks above has already
+                         * called it, so this costs nothing, and off the phone it
+                         * is never reached -- desktop executes only the two
+                         * tests above, exactly as Calc's producer does. */
+                        sal_Int32 nPhoneOrdinal = 0;
+                        sal_Int32 nPhoneTotal = 0;
+                        if (SwCursor* pFound = m_pWrtShell->GetCursor())
+                            lcl_PublishPhoneMatchOrdinal(*m_pWrtShell->GetDoc(),
+                                                         m_pWrtShell->GetLayout(), *s_pSrchItem,
+                                                         s_xSearchList && s_xSearchList->Count(),
+                                                         *pFound, nPhoneOrdinal, nPhoneTotal);
+                        else
+                            nPhoneTotal = PHONE_ORDINAL_NO_SHELL_CURSOR;
+
+                        /* Vulcan: the same "3 of 12" ON THE WIRE, for the phone
+                         * find BAR.
+                         *
+                         * WHY A SECOND SINK AT ALL. SetSearchLabel above lands
+                         * in exactly two places (srchdlg.cxx:2426-2540): the
+                         * VCL findbar's `.uno:SearchLabel` item window, which
+                         * does not exist under COKit, and the open search
+                         * DIALOG's own label. So the number reaches a client
+                         * only while the Find & Replace sheet is open. The
+                         * phone's PRIMARY find surface is not that sheet -- it
+                         * is the slim search bar
+                         * (browser/src/control/Control.MobileSearchBar.ts),
+                         * which UIManager.focusSearch and the kebab's Search
+                         * row both open, and which had no way to learn the
+                         * count that was already being computed for it.
+                         *
+                         * WHY A STATE CHANGE AND NOT AN EXTRA FIELD IN
+                         * searchresultselection. That payload is built and sent
+                         * by lcl_emitSearchResultCallbacks BEFORE this block
+                         * runs, so folding the ordinal into it would mean
+                         * reordering the two -- moving a counting sweep in
+                         * front of the callback that shows the selection
+                         * rectangles, for a cosmetic gain. KIT_CALLBACK_STATE_CHANGED
+                         * is the established side channel for exactly this
+                         * shape and needs no new enum, no wsd change and no new
+                         * browser message handler: ChildSession.cpp:4013
+                         * forwards any unrecognised payload verbatim as
+                         * `statechanged:`, and CanvasTileLayer.js:2488-2495
+                         * turns it into a `commandstatechanged` event. This is
+                         * the same route `.uno:CurrentTrackedChangeId` already
+                         * takes (view2.cxx:1354-1356 -> Map.StateChanges.js:53).
+                         *
+                         * NO SPACES IN THE PAYLOAD, and that is load-bearing:
+                         * ClientSession.cpp:3013 matches `statechanged:` on
+                         * `tokens.size() == 2`, i.e. on the message containing
+                         * exactly the one space that follows the prefix. A
+                         * localized "3 of 12" here would fall out of that
+                         * branch. The numbers go over as digits and the client
+                         * formats them, which is where the localization belongs
+                         * anyway.
+                         *
+                         * EMITTED UNCONDITIONALLY INSIDE THIS GATE, including
+                         * the 0;0 case. Every early return in the helper is a
+                         * real "no ordinal for this search" -- a search with
+                         * attributes, a selection-scoped search, a document over
+                         * the node budget -- and a client that had just rendered
+                         * "3 of 12" for the previous term MUST be told to stop.
+                         * Sending nothing would leave the last good number on
+                         * screen next to a different search, which is worse than
+                         * showing none. */
+                        OString aOrdinalPayload(".uno:SearchOrdinal="
+                                                + OString::number(nPhoneOrdinal) + ";"
+                                                + OString::number(nPhoneTotal));
+                        pPhoneSh->viewCallback(KIT_CALLBACK_STATE_CHANGED, aOrdinalPayload);
+                    }
                 }
                 rReq.SetReturnValue(SfxBoolItem(nSlot, bRet));
 

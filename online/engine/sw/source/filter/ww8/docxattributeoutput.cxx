@@ -642,6 +642,14 @@ sal_Int32 DocxAttributeOutput::StartParagraph(const ww8::WW8TableNodeInfo::Point
     // the cell, not outside.
     CheckAndWriteFloatingTables(m_rExport.m_pCurPam->GetPointNode());
 
+    if (const SwTextNode* pTextNode = m_rExport.m_pCurPam->GetPointNode().GetTextNode())
+    {
+        // Body text only: header, footer, note and frame paragraphs are not lines of the section.
+        if (pTextNode->GetIndex() > m_rExport.m_rDoc.GetNodes().GetEndOfExtras().GetIndex()
+            && pTextNode->GetSwAttrSet().GetLineNumber().IsCount())
+            m_bSectionHasCountedLines = true;
+    }
+
     // Look up the "sdt end before this paragraph" property early, when it
     // would normally arrive, it would be too late (would be after the
     // paragraph start has been written).
@@ -1933,6 +1941,28 @@ void DocxAttributeOutput::EndRun(const SwTextNode* pNode, sal_Int32 nPos, sal_In
         m_bEndCharSdt = false;
     }
 
+    // A hyperlink that ended at nPos is closed after this run unless the run
+    // writes text (RunText() then asks for it to be closed before the run). A
+    // run where a content control starts writes no text: it is the control's
+    // start character. Its <w:sdt><w:sdtContent> is written below, before the
+    // <w:r>, so closing the hyperlink after this run puts </w:hyperlink> inside
+    // the control's still-open <w:sdtContent>, which is not well-formed XML.
+    // Close the hyperlink before the run, as for a text run, whenever the
+    // control is still open after this run (a Google Docs suggestion
+    // that starts at the end of a link, or any content control right after one).
+    // That close is the one that was pending, so nothing is left to close after
+    // the run: a hyperlink that starts in this run, around the control, stays open.
+    if (m_closeHyperlinkInThisRun && m_nHyperLinkCount.back() > 0 && nLen != -1)
+    {
+        SwTextAttr* pAttr
+            = pNode->GetTextAttrAt(nPos, RES_TXTATR_CONTENTCONTROL, ::sw::GetTextAttrMode::Default);
+        if (pAttr && pAttr->GetStart() == nPos && *pAttr->GetEnd() > nPos + nLen)
+        {
+            m_closeHyperlinkInPreviousRun = true;
+            m_closeHyperlinkInThisRun = false;
+        }
+    }
+
     if ( m_closeHyperlinkInPreviousRun )
     {
         if (m_nHyperLinkCount.back() > 0)
@@ -2903,16 +2933,33 @@ void DocxAttributeOutput::WriteContentControlStart()
         SwTextNode* pTextNode = m_pContentControl->GetTextNode();
         if (pTextNode && pTextAttr)
         {
-            SwPosition aPoint(*pTextNode, pTextAttr->GetStart());
-            SwPosition aMark(*pTextNode, *pTextAttr->GetEnd());
-            SwPaM aPam(aMark, aPoint);
-            OUString aSnippet = aPam.GetText();
-            static sal_Unicode const aForbidden[] = {
-                CH_TXTATR_BREAKWORD,
-                0
-            };
-            aSnippet = comphelper::string::removeAny(aSnippet, aForbidden);
-            m_rExport.AddSdtData(rPrefixMapping, rXpath, aSnippet);
+            // The bound value is the control's text with its tracked changes accepted, as Word
+            // stores it: leave out the dummy characters and the text of tracked deletions, or the
+            // reopened document shows the old and the new value side by side. A tracked format
+            // change made over a deletion stacks on top of it and is still a deletion.
+            const IDocumentRedlineAccess& rIDRA = m_rExport.m_rDoc.getIDocumentRedlineAccess();
+            const bool bHasRedlines = !rIDRA.GetRedlineTable().empty();
+            const OUString& rText = pTextNode->GetText();
+            OUStringBuffer aSnippet;
+            for (sal_Int32 i = pTextAttr->GetStart(); i < *pTextAttr->GetEnd(); ++i)
+            {
+                if (rText[i] == CH_TXTATR_BREAKWORD)
+                {
+                    continue;
+                }
+                if (bHasRedlines)
+                {
+                    const SwRangeRedline* pRedline
+                        = rIDRA.GetRedline(SwPosition(*pTextNode, i), nullptr);
+                    if (pRedline
+                        && pRedline->GetTypeIgnoringAdditonalFormat() == RedlineType::Delete)
+                    {
+                        continue;
+                    }
+                }
+                aSnippet.append(rText[i]);
+            }
+            m_rExport.AddSdtData(rPrefixMapping, rXpath, aSnippet.makeStringAndClear());
         }
     }
 
@@ -4275,7 +4322,14 @@ bool DocxAttributeOutput::StartURL(const OUString& rUrl, const OUString& rTarget
 
     bool bBookmarkOnly = AnalyzeURL( rUrl, rTarget, &sUrl, &sMark );
 
-    m_hyperLinkAnchor = sMark;
+    // EndURL and EndRun wrap the last run of a link to a "_Toc" bookmark in a
+    // PAGEREF field, taking that run for a table of contents entry's page
+    // number. That holds only inside an index. Elsewhere such a link is an
+    // ordinary contents entry whose last run is its title: wrapped, the title
+    // became the field's cached result, the next load showed a hidden page
+    // number in its place, and the next save dropped the title from the file
+    // So keep the anchor for links inside an index only.
+    m_hyperLinkAnchor = GetExport().m_bInWriteTOX ? sMark : OUString();
 
     if (!sMark.isEmpty() && !bBookmarkOnly && rTarget.isEmpty())
     {
@@ -7570,6 +7624,14 @@ void DocxAttributeOutput::WriteLineBreak()
 
 void DocxAttributeOutput::SectionLineNumbering( sal_uLong nRestartNo, const SwLineNumberInfo& rLnNumInfo )
 {
+    // Line numbering is on for the whole document, but Word numbers a section only when its
+    // sectPr has lnNumType: a section none of whose lines are counted (one that had no lnNumType
+    // when it was imported) gets none, so Word does not number it.
+    const bool bSectionHasCountedLines = m_bSectionHasCountedLines;
+    m_bSectionHasCountedLines = false;
+    if (!bSectionHasCountedLines)
+        return;
+
     rtl::Reference<FastAttributeList> pAttr = FastSerializerHelper::createAttrList();
     pAttr->add( FSNS( XML_w, XML_countBy ), OString::number(rLnNumInfo.GetCountBy()));
     pAttr->add( FSNS( XML_w, XML_restart ), rLnNumInfo.IsRestartEachPage() ? "newPage" : "continuous" );

@@ -82,6 +82,7 @@
 #include <SparklineList.hxx>
 #include <SheetViewManager.hxx>
 #include <operation/ApplyAttributesOperation.hxx>
+#include <dociter.hxx>
 
 #include <memory>
 
@@ -2987,6 +2988,138 @@ void ScViewFunc::SetNumFmtByStr( const OUString& rCode )
     }
 
     //! else return error / issue warning ???
+}
+
+// VULCAN FORK -- keep across upstream rebases.
+//
+// .uno:Vulcan_NumberFormatCode (ScFormatShell::ExecuteNumFormat): apply a
+// format code written the way xlsx stores it and the agent writes it -- en-US,
+// "#,##0.00", "0.00%", "yyyy-mm-dd" -- to the selection. SetNumFmtByStr above
+// parses its code in the cursor cell's language, so "#,##0.00" in a de-DE cell
+// would mean something else; this converts from en-US into that language the
+// way the OOXML import does (oox numberformatsbuffer.cxx, addNewConverted ->
+// SvNumberFormatter::PutandConvertEntry), so the cell keeps its language and
+// the code keeps its meaning. On an en-US view the conversion is a no-op.
+//
+// Unreadable: the code does not parse. Validity is nCheckPos == 0 with a real
+// key, never PutandConvertEntry's return value: that is false for a code the
+// formatter already holds, with the key of the existing entry in nKey
+// (SvNFFormatData::PutEntry).
+//
+// Applied, with the key in rKey: either every cell this apply reaches already
+// shows the key, and NOTHING is applied -- ApplySelectionPattern records an
+// undo step even for an apply that changes nothing, and a person's Ctrl+Z would
+// spend itself on it, while the caller's read-back proves the cells either way
+// -- or the format is applied. "The cells this apply reaches" is
+// ApplySelectionPattern's own rule: the marked cells less the rows a filter
+// hides, or the cursor cell when no mark is left. "Shows the key" is the
+// effective key (ScPatternAttr::GetNumberFormat: a built-in resolved into the
+// cell's language), which is what ScDocument::GetNumberFormat and so the
+// caller's read (.uno:ExtractCellFormats) see. That check comes before the
+// protection check, because it changes nothing.
+//
+// Protected: the selection is protected; nothing is applied, and the same
+// message box SetNumFmtByStr raises is raised.
+
+namespace
+{
+// SetNumFmtByEnglishCode's held check: whether every cell of rRanges on nTab
+// shows nKey. Walks attribute runs, not cells, so a whole-column mark costs its
+// runs. Not GetSelectionPattern: its merge (ScTable::MergeSelectionPattern)
+// stops at the allocated columns and never merges the default column, so a mark
+// whose one allocated column holds the key would read as held while the
+// never-touched columns beside it do not. ScDocAttrIterator reads those
+// through ScTable::GetColumnData. Not the raw ATTR_VALUE_FORMAT either: a
+// built-in stored as its base index with an explicit language shows another key.
+bool lcl_RangesShowNumberFormat( ScDocument& rDoc, const ScRangeList& rRanges, SCTAB nTab,
+                                 sal_uInt32 nKey )
+{
+    if ( rRanges.empty() )
+        return false;
+    SvNumberFormatter* pFormatter = rDoc.GetFormatTable();
+    for ( size_t i = 0; i < rRanges.size(); ++i )
+    {
+        const ScRange& rRange = rRanges[i];
+        ScDocAttrIterator aIter( rDoc, nTab, rRange.aStart.Col(), rRange.aStart.Row(),
+                                 rRange.aEnd.Col(), rRange.aEnd.Row() );
+        SCCOL nCol = -1;
+        SCROW nRow1 = -1;
+        SCROW nRow2 = -1;
+        bool bAnyRun = false;       // a range that read nothing proves nothing
+        while ( const ScPatternAttr* pPattern = aIter.GetNext( nCol, nRow1, nRow2 ) )
+        {
+            if ( pPattern->GetNumberFormat( pFormatter ) != nKey )
+                return false;
+            bAnyRun = true;
+        }
+        if ( !bAnyRun )
+            return false;
+    }
+    return true;
+}
+}
+
+ScViewFunc::EnglishNumFmtResult ScViewFunc::SetNumFmtByEnglishCode( const OUString& rCode,
+                                                                    sal_uInt32& rKey )
+{
+    ScViewData&         rViewData = GetViewData();
+    ScDocument&         rDoc = rViewData.GetDocument();
+    SvNumberFormatter*  pFormatter = rDoc.GetFormatTable();
+
+    //  language always from cursor position, as SetNumFmtByStr
+
+    sal_uInt32 nCurrentNumberFormat = rDoc.GetNumberFormat( rViewData.GetCurX(), rViewData.GetCurY(),
+                                                            rViewData.CurrentTabForData());
+    const SvNumberformat* pEntry = pFormatter->GetEntry( nCurrentNumberFormat );
+    LanguageType eLanguage = pEntry ? pEntry->GetLanguage() : ScGlobal::eLnge;
+
+    OUString        aCode = rCode;      // converted in place
+    sal_Int32       nCheckPos = 0;
+    SvNumFormatType nType = SvNumFormatType::ALL;
+    sal_uInt32      nKey = NUMBERFORMAT_ENTRY_NOT_FOUND;
+    pFormatter->PutandConvertEntry( aCode, nCheckPos, nType, nKey,
+                                    LANGUAGE_ENGLISH_US, eLanguage, /*bConvertDateOrder*/ false );
+    if ( nCheckPos != 0 || nKey == NUMBERFORMAT_ENTRY_NOT_FOUND )
+        return EnglishNumFmtResult::Unreadable;
+
+    ScMarkData aFuncMark( rViewData.GetMarkData() );       // local copy for UnmarkFiltered
+    ScViewUtil::UnmarkFiltered( aFuncMark, rDoc );
+    aFuncMark.MarkToMulti();
+    if ( aFuncMark.GetSelectCount() == 1 )      // one sheet: ApplySelectionPattern's bOnlyTab never fires
+    {
+        bool bHeld = false;
+        if ( aFuncMark.IsMultiMarked() )
+        {
+            // The apply's own reach: the marks on the one selected sheet.
+            const SCTAB nTab = aFuncMark.GetFirstSelected();
+            ScRangeList aReached;
+            aFuncMark.FillRangeListWithMarks( &aReached, false, nTab );
+            bHeld = lcl_RangesShowNumberFormat( rDoc, aReached, nTab, nKey );
+        }
+        else
+            bHeld = rDoc.GetNumberFormat( rViewData.GetCurX(), rViewData.GetCurY(),
+                                          rViewData.CurrentTabForData() ) == nKey;
+        if ( bHeld )
+        {
+            rKey = nKey;
+            return EnglishNumFmtResult::Applied;
+        }
+    }
+
+    // not editable because of matrix only? attribute OK nonetheless
+    bool bOnlyNotBecauseOfMatrix;
+    if ( !SelectionEditable( &bOnlyNotBecauseOfMatrix ) && !bOnlyNotBecauseOfMatrix )
+    {
+        ErrorMessage(STR_PROTECTIONERR);
+        return EnglishNumFmtResult::Protected;
+    }
+
+    ScPatternAttr aNewAttrs(rDoc.getCellAttributeHelper());
+    aNewAttrs.ItemSetPut(SfxUInt32Item(ATTR_VALUE_FORMAT, nKey));
+    aNewAttrs.ItemSetPut(SvxLanguageItem(eLanguage, ATTR_LANGUAGE_FORMAT));
+    ApplySelectionPattern( aNewAttrs );
+    rKey = nKey;
+    return EnglishNumFmtResult::Applied;
 }
 
 void ScViewFunc::ChangeNumFmtDecimals( bool bIncrement )

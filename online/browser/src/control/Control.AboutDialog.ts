@@ -124,7 +124,7 @@ class AboutDialog {
 			productName =
 				typeof brandProductName === 'string' && brandProductName.length > 0
 					? brandProductName
-					: 'Collabora Online Development Edition (unbranded)';
+					: 'Vulcan Office';
 		}
 
 		const productNameElement = content.querySelector(
@@ -139,15 +139,13 @@ class AboutDialog {
 					.toLowerCase(),
 		);
 
-		// Version
-		elements.coolwsdVersion.textContent = info.coolwsdVersion;
-		this.appendSpanAndLink(
-			elements.coolwsdVersion,
-			' git hash:\xA0',
-			`https://gerrit.collaboraoffice.com/plugins/gitiles/online/+log/${info.coolwsdHash}`,
-			info.coolwsdHash,
-			info.wsdOptions,
-		);
+		// Version. The git hash is plain text: Vulcan Office links to no
+		// external code-review host from the product UI.
+		elements.coolwsdVersion.textContent =
+			info.coolwsdVersion +
+			' git hash:\xA0' +
+			info.coolwsdHash +
+			(info.wsdOptions ? '\xA0' + info.wsdOptions : '');
 
 		// Served By and Server ID
 		const label = document.createElement('span');
@@ -208,6 +206,24 @@ class AboutDialog {
 			`Copyright © ${window.copyrightYear}, ${window.vendor}.`,
 		);
 		elements.copyright.appendChild(span);
+
+		// Upstream attribution. The license text is served locally out of the
+		// browser dist (LICENSE.txt) — no external hosts.
+		const attribution = document.createElement('span');
+		attribution.setAttribute('dir', 'ltr');
+		attribution.id = 'about-dialog-attribution';
+		attribution.appendChild(
+			document.createTextNode(
+				'Vulcan Office — built on open-source technology.\xA0',
+			),
+		);
+		const licenseLink = document.createElement('a');
+		licenseLink.href = app.LOUtil.getURL('/LICENSE.txt');
+		licenseLink.target = '_blank';
+		licenseLink.textContent = _('License (MPL-2.0)');
+		attribution.appendChild(licenseLink);
+		elements.copyright.appendChild(document.createElement('br'));
+		elements.copyright.appendChild(attribution);
 
 		if (window.socketProxy) {
 			elements.slowProxy.innerText = _('"Slow Proxy"');

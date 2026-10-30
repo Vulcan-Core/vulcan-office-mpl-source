@@ -19,7 +19,7 @@ msgstr ""
 #: descriptions/google-play.html%2Bhtml.body.h3:5-1
 #, fuzzy
 msgid "Collabora Office: LibreOffice, OpenOffice & more"
-msgstr "Collabora Office: LibreOffice, OpenOffice og mer"
+msgstr "Vulcan Office: Vulcan Office, OpenOffice og mer"
 
 #. Short description - 80 chars limit
 #: descriptions/google-play.html%2Bhtml.body.p:9-1
@@ -27,7 +27,7 @@ msgid ""
 "LibreOffice based editor for Microsoft Office, LibreOffice and OpenOffice "
 "docs."
 msgstr ""
-"LibreOffice-basert tekstbehandler for LibreOffice og MS Office-dokumenter."
+"Vulcan Office-basert tekstbehandler for Vulcan Office og MS Office-dokumenter."
 
 #. Long description
 #: descriptions/google-play.html%2Bhtml.body.p:13-1

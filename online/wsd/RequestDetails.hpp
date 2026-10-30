@@ -170,6 +170,8 @@ private:
     bool _isWebSocket : 1;
     bool _closeConnection : 1;
     bool _isCool2 : 1;
+    /// See isServerToServer(). False until the dispatcher establishes it.
+    bool _isServerToServer = false;
 
     static Method stringToMethod(std::string_view method);
 
@@ -288,6 +290,20 @@ public:
     bool isWebSocket() const
     {
         return _isWebSocket;
+    }
+    /// True iff the request came straight from a trusted server: its TCP peer
+    /// matches net.post_allow and it carries no X-Forwarded-For (set by
+    /// ClientRequestDispatcher from ClientRequestDispatcher::isServerToServer()).
+    /// Only such a request may name a WOPI host that an internal alias group alone
+    /// admits. Defaults to false, so a request whose trust was never established
+    /// is treated as public.
+    bool isServerToServer() const
+    {
+        return _isServerToServer;
+    }
+    void setServerToServer(bool serverToServer)
+    {
+        _isServerToServer = serverToServer;
     }
     /// True for the compact Cool URI 2.0 shape (/cool/ws?WOPISrc=...),
     /// false for the legacy shape (/cool/<encoded-document-URI>/ws).

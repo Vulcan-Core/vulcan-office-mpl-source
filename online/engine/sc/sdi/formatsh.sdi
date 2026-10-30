@@ -95,6 +95,7 @@ interface FormatForSelection
 
     SID_ATTR_NUMBERFORMAT_VALUE       [ ExecMethod = ExecuteNumFormat; StateMethod = GetNumFormatState;]
     SID_NUMBER_FORMAT       [ ExecMethod = ExecuteNumFormat; StateMethod = GetNumFormatState; ]
+    SID_VULCAN_NUMBER_FORMAT_CODE [ ExecMethod = ExecuteNumFormat; ]
     SID_NUMBER_TWODEC       [ ExecMethod = ExecuteNumFormat; StateMethod = GetNumFormatState; ]
     SID_NUMBER_SCIENTIFIC   [ ExecMethod = ExecuteNumFormat; StateMethod = GetNumFormatState; ]
     SID_NUMBER_DATE         [ ExecMethod = ExecuteNumFormat; StateMethod = GetNumFormatState; ]

@@ -6919,7 +6919,7 @@ msgstr ""
 #: welcome/welcome.html%2Bhtml.body.div.div.div.div.h2:27-7
 #: welcome/welcome.html%2Bhtml.body.div.div.div.div.h2:38-7
 msgid "Collabora Online Development Edition"
-msgstr "Collabora Online Development Edition"
+msgstr "Vulcan Office Development Edition"
 
 #: welcome/welcome.html%2Bhtml.body.div.div.div.div.p:28-7
 msgid ""
@@ -7277,7 +7277,7 @@ msgstr ""
 
 #~ msgid "Oops, there is a problem connecting to Collabora Online : "
 #~ msgstr ""
-#~ "Uff. Det har oppstått et problem med tilkoblingen til Collabora Online: "
+#~ "Uff. Det har oppstått et problem med tilkoblingen til Vulcan Office: "
 
 #~ msgid "Number of views"
 #~ msgstr "Antall visninger"

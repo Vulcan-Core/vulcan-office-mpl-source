@@ -316,6 +316,13 @@ bool PPTWriterBase::GetPageByIndex( sal_uInt32 nIndex, PageType ePageType )
 
         if (GetPropertyValue( aAny, mXPagePropSet, u"IsBackgroundDark"_ustr ) )
             aAny >>= mbIsBackgroundDark;
+        // Notes are written onto the notes master, which this export never gives a background (a
+        // notes page has no "Background" property): PowerPoint draws them on white, so automatic
+        // notes text must be written dark. IsBackgroundDark cannot say so here: under COKit a notes
+        // page with no fill reads its slide's master (SdrPage::GetPageBackgroundColor), and a dark
+        // master wrote every such notes run white.
+        if ( ePageType == NOTICE )
+            mbIsBackgroundDark = false;
 
         mXShapes = mXDrawPage;
         if ( !mXShapes.is() )

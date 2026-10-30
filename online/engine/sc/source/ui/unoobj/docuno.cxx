@@ -42,6 +42,8 @@
 #include <COKit/COKitEnums.h>
 #include <officecfg/Office/Common.hxx>
 #include <officecfg/Office/Calc.hxx>
+#include <i18nlangtag/lang.h>
+#include <svl/numformat.hxx>
 #include <svl/numuno.hxx>
 #include <svl/hint.hxx>
 #include <unotools/moduleoptions.hxx>
@@ -58,6 +60,7 @@
 #include <toolkit/awt/vclxdevice.hxx>
 
 #include <float.h>
+#include <unordered_map>
 
 #include <com/sun/star/beans/PropertyAttribute.hpp>
 #include <com/sun/star/util/Date.hpp>
@@ -1418,10 +1421,219 @@ OString ScModelObj::getViewRenderState(const SfxViewShell* pViewShell)
     return OString();
 }
 
+namespace
+{
+// VULCAN FORK -- keep across upstream rebases.
+//
+// The AI bridge's range-addressed cell reader, shared by
+// .uno:ExtractCellFormulas (formula text), .uno:ExtractCellValues
+// (displayed text) and .uno:ExtractCellFormats (number formats). Why a core
+// route rather than the client, for each:
+//
+//  * Formulas: every client-side route (.uno:ToggleFormula, the SYLK
+//    clipboard mimetype) goes through ScDocument::SetViewOptions() /
+//    GetViewOptions(), and xeview.cxx:299,447 reads GetDoc().GetViewOptions()
+//    straight into <sheetView showFormulas="true"> on .xlsx export -- display
+//    state reaching a saved file, the class the display-state export
+//    guard exists to stop. KIT_CALLBACK_CELL_FORMULA is per cell and subject
+//    to duplicate-callback dropping, so walking a range hangs on runs of
+//    equal cells.
+//  * Values: the clipboard's text export (ScTransferObj::GetData ->
+//    ScImportExport::Doc2Text) clamps the marked block to the sheet's data
+//    rectangle (ScDocument::ShrinkToDataArea, all four edges) before it
+//    writes a row, so a range reaching past the last populated cell comes
+//    back smaller than asked and a range starting before the first comes
+//    back anchored at the data. The bridge's exact-shape correlation then
+//    left the correct reply unclaimed until its timeout: the e2e harness's
+//    Vulcan_ReadRange A1:B3, and every agent read over a block with an empty
+//    trailing row. The shrink is right for the clipboard (a whole-column copy
+//    must not export a million rows) and wrong for a read that names its
+//    rectangle -- so the read takes the route that never shrank.
+//  * Formats: no client channel carries a cell's number format. The
+//    .uno:NumberFormat state is the sidebar's tuple, NumberFormatType is a
+//    category, both are per-cursor and Kit drops a frame identical to the
+//    last one. This is the proof read for .uno:Vulcan_NumberFormatCode
+//    (formatsh.cxx): "keys" holds each cell's formatter key, which is what
+//    the caller compares with the key the slot returned, and "rows" its code
+//    as the xlsx export writes it (GetFormatStringForExcel), for reporting
+//    only. That string is not the code as sent: it carries Excel's
+//    lower-case date keywords and backslash-escaped one-character literals
+//    ("yyyy-mm-dd" reads "yyyy\-mm\-dd"), an [$-LCID] prefix when the entry
+//    has an explicit language (none for LANGUAGE_SYSTEM, which a new cell's
+//    format has: the document formatter's language, poolhelp.cxx), and under
+//    Kit it skips the conversion to en-US (zforlist.cxx).
+//
+// All three walk the ASKED rectangle -- a row is emitted for every cell in it,
+// the empty ones as "" -- and echo the request (range, tag) so the bridge
+// can tell its reply from any other on the shared commandvalues channel;
+// sheet and coordinates say what was answered. A present-but-unparseable
+// range is refused, never answered with the active sheet's used range under
+// the asked name. Same active-sheet default and truncation contract as
+// ExtractDocumentStructure.
+//
+//   .uno:ExtractCellValues?range=Sheet1.A1:B3&tag=7     (range optional)
+//   .uno:ExtractCellFormulas?range=Sheet1.A1:B3&tag=7
+//   .uno:ExtractCellFormats?range=Sheet1.A1:B3&tag=7
+//
+// No top-level commandName: the browser resolves e.commandValues whenever
+// one is present, and these payloads live under their node.
+enum class CellGridContent
+{
+    Values,
+    Formulas,
+    Formats
+};
+
+void lcl_extractCellGrid(tools::JsonWriter& rJsonWriter, ScDocShell* pDocShell,
+                         const OString& rCommand, const char* pNodeName,
+                         CellGridContent eContent)
+{
+    auto aNode = rJsonWriter.startNode(pNodeName);
+
+    if (!pDocShell)
+        return;
+
+    const std::map<OUString, OUString> aArgs
+        = KitHelper::parseCommandParameters(OUString::fromUtf8(rCommand));
+    OUString rangeStr;
+    if (auto it = aArgs.find(u"range"_ustr); it != aArgs.end())
+        rangeStr = it->second;
+    if (auto it = aArgs.find(u"tag"_ustr); it != aArgs.end())
+        rJsonWriter.put("tag", it->second);
+    if (!rangeStr.isEmpty())
+        rJsonWriter.put("range", rangeStr);
+
+    ScDocument& rDoc = pDocShell->GetDocument();
+    ScTabViewShell* pViewShell = pDocShell->GetBestViewShell(false);
+    const SCTAB nActiveTab = pViewShell ? pViewShell->GetViewData().GetTabNumber() : SCTAB(0);
+
+    ScRange aRange;
+    // Default to the active sheet so an unprefixed range like B5:B10 parses
+    // against the sheet the user is viewing rather than always sheet 0.
+    aRange.aStart.SetTab(nActiveTab);
+    aRange.aEnd.SetTab(nActiveTab);
+    bool bHaveRange = false;
+    if (!rangeStr.isEmpty())
+    {
+        bHaveRange = bool(aRange.Parse(rangeStr, rDoc) & ScRefFlags::VALID);
+        if (!bHaveRange)
+        {
+            // A range the caller named and the engine cannot read is a
+            // refusal, not the used range under that name.
+            rJsonWriter.put("error", OUString(u"unparseable range: " + rangeStr));
+            return;
+        }
+    }
+    if (!bHaveRange)
+    {
+        SCCOL nEndCol = 0;
+        SCROW nEndRow = 0;
+        rDoc.GetCellArea(nActiveTab, nEndCol, nEndRow);
+        aRange = ScRange(0, 0, nActiveTab, nEndCol, nEndRow, nActiveTab);
+    }
+    aRange.PutInOrder();
+
+    const SCTAB nTab = aRange.aStart.Tab();
+    const SCCOL nStartCol = aRange.aStart.Col();
+    const SCROW nStartRow = aRange.aStart.Row();
+    const SCCOL nEndCol = aRange.aEnd.Col();
+    SCROW nEndRow = aRange.aEnd.Row();
+
+    // Cap the same way the markdown path caps its text: emit what fits and
+    // say so, rather than serialising an entire used range into one socket
+    // message. The sweep characterised one Vulcan_Office corpus at
+    // 457,815 cells across 85 files, so "the whole sheet" is not a bound.
+    // Truncate by whole rows, so the caller always gets a rectangular block
+    // it can address. nCols cannot exceed the 16384-column sheet limit and
+    // the cap is larger than that, so nMaxCells/nCols is always >= 1 and
+    // the clamped nEndRow can never fall below nStartRow.
+    const sal_Int64 nMaxCells = 20000;
+    bool bTruncated = false;
+    const sal_Int64 nCols = sal_Int64(nEndCol) - nStartCol + 1;
+    if (nCols > 0 && nCols * (sal_Int64(nEndRow) - nStartRow + 1) > nMaxCells)
+    {
+        nEndRow = static_cast<SCROW>(nStartRow + nMaxCells / nCols - 1);
+        bTruncated = true;
+    }
+
+    OUString aSheetName;
+    rDoc.GetName(nTab, aSheetName);
+    rJsonWriter.put("sheet", aSheetName);
+    rJsonWriter.put("startCol", sal_Int32(nStartCol));
+    rJsonWriter.put("startRow", sal_Int32(nStartRow));
+    rJsonWriter.put("endCol", sal_Int32(nEndCol));
+    rJsonWriter.put("endRow", sal_Int32(nEndRow));
+    rJsonWriter.put("truncated", bTruncated);
+
+    if (eContent == CellGridContent::Formats)
+    {
+        // The mapping the xlsx export uses (xestyle.cxx), with a scratch en-US
+        // formatter so this read never adds entries to the document's own.
+        // Cells share formats, so each key is mapped once.
+        SvNumberFormatter* pFormatter = rDoc.GetFormatTable();
+        SvNumberFormatter aTempFormatter(comphelper::getProcessComponentContext(),
+                                         LANGUAGE_ENGLISH_US);
+        NfKeywordTable aKeywords;
+        aTempFormatter.FillKeywordTableForExcel(aKeywords);
+        std::unordered_map<sal_uInt32, OUString> aCodes;
+        {
+            auto aRowsNode = rJsonWriter.startArray("rows");
+            for (SCROW nRow = nStartRow; nRow <= nEndRow; ++nRow)
+            {
+                auto aRowNode = rJsonWriter.startAnonArray();
+                for (SCCOL nCol = nStartCol; nCol <= nEndCol; ++nCol)
+                {
+                    const sal_uInt32 nKey = rDoc.GetNumberFormat(nCol, nRow, nTab);
+                    auto it = aCodes.find(nKey);
+                    if (it == aCodes.end())
+                        it = aCodes
+                                 .emplace(nKey, pFormatter->GetFormatStringForExcel(
+                                                    nKey, aKeywords, aTempFormatter))
+                                 .first;
+                    rJsonWriter.putSimpleValue(it->second);
+                }
+            }
+        }
+        auto aKeysNode = rJsonWriter.startArray("keys");
+        for (SCROW nRow = nStartRow; nRow <= nEndRow; ++nRow)
+        {
+            auto aRowNode = rJsonWriter.startAnonArray();
+            for (SCCOL nCol = nStartCol; nCol <= nEndCol; ++nCol)
+                rJsonWriter.putSimpleValue(
+                    static_cast<sal_Int64>(rDoc.GetNumberFormat(nCol, nRow, nTab)));
+        }
+        return;
+    }
+
+    // Row-major array of arrays. GetFormula() returns the formula text with
+    // its leading '=' for formula cells and the empty string for everything
+    // else, so the caller can tell a formula from a literal without a second
+    // read -- which is what the host's overwrite guard tests for. GetString()
+    // is the displayed text, the same per-cell call the clipboard's text
+    // export makes, so a values read reads what the person sees.
+    auto aRowsNode = rJsonWriter.startArray("rows");
+    for (SCROW nRow = nStartRow; nRow <= nEndRow; ++nRow)
+    {
+        auto aRowNode = rJsonWriter.startAnonArray();
+        for (SCCOL nCol = nStartCol; nCol <= nEndCol; ++nCol)
+            rJsonWriter.putSimpleValue(eContent == CellGridContent::Formulas
+                                           ? rDoc.GetFormula(nCol, nRow, nTab)
+                                           : rDoc.GetString(nCol, nRow, nTab));
+    }
+}
+}
+
 bool ScModelObj::supportsCommand(std::u16string_view rCommand)
 {
+    // VULCAN FORK: ExtractCellFormulas. Keep across upstream rebases -- without
+    // it doc_getCommandValues (desktop/source/lib/init.cxx) falls through to
+    // "Unknown command, no values returned" and the caller times out.
+    // INetURLObject parses ".uno" as the scheme, so the name here is bare while
+    // getCommandValues() below matches the ".uno:" spelling.
     return rCommand == u"FormulaDepChain" || rCommand == u"CalcFunctionList"
-           || rCommand == u"EvaluateFormula" || rCommand == u"ExtractDocumentStructure";
+           || rCommand == u"EvaluateFormula" || rCommand == u"ExtractDocumentStructure"
+           || rCommand == u"ExtractCellFormulas" || rCommand == u"ExtractCellValues"
+           || rCommand == u"ExtractCellFormats";
 }
 
 void ScModelObj::getCommandValues(tools::JsonWriter& rJsonWriter, std::string_view rCommand)
@@ -1658,6 +1870,20 @@ void ScModelObj::getCommandValues(tools::JsonWriter& rJsonWriter, std::string_vi
                         "specific area by calling this tool again with the range argument, e.g. "
                         "range=\"A1:D100\".");
         rJsonWriter.put("text", aText);
+    }
+    else if (aCommand.startsWith(".uno:ExtractCellFormulas"))
+    {
+        lcl_extractCellGrid(rJsonWriter, pDocShell, aCommand, "Formulas",
+                            CellGridContent::Formulas);
+    }
+    else if (aCommand.startsWith(".uno:ExtractCellValues"))
+    {
+        lcl_extractCellGrid(rJsonWriter, pDocShell, aCommand, "Values", CellGridContent::Values);
+    }
+    else if (aCommand.startsWith(".uno:ExtractCellFormats"))
+    {
+        lcl_extractCellGrid(rJsonWriter, pDocShell, aCommand, "Formats",
+                            CellGridContent::Formats);
     }
 }
 

@@ -974,6 +974,385 @@ CPPUNIT_TEST_FIXTURE(SwTiledRenderingTest, testUndoReorderingMulti)
     SfxViewShell::Current()->setCOKitViewCallback(nullptr);
 }
 
+namespace
+{
+/// Vulcan fork: captures a refused undo/redo's JSON answer (SfxViewUndoLookupToJson).
+class VulcanUndoResultListener : public cppu::WeakImplHelper<css::frame::XDispatchResultListener>
+{
+public:
+    OUString m_aResult;
+    bool m_bNumeric = false;
+
+    virtual void SAL_CALL dispatchFinished(const css::frame::DispatchResultEvent& rEvent) override
+    {
+        m_aResult.clear();
+        m_bNumeric = false;
+        sal_uInt32 nNumber = 0;
+        if (rEvent.Result >>= nNumber)
+            m_bNumeric = true;
+        else
+            rEvent.Result >>= m_aResult;
+    }
+
+    virtual void SAL_CALL disposing(const css::lang::EventObject&) override {}
+};
+
+OUString lcl_VulcanUndoJson(std::u16string_view aStatus, int nOtherView, std::u16string_view aCommand)
+{
+    return OUString::Concat(u"{\"vulcanUndo\":{\"status\":\"") + aStatus + u"\",\"otherViewId\":"
+           + OUString::number(nOtherView) + u",\"command\":\"" + aCommand + u"\"}}";
+}
+}
+
+CPPUNIT_TEST_FIXTURE(SwTiledRenderingTest, testVulcanUndoPastOtherViewsFormatting)
+{
+    // Given two views and a document of 2 paragraphs:
+    SwXTextDocument* pXTextDocument = createDoc();
+    SwWrtShell* pWrtShell1 = getSwDocShell()->GetWrtShell();
+    int nView1 = KitHelper::getCurrentView();
+    int nView2 = KitHelper::createView();
+    pXTextDocument->initializeForTiledRendering(cpo::uno::Sequence<beans::PropertyValue>());
+    SwWrtShell* pWrtShell2 = getSwDocShell()->GetWrtShell();
+    pWrtShell2->SplitNode();
+    pWrtShell2->SttEndDoc(/*bStt=*/false);
+    SwTextNode* pTextNode2 = pWrtShell2->GetCursor()->GetPointNode().GetTextNode();
+    emulateTyping(u"z");
+    // View 1 types into the first paragraph.
+    KitHelper::setView(nView1);
+    pWrtShell1->SttEndDoc(/*bStt=*/true);
+    SwTextNode* pTextNode1 = pWrtShell1->GetCursor()->GetPointNode().GetTextNode();
+    emulateTyping(u"a");
+    // Then view 2 (a person, or the AI's view) formats ITS paragraph: not typing, so the
+    // upstream rule (typing-on-typing only) refused view 1's undo from here on.
+    KitHelper::setView(nView2);
+    pWrtShell2->SttEndDoc(/*bStt=*/false);
+    pWrtShell2->SttPara(/*bSelect=*/true);
+    dispatchCommand(mxComponent, u".uno:Bold"_ustr, {});
+    sw::UndoManager& rUndoManager = getSwDocShell()->GetDoc()->GetUndoManager();
+    const size_t nActions = rUndoManager.GetUndoActionCount();
+    CPPUNIT_ASSERT_EQUAL(ViewShellId(nView2), rUndoManager.GetUndoAction()->GetViewShellId());
+
+    // When view 1 presses undo:
+    KitHelper::setView(nView1);
+    rtl::Reference<VulcanUndoResultListener> pResult = new VulcanUndoResultListener();
+    comphelper::dispatchCommand(u".uno:Undo"_ustr, {}, pResult);
+    Scheduler::ProcessEventsToIdle();
+
+    // Then view 1's own typing is taken back, out of order, and view 2's work stays:
+    CPPUNIT_ASSERT(pTextNode1->GetText().isEmpty());
+    CPPUNIT_ASSERT_EQUAL(u"z"_ustr, pTextNode2->GetText());
+    CPPUNIT_ASSERT_EQUAL(nActions - 1, rUndoManager.GetUndoActionCount());
+    CPPUNIT_ASSERT_EQUAL(ViewShellId(nView2), rUndoManager.GetUndoAction()->GetViewShellId());
+    CPPUNIT_ASSERT(!pResult->m_bNumeric);
+    CPPUNIT_ASSERT(pResult->m_aResult.isEmpty());
+
+    KitHelper::setView(nView1);
+    SfxViewShell::Current()->setCOKitViewCallback(nullptr);
+    KitHelper::setView(nView2);
+    SfxViewShell::Current()->setCOKitViewCallback(nullptr);
+}
+
+CPPUNIT_TEST_FIXTURE(SwTiledRenderingTest, testVulcanUndoBlockedAnswersJson)
+{
+    // Given two views that typed into the same paragraph, view 1 first:
+    SwXTextDocument* pXTextDocument = createDoc("dummy.fodt");
+    SwView* pView1 = dynamic_cast<SwView*>(SfxViewShell::Current());
+    CPPUNIT_ASSERT(pView1);
+    int nView1 = KitHelper::getCurrentView();
+    int nView2 = KitHelper::createView();
+    pXTextDocument->initializeForTiledRendering(cpo::uno::Sequence<beans::PropertyValue>());
+    SwWrtShell* pWrtShell2 = getSwDocShell()->GetWrtShell();
+    KitHelper::setView(nView1);
+    emulateTyping(u"a");
+    KitHelper::setView(nView2);
+    pWrtShell2->EndPara();
+    emulateTyping(u"b");
+    SwTextNode* pTextNode = pWrtShell2->GetCursor()->GetPointNode().GetTextNode();
+    const OUString aText = pTextNode->GetText();
+    sw::UndoManager& rUndoManager = getSwDocShell()->GetDoc()->GetUndoManager();
+    const size_t nActions = rUndoManager.GetUndoActionCount();
+
+    // Then view 1's Undo button is disabled -- not the "conflict" state the browser turned
+    // into the stock "Conflict Undo/Redo with multiple users" dialog:
+    {
+        SfxItemSet aItemSet(getSwDocShell()->GetDoc()->GetAttrPool(), svl::Items<SID_UNDO, SID_UNDO>);
+        pView1->GetState(aItemSet);
+        CPPUNIT_ASSERT_EQUAL(SfxItemState::DISABLED, aItemSet.GetItemState(SID_UNDO));
+    }
+
+    // When view 1 presses undo anyway (Ctrl+Z does not look at the button):
+    KitHelper::setView(nView1);
+    rtl::Reference<VulcanUndoResultListener> pResult = new VulcanUndoResultListener();
+    comphelper::dispatchCommand(u".uno:Undo"_ustr, {}, pResult);
+    Scheduler::ProcessEventsToIdle();
+
+    // Then nothing is undone, and the answer says why as JSON naming the blocking view:
+    CPPUNIT_ASSERT_EQUAL(aText, pTextNode->GetText());
+    CPPUNIT_ASSERT_EQUAL(nActions, rUndoManager.GetUndoActionCount());
+    CPPUNIT_ASSERT(!pResult->m_bNumeric);
+    CPPUNIT_ASSERT_EQUAL(lcl_VulcanUndoJson(u"blocked", nView2, u"undo"), pResult->m_aResult);
+
+    KitHelper::setView(nView1);
+    SfxViewShell::Current()->setCOKitViewCallback(nullptr);
+    KitHelper::setView(nView2);
+    SfxViewShell::Current()->setCOKitViewCallback(nullptr);
+}
+
+CPPUNIT_TEST_FIXTURE(SwTiledRenderingTest, testVulcanUndoBlockedByParagraphInsertBefore)
+{
+    // Given a document of 2 paragraphs, view 1 typed into the second one:
+    SwXTextDocument* pXTextDocument = createDoc();
+    SwWrtShell* pWrtShell1 = getSwDocShell()->GetWrtShell();
+    int nView1 = KitHelper::getCurrentView();
+    int nView2 = KitHelper::createView();
+    pXTextDocument->initializeForTiledRendering(cpo::uno::Sequence<beans::PropertyValue>());
+    SwWrtShell* pWrtShell2 = getSwDocShell()->GetWrtShell();
+    pWrtShell2->SplitNode();
+    KitHelper::setView(nView1);
+    pWrtShell1->SttEndDoc(/*bStt=*/false);
+    SwTextNode* pTextNode1 = pWrtShell1->GetCursor()->GetPointNode().GetTextNode();
+    emulateTyping(u"a");
+
+    // When view 2 then adds a paragraph BEFORE it (every later node index moves):
+    KitHelper::setView(nView2);
+    pWrtShell2->SttEndDoc(/*bStt=*/true);
+    pWrtShell2->SplitNode();
+    KitHelper::setView(nView1);
+    rtl::Reference<VulcanUndoResultListener> pResult = new VulcanUndoResultListener();
+    comphelper::dispatchCommand(u".uno:Undo"_ustr, {}, pResult);
+    Scheduler::ProcessEventsToIdle();
+
+    // Then view 1's undo refuses rather than undo at a stale position:
+    CPPUNIT_ASSERT_EQUAL(u"a"_ustr, pTextNode1->GetText());
+    CPPUNIT_ASSERT_EQUAL(lcl_VulcanUndoJson(u"blocked", nView2, u"undo"), pResult->m_aResult);
+
+    KitHelper::setView(nView1);
+    SfxViewShell::Current()->setCOKitViewCallback(nullptr);
+    KitHelper::setView(nView2);
+    SfxViewShell::Current()->setCOKitViewCallback(nullptr);
+}
+
+CPPUNIT_TEST_FIXTURE(SwTiledRenderingTest, testVulcanUndoPastParagraphInsertAfter)
+{
+    // Given a document of 2 paragraphs, view 1 typed into the first one:
+    SwXTextDocument* pXTextDocument = createDoc();
+    SwWrtShell* pWrtShell1 = getSwDocShell()->GetWrtShell();
+    int nView1 = KitHelper::getCurrentView();
+    int nView2 = KitHelper::createView();
+    pXTextDocument->initializeForTiledRendering(cpo::uno::Sequence<beans::PropertyValue>());
+    SwWrtShell* pWrtShell2 = getSwDocShell()->GetWrtShell();
+    pWrtShell2->SplitNode();
+    KitHelper::setView(nView1);
+    pWrtShell1->SttEndDoc(/*bStt=*/true);
+    SwTextNode* pTextNode1 = pWrtShell1->GetCursor()->GetPointNode().GetTextNode();
+    emulateTyping(u"a");
+
+    // When view 2 then adds paragraphs AFTER it (only later node indexes move):
+    KitHelper::setView(nView2);
+    pWrtShell2->SttEndDoc(/*bStt=*/false);
+    emulateTyping(u"z");
+    pWrtShell2->SplitNode();
+    KitHelper::setView(nView1);
+    comphelper::dispatchCommand(u".uno:Undo"_ustr, {});
+    Scheduler::ProcessEventsToIdle();
+
+    // Then view 1's own typing is taken back:
+    CPPUNIT_ASSERT(pTextNode1->GetText().isEmpty());
+
+    KitHelper::setView(nView1);
+    SfxViewShell::Current()->setCOKitViewCallback(nullptr);
+    KitHelper::setView(nView2);
+    SfxViewShell::Current()->setCOKitViewCallback(nullptr);
+}
+
+CPPUNIT_TEST_FIXTURE(SwTiledRenderingTest, testVulcanUndoNothingOwn)
+{
+    // Given a change by view 1 only:
+    SwXTextDocument* pXTextDocument = createDoc("dummy.fodt");
+    int nView1 = KitHelper::getCurrentView();
+    int nView2 = KitHelper::createView();
+    pXTextDocument->initializeForTiledRendering(cpo::uno::Sequence<beans::PropertyValue>());
+    KitHelper::setView(nView1);
+    emulateTyping(u"a");
+
+    // When view 2, which changed nothing, presses undo:
+    KitHelper::setView(nView2);
+    rtl::Reference<VulcanUndoResultListener> pResult = new VulcanUndoResultListener();
+    comphelper::dispatchCommand(u".uno:Undo"_ustr, {}, pResult);
+    Scheduler::ProcessEventsToIdle();
+
+    // Then nothing is undone, and the answer names whose change is on top:
+    sw::UndoManager& rUndoManager = getSwDocShell()->GetDoc()->GetUndoManager();
+    CPPUNIT_ASSERT_EQUAL(static_cast<size_t>(1), rUndoManager.GetUndoActionCount());
+    CPPUNIT_ASSERT_EQUAL(lcl_VulcanUndoJson(u"nothing_own", nView1, u"undo"), pResult->m_aResult);
+
+    KitHelper::setView(nView1);
+    SfxViewShell::Current()->setCOKitViewCallback(nullptr);
+    KitHelper::setView(nView2);
+    SfxViewShell::Current()->setCOKitViewCallback(nullptr);
+}
+
+CPPUNIT_TEST_FIXTURE(SwTiledRenderingTest, testVulcanUndoTypingNotGroupedAcrossViews)
+{
+    // Given view 1 typed "ab" into an empty paragraph:
+    SwXTextDocument* pXTextDocument = createDoc();
+    SwWrtShell* pWrtShell1 = getSwDocShell()->GetWrtShell();
+    int nView1 = KitHelper::getCurrentView();
+    int nView2 = KitHelper::createView();
+    pXTextDocument->initializeForTiledRendering(cpo::uno::Sequence<beans::PropertyValue>());
+    SwWrtShell* pWrtShell2 = getSwDocShell()->GetWrtShell();
+    KitHelper::setView(nView1);
+    emulateTyping(u"ab");
+    SwTextNode* pTextNode = pWrtShell1->GetCursor()->GetPointNode().GetTextNode();
+    sw::UndoManager& rUndoManager = getSwDocShell()->GetDoc()->GetUndoManager();
+    const size_t nActions = rUndoManager.GetUndoActionCount();
+
+    // When view 2 types right where view 1's typing ended (upstream merged it into view 1's
+    // typing action, so view 1's Undo took view 2's text back too):
+    KitHelper::setView(nView2);
+    pWrtShell2->EndPara();
+    emulateTyping(u"c");
+    CPPUNIT_ASSERT_EQUAL(u"abc"_ustr, pTextNode->GetText());
+
+    // Then view 2's typing is an action of its own:
+    CPPUNIT_ASSERT_EQUAL(nActions + 1, rUndoManager.GetUndoActionCount());
+    CPPUNIT_ASSERT_EQUAL(ViewShellId(nView2), rUndoManager.GetUndoAction()->GetViewShellId());
+
+    // And view 1's Undo cannot take view 2's text back:
+    KitHelper::setView(nView1);
+    rtl::Reference<VulcanUndoResultListener> pResult = new VulcanUndoResultListener();
+    comphelper::dispatchCommand(u".uno:Undo"_ustr, {}, pResult);
+    Scheduler::ProcessEventsToIdle();
+    CPPUNIT_ASSERT_EQUAL(u"abc"_ustr, pTextNode->GetText());
+    CPPUNIT_ASSERT_EQUAL(lcl_VulcanUndoJson(u"blocked", nView2, u"undo"), pResult->m_aResult);
+
+    KitHelper::setView(nView1);
+    SfxViewShell::Current()->setCOKitViewCallback(nullptr);
+    KitHelper::setView(nView2);
+    SfxViewShell::Current()->setCOKitViewCallback(nullptr);
+}
+
+CPPUNIT_TEST_FIXTURE(SwTiledRenderingTest, testVulcanUndoDeleteNotGroupedAcrossViews)
+{
+    // Given view 1 typed "abcd" and deleted the "d" with backspace:
+    SwXTextDocument* pXTextDocument = createDoc();
+    SwWrtShell* pWrtShell1 = getSwDocShell()->GetWrtShell();
+    int nView1 = KitHelper::getCurrentView();
+    int nView2 = KitHelper::createView();
+    pXTextDocument->initializeForTiledRendering(cpo::uno::Sequence<beans::PropertyValue>());
+    SwWrtShell* pWrtShell2 = getSwDocShell()->GetWrtShell();
+    KitHelper::setView(nView1);
+    emulateTyping(u"abcd");
+    pWrtShell1->DelLeft();
+    SwTextNode* pTextNode = pWrtShell1->GetCursor()->GetPointNode().GetTextNode();
+    CPPUNIT_ASSERT_EQUAL(u"abc"_ustr, pTextNode->GetText());
+    sw::UndoManager& rUndoManager = getSwDocShell()->GetDoc()->GetUndoManager();
+    const size_t nActions = rUndoManager.GetUndoActionCount();
+    CPPUNIT_ASSERT_EQUAL(ViewShellId(nView1), rUndoManager.GetUndoAction()->GetViewShellId());
+
+    // When view 2 presses backspace right there (upstream merged it into view 1's deletion):
+    KitHelper::setView(nView2);
+    pWrtShell2->EndPara();
+    pWrtShell2->DelLeft();
+    CPPUNIT_ASSERT_EQUAL(u"ab"_ustr, pTextNode->GetText());
+
+    // Then view 2's deletion is an action of its own, so view 1's Undo cannot restore it:
+    CPPUNIT_ASSERT_EQUAL(nActions + 1, rUndoManager.GetUndoActionCount());
+    CPPUNIT_ASSERT_EQUAL(ViewShellId(nView2), rUndoManager.GetUndoAction()->GetViewShellId());
+    KitHelper::setView(nView1);
+    rtl::Reference<VulcanUndoResultListener> pResult = new VulcanUndoResultListener();
+    comphelper::dispatchCommand(u".uno:Undo"_ustr, {}, pResult);
+    Scheduler::ProcessEventsToIdle();
+    CPPUNIT_ASSERT_EQUAL(u"ab"_ustr, pTextNode->GetText());
+    CPPUNIT_ASSERT_EQUAL(lcl_VulcanUndoJson(u"blocked", nView2, u"undo"), pResult->m_aResult);
+
+    KitHelper::setView(nView1);
+    SfxViewShell::Current()->setCOKitViewCallback(nullptr);
+    KitHelper::setView(nView2);
+    SfxViewShell::Current()->setCOKitViewCallback(nullptr);
+}
+
+CPPUNIT_TEST_FIXTURE(SwTiledRenderingTest, testVulcanUndoCountStopsAtOtherView)
+{
+    // Given 2 paragraphs, view 1 typed "a" into the first, view 2 typed "z" into the second,
+    // and then view 1 typed "b" after its "a":
+    SwXTextDocument* pXTextDocument = createDoc();
+    SwWrtShell* pWrtShell1 = getSwDocShell()->GetWrtShell();
+    int nView1 = KitHelper::getCurrentView();
+    int nView2 = KitHelper::createView();
+    pXTextDocument->initializeForTiledRendering(cpo::uno::Sequence<beans::PropertyValue>());
+    SwWrtShell* pWrtShell2 = getSwDocShell()->GetWrtShell();
+    pWrtShell2->SplitNode();
+    KitHelper::setView(nView1);
+    pWrtShell1->SttEndDoc(/*bStt=*/true);
+    SwTextNode* pTextNode1 = pWrtShell1->GetCursor()->GetPointNode().GetTextNode();
+    emulateTyping(u"a");
+    KitHelper::setView(nView2);
+    pWrtShell2->SttEndDoc(/*bStt=*/false);
+    SwTextNode* pTextNode2 = pWrtShell2->GetCursor()->GetPointNode().GetTextNode();
+    emulateTyping(u"z");
+    KitHelper::setView(nView1);
+    emulateTyping(u"b");
+    CPPUNIT_ASSERT_EQUAL(u"ab"_ustr, pTextNode1->GetText());
+    sw::UndoManager& rUndoManager = getSwDocShell()->GetDoc()->GetUndoManager();
+    const size_t nActions = rUndoManager.GetUndoActionCount();
+    CPPUNIT_ASSERT_EQUAL(ViewShellId(nView1), rUndoManager.GetUndoAction()->GetViewShellId());
+
+    // When view 1 asks to undo 2 steps at once (the toolbar's undo list): only its topmost
+    // step is its own, the next one is view 2's.
+    cpo::uno::Sequence<beans::PropertyValue> aArgs
+        = { comphelper::makePropertyValue(u"Undo"_ustr, static_cast<sal_uInt16>(2)) };
+    rtl::Reference<VulcanUndoResultListener> pResult = new VulcanUndoResultListener();
+    comphelper::dispatchCommand(u".uno:Undo"_ustr, aArgs, pResult);
+    Scheduler::ProcessEventsToIdle();
+
+    // Then nothing is undone -- above all not view 2's "z" -- and the answer names view 2:
+    CPPUNIT_ASSERT_EQUAL(u"ab"_ustr, pTextNode1->GetText());
+    CPPUNIT_ASSERT_EQUAL(u"z"_ustr, pTextNode2->GetText());
+    CPPUNIT_ASSERT_EQUAL(nActions, rUndoManager.GetUndoActionCount());
+    CPPUNIT_ASSERT_EQUAL(lcl_VulcanUndoJson(u"blocked", nView2, u"undo"), pResult->m_aResult);
+
+    KitHelper::setView(nView1);
+    SfxViewShell::Current()->setCOKitViewCallback(nullptr);
+    KitHelper::setView(nView2);
+    SfxViewShell::Current()->setCOKitViewCallback(nullptr);
+}
+
+CPPUNIT_TEST_FIXTURE(SwTiledRenderingTest, testVulcanUndoNotMovableBlamesNobody)
+{
+    // Given view 1 split a paragraph (adds a node: never undone out of order), and then
+    // view 2 typed into another paragraph:
+    SwXTextDocument* pXTextDocument = createDoc();
+    SwWrtShell* pWrtShell1 = getSwDocShell()->GetWrtShell();
+    int nView1 = KitHelper::getCurrentView();
+    int nView2 = KitHelper::createView();
+    pXTextDocument->initializeForTiledRendering(cpo::uno::Sequence<beans::PropertyValue>());
+    SwWrtShell* pWrtShell2 = getSwDocShell()->GetWrtShell();
+    KitHelper::setView(nView1);
+    pWrtShell1->SplitNode();
+    KitHelper::setView(nView2);
+    pWrtShell2->SttEndDoc(/*bStt=*/false);
+    emulateTyping(u"z");
+    sw::UndoManager& rUndoManager = getSwDocShell()->GetDoc()->GetUndoManager();
+    const size_t nActions = rUndoManager.GetUndoActionCount();
+
+    // When view 1 presses undo:
+    KitHelper::setView(nView1);
+    rtl::Reference<VulcanUndoResultListener> pResult = new VulcanUndoResultListener();
+    comphelper::dispatchCommand(u".uno:Undo"_ustr, {}, pResult);
+    Scheduler::ProcessEventsToIdle();
+
+    // Then nothing is undone, and the answer blames its own change's kind, not view 2 (which
+    // could be the AI's view: the notice must not say "the AI edited here after you"):
+    CPPUNIT_ASSERT_EQUAL(nActions, rUndoManager.GetUndoActionCount());
+    CPPUNIT_ASSERT_EQUAL(lcl_VulcanUndoJson(u"not_movable", -1, u"undo"), pResult->m_aResult);
+
+    KitHelper::setView(nView1);
+    SfxViewShell::Current()->setCOKitViewCallback(nullptr);
+    KitHelper::setView(nView2);
+    SfxViewShell::Current()->setCOKitViewCallback(nullptr);
+}
+
 CPPUNIT_TEST_FIXTURE(SwTiledRenderingTest, testUndoShapeLimiting)
 {
     // Load a document and create a view.
@@ -1786,11 +2165,16 @@ CPPUNIT_TEST_FIXTURE(SwTiledRenderingTest, testUndoRepairResult)
     KitHelper::setView(nView1);
     emulateTyping(u"a");
 
-    // Assert that by default the second view can't undo the action.
+    // Assert that by default the second view can't undo the action. Vulcan fork: and it
+    // is not answered with the numeric SID_REPAIRPACKAGE conflict value any more (the
+    // browser turned that into the stock "Conflict Undo/Redo" dialog) but with JSON.
     KitHelper::setView(nView2);
-    comphelper::dispatchCommand(u".uno:Undo"_ustr, {}, pResult2);
+    rtl::Reference<VulcanUndoResultListener> pJson2 = new VulcanUndoResultListener();
+    comphelper::dispatchCommand(u".uno:Undo"_ustr, {}, pJson2);
     Scheduler::ProcessEventsToIdle();
-    CPPUNIT_ASSERT_EQUAL(static_cast<sal_uInt32>(SID_REPAIRPACKAGE), pResult2->m_nDocRepair);
+    CPPUNIT_ASSERT(!pJson2->m_bNumeric);
+    CPPUNIT_ASSERT(pJson2->m_aResult.indexOf(u"\"command\":\"undo\"") >= 0);
+    CPPUNIT_ASSERT_EQUAL(static_cast<sal_uInt32>(0), pResult2->m_nDocRepair);
 
     KitHelper::setView(nView1);
     SfxViewShell::Current()->setCOKitViewCallback(nullptr);
@@ -1819,11 +2203,14 @@ CPPUNIT_TEST_FIXTURE(SwTiledRenderingTest, testRedoRepairResult)
     comphelper::dispatchCommand(u".uno:Undo"_ustr, {}, pResult2);
     CPPUNIT_ASSERT_EQUAL(static_cast<sal_uInt32>(0), pResult2->m_nDocRepair);
 
-    // Assert that by default the second view can't redo the action.
+    // Assert that by default the second view can't redo the action. Vulcan fork: answered
+    // with JSON, never the numeric SID_REPAIRPACKAGE conflict value.
     KitHelper::setView(nView2);
-    comphelper::dispatchCommand(u".uno:Redo"_ustr, {}, pResult2);
+    rtl::Reference<VulcanUndoResultListener> pJson2 = new VulcanUndoResultListener();
+    comphelper::dispatchCommand(u".uno:Redo"_ustr, {}, pJson2);
     Scheduler::ProcessEventsToIdle();
-    CPPUNIT_ASSERT_EQUAL(static_cast<sal_uInt32>(SID_REPAIRPACKAGE), pResult2->m_nDocRepair);
+    CPPUNIT_ASSERT(!pJson2->m_bNumeric);
+    CPPUNIT_ASSERT_EQUAL(lcl_VulcanUndoJson(u"nothing_own", nView1, u"redo"), pJson2->m_aResult);
 
     KitHelper::setView(nView1);
     SfxViewShell::Current()->setCOKitViewCallback(nullptr);
@@ -1842,12 +2229,10 @@ namespace {
         CPPUNIT_ASSERT_EQUAL(SfxItemState::SET, aItemSet1.GetItemState(SID_UNDO));
         const SfxUInt32Item *pUnsetItem = dynamic_cast<const SfxUInt32Item*>(aItemSet1.GetItem(SID_UNDO));
         CPPUNIT_ASSERT(!pUnsetItem);
-        // second view, undo conflict
+        // second view: nothing of its own it can take back. Vulcan fork: disabled, not the
+        // SID_REPAIRPACKAGE "conflict" state.
         pView2->GetState(aItemSet2);
-        CPPUNIT_ASSERT_EQUAL(SfxItemState::SET, aItemSet2.GetItemState(SID_UNDO));
-        const SfxUInt32Item* pUInt32Item = dynamic_cast<const SfxUInt32Item*>(aItemSet2.GetItem(SID_UNDO));
-        CPPUNIT_ASSERT(pUInt32Item);
-        CPPUNIT_ASSERT_EQUAL(static_cast<sal_uInt32>(SID_REPAIRPACKAGE), pUInt32Item->GetValue());
+        CPPUNIT_ASSERT_EQUAL(SfxItemState::DISABLED, aItemSet2.GetItemState(SID_UNDO));
     };
 
 }
@@ -1891,12 +2276,10 @@ CPPUNIT_TEST_FIXTURE(SwTiledRenderingTest, testDisableUndoRepair)
         CPPUNIT_ASSERT_EQUAL(SfxItemState::SET, aItemSet2.GetItemState(SID_UNDO));
         const SfxUInt32Item *pUnsetItem = dynamic_cast<const SfxUInt32Item*>(aItemSet2.GetItem(SID_UNDO));
         CPPUNIT_ASSERT(!pUnsetItem);
-        // first view, undo conflict
+        // first view: its own change is under the second view's in the same paragraph.
+        // Vulcan fork: disabled, not the SID_REPAIRPACKAGE "conflict" state.
         pView1->GetState(aItemSet1);
-        CPPUNIT_ASSERT_EQUAL(SfxItemState::SET, aItemSet1.GetItemState(SID_UNDO));
-        const SfxUInt32Item* pUInt32Item = dynamic_cast<const SfxUInt32Item*>(aItemSet1.GetItem(SID_UNDO));
-        CPPUNIT_ASSERT(pUInt32Item);
-        CPPUNIT_ASSERT_EQUAL(static_cast<sal_uInt32>(SID_REPAIRPACKAGE), pUInt32Item->GetValue());
+        CPPUNIT_ASSERT_EQUAL(SfxItemState::DISABLED, aItemSet1.GetItemState(SID_UNDO));
     }
 
     // Insert a character in the first view.

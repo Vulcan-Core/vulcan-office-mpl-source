@@ -1954,6 +1954,130 @@ void ScViewFunc::AutoFormat( sal_uInt16 nFormatNo )
 
 // Search & Replace
 
+/* Vulcan: the phone Find & Replace sheet's "N of M" match count.
+ *
+ * WHY THIS IS HERE AND NOT IN svx. The filed spec said to source the count
+ * from "the match set SvxSearchDialog already walks". It does not walk one:
+ * SvxSearchDialog::CommandHdl_Impl (svx/source/dialog/srchdlg.cxx) only builds
+ * an SvxSearchItem and hands it to FID_SEARCH_NOW via ExecuteSynchron. Every
+ * match set in the product is built by an app -- ScDocument::SearchAndReplace
+ * here, SwView::SearchAll in Writer, SdOutliner::SearchAndReplaceAll in
+ * Impress -- so the producer has to be app-side. svx owns only the sink
+ * (SvxSearchDialogWrapper::SetSearchLabel(sal_Int32, sal_Int32)).
+ *
+ * WHY A SECOND SWEEP IS UNAVOIDABLE. A total is a total. A plain FIND resolves
+ * one match and stops; nothing anywhere in the FIND path knows how many others
+ * exist. FIND_ALL is the only pass that enumerates them, and it is read-only
+ * (ScTable::SearchAndReplace routes FIND_ALL to SearchAll(), which only reads;
+ * REPLACE_ALL is the arm that writes, and is never requested here).
+ *
+ * WHY IT IS AFFORDABLE ANYWAY: it is phone-only (isKitMobilePhone), it is the
+ * same work as tapping "Find All" -- a one-tap first-class feature -- and it
+ * is capped by a used-area budget below, so a phone that opens a 500k-cell
+ * workbook loses the count rather than the frame rate. The count is a nicety;
+ * the search is not.
+ *
+ * WHY IT DOES NOT DISTURB THE SEARCH: the sweep runs on a private
+ * SvxSearchItem copy, a private ScMarkData and a private ScRangeList, with
+ * pUndoDoc = nullptr. It touches neither the view's mark, nor the cursor, nor
+ * the document. It also goes through the FIND_ALL arm of
+ * ScDocument::SearchAndReplace, which -- unlike the FIND arm -- emits no
+ * KIT_CALLBACK_SET_PART when it exhausts a sheet, so the client sees nothing.
+ */
+
+/* Is rCandidate reached before rFound by the walk this search item describes?
+ * ScTable::Search scans by row when GetRowDirection() and by column otherwise,
+ * and reverses both when GetBackward(). Sheets are visited in the same
+ * direction. This is a pure predicate on two addresses -- it deliberately does
+ * NOT rely on the order of the joined ScRangeList, because ScRangeList::Join
+ * merges neighbours and may keep the merged range in the earlier slot. */
+static bool lcl_MatchComesBefore(const ScAddress& rCandidate, const ScAddress& rFound,
+                                 bool bBackward, bool bRowDirection)
+{
+    if (rCandidate.Tab() != rFound.Tab())
+        return bBackward ? rCandidate.Tab() > rFound.Tab()
+                         : rCandidate.Tab() < rFound.Tab();
+
+    const sal_Int64 nCandMajor = bRowDirection ? rCandidate.Row() : rCandidate.Col();
+    const sal_Int64 nFoundMajor = bRowDirection ? rFound.Row() : rFound.Col();
+    if (nCandMajor != nFoundMajor)
+        return bBackward ? nCandMajor > nFoundMajor : nCandMajor < nFoundMajor;
+
+    const sal_Int64 nCandMinor = bRowDirection ? rCandidate.Col() : rCandidate.Row();
+    const sal_Int64 nFoundMinor = bRowDirection ? rFound.Col() : rFound.Row();
+    if (nCandMinor == nFoundMinor)
+        return false;
+    return bBackward ? nCandMinor > nFoundMinor : nCandMinor < nFoundMinor;
+}
+
+static void lcl_PublishPhoneMatchOrdinal(ScDocument& rDoc, const SvxSearchItem& rSearchItem,
+                                         const ScAddress& rFound, SCTAB nStartTab, SCTAB nEndTab)
+{
+    /* A selection-scoped search cannot be counted from here: SearchCell tests
+     * rMark.IsCellMarked(), and the private mark below marks sheets, not
+     * cells. Reproducing the live selection would mean copying the view's mark
+     * and depending on where in this function it has been mutated to. No
+     * ordinal beats a wrong one. */
+    if (rSearchItem.GetSelection())
+        return;
+
+    const sal_Int64 nCellBudget = 250000;
+    sal_Int64 nCells = 0;
+    for (SCTAB nTab = nStartTab; nTab <= nEndTab; ++nTab)
+    {
+        SCCOL nEndCol = 0;
+        SCROW nEndRow = 0;
+        rDoc.GetCellArea(nTab, nEndCol, nEndRow);
+        nCells += (static_cast<sal_Int64>(nEndCol) + 1) * (static_cast<sal_Int64>(nEndRow) + 1);
+        if (nCells > nCellBudget)
+            return;
+    }
+
+    SvxSearchItem aCountItem(rSearchItem);
+    aCountItem.SetCommand(SvxSearchCmd::FIND_ALL);
+
+    ScMarkData aCountMark(rDoc.GetSheetLimits());
+    for (SCTAB nTab = nStartTab; nTab <= nEndTab; ++nTab)
+        aCountMark.SelectTable(nTab, true);
+
+    ScRangeList aMatches;
+    OUString aUndoStr;
+    bool bMatchesWereClamped = false;
+    SCCOL nCol = 0;
+    SCROW nRow = 0;
+    SCTAB nTab = nStartTab;
+    if (!rDoc.SearchAndReplace(aCountItem, nCol, nRow, nTab, aCountMark, aMatches,
+                               aUndoStr, nullptr, bMatchesWereClamped))
+        return;
+    if (bMatchesWereClamped)
+        return;
+
+    /* size() is NOT the match count -- ScTable::SearchAll Joins each matched
+     * cell into the list, so adjacent matches collapse into one range. Join
+     * only ever produces an exact rectangular union of ranges it already
+     * holds, so every cell in the list is a match and GetCellCount() is the
+     * count. */
+    const sal_uInt64 nTotal = aMatches.GetCellCount();
+    if (nTotal == 0 || nTotal > static_cast<sal_uInt64>(SAL_MAX_INT32))
+        return;
+
+    sal_Int64 nBefore = 0;
+    for (size_t i = 0; i < aMatches.size(); ++i)
+    {
+        const ScRange& rRange = aMatches[i];
+        for (SCTAB t = rRange.aStart.Tab(); t <= rRange.aEnd.Tab(); ++t)
+            for (SCCOL c = rRange.aStart.Col(); c <= rRange.aEnd.Col(); ++c)
+                for (SCROW r = rRange.aStart.Row(); r <= rRange.aEnd.Row(); ++r)
+                    if (lcl_MatchComesBefore(ScAddress(c, r, t), rFound,
+                                             rSearchItem.GetBackward(),
+                                             rSearchItem.GetRowDirection()))
+                        ++nBefore;
+    }
+
+    SvxSearchDialogWrapper::SetSearchLabel(static_cast<sal_Int32>(nBefore + 1),
+                                           static_cast<sal_Int32>(nTotal));
+}
+
 bool ScViewFunc::SearchAndReplace( const SvxSearchItem* pSearchItem,
                                         bool bAddUndo, bool bIsApi )
 {
@@ -2220,6 +2344,25 @@ bool ScViewFunc::SearchAndReplace( const SvxSearchItem* pSearchItem,
 
                 // Trigger KIT_CALLBACK_TEXT_SELECTION now.
                 MarkDataChanged();
+
+                /* Vulcan: "3 of 12" into `searchlabel` for the phone Find &
+                 * Replace sheet -- see lcl_PublishPhoneMatchOrdinal above for
+                 * why the count is computed here and what it costs.
+                 *
+                 * LAST WRITER WINS, DELIBERATELY. This overwrites the
+                 * "Reached the end of the sheet" notice that the wrap arm set
+                 * a few lines up. That is Google's phone behaviour: the search
+                 * wraps silently and the ordinal simply restarts at 1. On
+                 * NOT-FOUND we never get here, so SearchLabel::NotFound
+                 * survives untouched.
+                 *
+                 * FIND only. FIND_ALL selects everything at once, so an
+                 * ordinal would be a lie; REPLACE/REPLACE_ALL have their own
+                 * status text. */
+                if (nCommand == SvxSearchCmd::FIND && !bIsApi && pViewShell->isKitMobilePhone())
+                    lcl_PublishPhoneMatchOrdinal(rDoc, *pSearchItem,
+                                                 ScAddress(nCol, nRow, nTab),
+                                                 nStartTab, nEndTab);
             }
         }
 

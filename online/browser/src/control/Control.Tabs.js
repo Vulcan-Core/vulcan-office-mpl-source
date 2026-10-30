@@ -48,25 +48,29 @@ window.L.Control.Tabs = window.L.Control.extend({
 
 		this._menuPosEl = null;
 
-		// Only for small-screen devices.
+		// THE ONE sheet-menu table. _buildMenuEntries() reads it for the
+		// desktop/tablet dropdown AND, since G29/C6, for the phone bottom
+		// sheet — so `visible` and `_checked` are evaluated for the tapped tab
+		// at the moment the menu opens on every surface.
+		//
+		// It carried an `IconUtil.createMenuItemLink` HTML `name` per entry
+		// until then, authored for a jQuery context menu this control no longer
+		// opens, and handed straight to the mobile wizard, which writes labels
+		// with textContent: nine rows of `<a class="context-menu-link …">` on a
+		// 393px phone. Nothing read `name` on either surface. Deleted, not
+		// worked around.
 		this._menuItem = {
 			'insertsheetbefore': {
-				name: app.IconUtil.createMenuItemLink(_('Insert sheet before this'), 'InsertSheetBefore'),
-				isHtmlName: true,
 				callback: (this._insertSheetBefore).bind(this),
 				text: _('Insert sheet before this'),
 				_image: 'InsertSheetBefore',
 			},
 			'insertsheetafter': {
-				name: app.IconUtil.createMenuItemLink(_('Insert sheet after this'), 'InsertSheetAfter'),
-				isHtmlName: true,
 				callback: (this._insertSheetAfter).bind(this),
 				text: _('Insert sheet after this'),
 				_image: 'InsertSheetAfter',
 			},
 			'.uno:Remove': {
-				name: app.IconUtil.createMenuItemLink(_UNO('.uno:Remove', 'spreadsheet', true), 'Remove'),
-				isHtmlName: true,
 				callback: (this._deleteSheet).bind(this),
 				visible: function() {
 					return areTabsMultiple() && !this._isProtectedSheet(this._tabForContextMenu);
@@ -74,7 +78,6 @@ window.L.Control.Tabs = window.L.Control.extend({
 				_image: 'Remove',
 			},
 			'.uno:Name': {
-				name: app.IconUtil.createMenuItemLink(_UNO('.uno:RenameTable', 'spreadsheet', true), 'Name'),
 				callback: (this._renameSheet).bind(this),
 				visible: function() {
 					return !this._isProtectedSheet(this._tabForContextMenu);
@@ -83,21 +86,15 @@ window.L.Control.Tabs = window.L.Control.extend({
 				_image: 'Name',
 			},
 			'.uno:DuplicateSheet': {
-				name: app.IconUtil.createMenuItemLink(_UNO('.uno:DuplicateSheet', 'spreadsheet', true), 'DuplicateSheet'),
-				isHtmlName: true,
 				callback: (this._duplicateSheet).bind(this),
 				_image: 'DuplicateSheet',
 			},
 			'.uno:Protect': {
-				name: app.IconUtil.createMenuItemLink(_UNO('.uno:Protect', 'spreadsheet', true), 'Protect'),
-				isHtmlName: true,
 				callback: (this._protectSheet).bind(this),
 				_image: 'Protect',
 				_checked: function() { return this._isProtectedSheet(this._tabForContextMenu); }.bind(this),
 			},
 			'.uno:SetTabBgColor': {
-				name: app.IconUtil.createMenuItemLink(_UNO('.uno:SetTabBgColor', 'spreadsheet', true), 'SetTabBgColor'),
-				isHtmlName: true,
 				callback: (this._setTabColor).bind(this),
 				visible: function() {
 					return !this._isProtectedSheet(this._tabForContextMenu);
@@ -105,8 +102,6 @@ window.L.Control.Tabs = window.L.Control.extend({
 				_image: 'SetTabBgColor',
 			},
 			'resettabcolor': {
-				name: app.IconUtil.createMenuItemLink(_('Reset Tab Color'), 'ResetTabBgColor'),
-				isHtmlName: true,
 				callback: (this._resetTabColor).bind(this),
 				visible: function() {
 					return !this._isProtectedSheet(this._tabForContextMenu)
@@ -116,8 +111,6 @@ window.L.Control.Tabs = window.L.Control.extend({
 				_image: 'ResetTabBgColor',
 			},
 			'.uno:Show': {
-				name: app.IconUtil.createMenuItemLink(_UNO('.uno:Show', 'spreadsheet', true), 'Show'),
-				isHtmlName: true,
 				callback: (this._showSheet).bind(this),
 				visible: function() {
 					return app.calc.isAnyPartHidden();
@@ -125,37 +118,28 @@ window.L.Control.Tabs = window.L.Control.extend({
 				_image: 'Show',
 			},
 			'.uno:Hide': {
-				name: app.IconUtil.createMenuItemLink(_UNO('.uno:Hide', 'spreadsheet', true), 'Hide'),
-				isHtmlName: true,
 				callback: (this._hideSheet).bind(this),
 				visible: areTabsMultiple,
 				_image: 'Hide',
 			},
 			'movesheetleft': {
-				name: app.IconUtil.createMenuItemLink(_('Move Sheet Left'), 'MoveSheetLeft'),
-				isHtmlName: true,
 				callback: (this._moveSheetLeft).bind(this),
 				visible: areTabsMultiple,
 				text: _('Move Sheet Left'),
 				_image: 'MoveSheetLeft',
 			},
 			'movesheetright': {
-				name: app.IconUtil.createMenuItemLink(_('Move Sheet Right'), 'MoveSheetRight'),
-				isHtmlName: true,
 				callback: (this._moveSheetRight).bind(this),
 				visible: areTabsMultiple,
 				text: _('Move Sheet Right'),
 				_image: 'MoveSheetRight',
 			},
 			'.uno:Move': {
-				name: app.IconUtil.createMenuItemLink(_UNO('.uno:Move', 'spreadsheet', true), 'Move'),
 				callback: (this._moveOrCopySheet).bind(this),
 				visible: areTabsMultiple,
 				_image: 'Move',
 			},
 			'.uno:CopyTab': {
-				name: app.IconUtil.createMenuItemLink(_('Copy Sheet...'), 'CopyTab'),
-				isHtmlName: true,
 				callback: function() {this._map.sendUnoCommand('.uno:Move');}.bind(this),
 				visible: function() {
 					return !areTabsMultiple();
@@ -220,42 +204,6 @@ window.L.Control.Tabs = window.L.Control.extend({
 
 				this._tabsCont.style.display = 'grid';
 
-				var menuItemMobile = {};
-				Object.assign(menuItemMobile,
-					{
-						'insertsheetbefore' : this._menuItem['insertsheetbefore'],
-						'insertsheetafter'  :   this._menuItem['insertsheetafter'],
-						'Name' : this._menuItem['.uno:Name'],
-						'DuplicateSheet' : this._menuItem['.uno:DuplicateSheet'],
-					}
-				);
-				if (app.calc.isAnyPartHidden()) {
-					Object.assign(menuItemMobile, {
-						'Show' : this._menuItem['.uno:Show'],
-					});
-				}
-				if (app.calc.getVisiblePartCount() !== 1) {
-					Object.assign(menuItemMobile,
-						{
-							'Remove': this._menuItem['.uno:Remove'],
-							'Hide': this._menuItem['.uno:Hide'],
-							'movesheetleft': this._menuItem['movesheetleft'],
-							'movesheetright': this._menuItem['movesheetright'],
-							'Move': this._menuItem['.uno:Move'],
-						}
-					);
-				} else {
-					Object.assign(menuItemMobile,
-						{
-							'CopyTab': this._menuItem['.uno:CopyTab'],
-						}
-					);
-				}
-
-				if (window.mode.isSmallScreenDevice()) {
-					var menuData = window.L.Control.JSDialogBuilder.getMenuStructureForMobileWizard(menuItemMobile, true, '');
-				}
-
 				for (var i = 0; i < parts; i++) {
 					// Skip if hidden or a sheet view (implicitly hidden)
 					if (app.calc.isPartHidden(i) || app.calc.isPartSheetView(i))
@@ -275,14 +223,14 @@ window.L.Control.Tabs = window.L.Control.extend({
 						(new Hammer(tab, {recognizers: [[Hammer.Press]]}))
 							.on('press', function (j) {
 								return function(e) {
-									this._tabForContextMenu = j;
-									if (!this._map.isReadOnlyMode()) {
-										if (window.mode.isSmallScreenDevice()) {
-											window.contextMenuWizard = true;
-											this._map.fire('mobilewizard', {data: menuData});
-										} else {
-											this._openTabContextMenu(e);
-										}
+									if (window.mode.isSmallScreenDevice()) {
+										// Long press is muscle memory, so it keeps
+										// reaching the same sheet menu the tap
+										// grammar opens — never a dead end.
+										this._openPhoneSheetMenu(j);
+									} else if (!this._map.isReadOnlyMode()) {
+										this._tabForContextMenu = j;
+										this._openTabContextMenu(e);
 									}
 								};
 							}(i).bind(this));
@@ -351,8 +299,7 @@ window.L.Control.Tabs = window.L.Control.extend({
 					window.L.DomEvent
 						.on(tab, 'click', window.L.DomEvent.stopPropagation)
 						.on(tab, 'click', window.L.DomEvent.stop)
-						.on(tab, 'click', this._setPart, this)
-						.on(tab, 'click', this._map.focus, this._map);
+						.on(tab, 'click', this._onTabClick, this);
 					window.L.DomEvent.on(tab, 'keydown', this._onTabKeyDown, this);
 					this._addDnDHandlers(tab);
 					this._spreadsheetTabs[id] = tab;
@@ -369,6 +316,52 @@ window.L.Control.Tabs = window.L.Control.extend({
 				dropZoneEndContainer.id = 'drop-zone-end-container';
 				this._addDnDHandlers(dropZoneEndContainer);
 				dropZoneEndContainer.setAttribute('draggable', false);
+
+				// Google-Sheets phone chrome (docs/mobile-redesign/02 §7):
+				// "+" beside the strip appends a sheet — same 'insertsheet'
+				// action as the desktop SheetsBar "+". Rebuilt with the tabs
+				// on every updateparts; styled in vulcan-theme.css §13-CALC.2.
+				// Phone chrome only.
+				//
+				// 🔴 THE PARENT IS THE TABS CONTAINER, NOT ssTabScroll, and that
+				// is the whole point of this control. #spreadsheet-tab-scroll is
+				// an overflow-x:auto strip, so a button appended INSIDE it is the
+				// last item of the SCROLLING CONTENT: measured on a 393px phone
+				// it sat at x=379 with its centre at 401, off-screen, reachable
+				// only by first swiping the tab list to its end — and one sheet
+				// further away with every sheet it added. As a sibling it gets
+				// its own grid track from .spreadsheet-tabs-container and is
+				// permanently on screen at a full 44px. _tabsCont is emptied and
+				// ssTabScroll re-created at the top of this block, so appending
+				// here still rebuilds exactly once per updateparts, after the
+				// strip. Nothing reads the button out of the strip: the tab
+				// keyboard walk queries '.spreadsheet-tab' (_onTabKeyDown) and
+				// the drag handlers test for .spreadsheet-tab / .tab-drop-area.
+				//
+				// The one thing that DOES count the strip's children is the
+				// 'insertsheet' action (docdispatcher.ts:761), and this moves
+				// that count by exactly one — back to the number desktop has
+				// always sent. It cannot change where the sheet lands: the
+				// count is 2 elements per visible tab plus the two end drop
+				// zones, so it overshoots the sheet count either way, core
+				// clamps the Index to the end, and SheetSwitch
+				// .updateOnSheetInsertion's loop and reassignment are both
+				// no-ops for an index at or past getNumberOfParts().
+				if (window.mode.isSmallScreenDevice() &&
+					document.documentElement.classList.contains('vulcan-mobile-chrome')) {
+					var addSheetButton = window.L.DomUtil.create('button', 'vulcan-add-sheet', this._tabsCont);
+					addSheetButton.id = 'vulcan-add-sheet';
+					addSheetButton.type = 'button';
+					addSheetButton.textContent = '+';
+					addSheetButton.setAttribute('aria-label', _('Insert sheet'));
+					window.L.DomEvent
+						.on(addSheetButton, 'click', window.L.DomEvent.stopPropagation)
+						.on(addSheetButton, 'click', window.L.DomEvent.stop)
+						.on(addSheetButton, 'click', function() {
+							if (!this._map.isReadOnlyMode())
+								app.dispatcher.dispatch('insertsheet');
+						}, this);
+				}
 			}
 
 			var scrollCont = document.getElementById('spreadsheet-tab-scroll');
@@ -398,6 +391,46 @@ window.L.Control.Tabs = window.L.Control.extend({
 				}
 				else {
 					scrollDiv.scrollLeft = horizScrollPos;
+				}
+				// A fresh open restores scrollLeft 0 while the document may
+				// select its LAST sheet, leaving the selected tab outside the
+				// strip viewport — the 14px corner insets narrowed the strip
+				// enough for four tabs to overflow a 393px phone. Nudge the
+				// minimum distance that makes the selected tab fully visible;
+				// a restore that already shows it moves nothing, so a user's
+				// own scroll position survives.
+				if (this._isPhoneSheetStrip()) {
+					var selectedTab = scrollDiv.querySelector('.spreadsheet-tab-selected');
+					if (selectedTab) {
+						var tabLeft = selectedTab.offsetLeft;
+						var tabRight = tabLeft + selectedTab.offsetWidth;
+						var viewLeft = scrollDiv.scrollLeft;
+						var viewRight = viewLeft + scrollDiv.clientWidth;
+						if (tabRight > viewRight)
+							scrollDiv.scrollLeft = tabRight - scrollDiv.clientWidth;
+						else if (tabLeft < viewLeft)
+							scrollDiv.scrollLeft = tabLeft;
+					}
+				}
+				// Desktop and tablet: reveal the selected tab whenever the
+				// selected sheet CHANGES (the sheet list, Go to Sheet, a
+				// link), so the restore above cannot leave it off-strip or
+				// half-clipped. Measured from rects: offsetLeft is relative to
+				// the offsetParent, not to the strip, which is how the active
+				// tab ended up clipped by the strip's own left margin.
+				// Unchanged selection keeps the user's own scroll position.
+				else if (this._lastRevealedPart !== selectedPart) {
+					this._lastRevealedPart = selectedPart;
+					var current = scrollDiv.querySelector('.spreadsheet-tab-selected');
+					if (current) {
+						var tab = current.getBoundingClientRect();
+						var view = scrollDiv.getBoundingClientRect();
+						var inset = 8;
+						if (tab.left < view.left + inset)
+							scrollDiv.scrollLeft -= view.left + inset - tab.left;
+						else if (tab.right > view.right - inset)
+							scrollDiv.scrollLeft += tab.right - (view.right - inset);
+					}
 				}
 			}
 		}
@@ -434,6 +467,142 @@ window.L.Control.Tabs = window.L.Control.extend({
 		}
 
 		return entries;
+	},
+
+	/*
+	 * THE PHONE SHEET MENU (G27 / C6), curated for a 393px screen.
+	 *
+	 * Order is the order Google Sheets ships, destructive last. Two desktop
+	 * rows are deliberately absent:
+	 *
+	 *   insertsheetbefore / insertsheetafter — the 44px "+" beside the strip
+	 *       already appends a sheet; two more "insert" rows are desktop residue.
+	 *   .uno:Move / .uno:CopyTab ("Move or Copy Sheet…") — opens a desktop
+	 *       modal with a document-and-position picker, unusable at this width.
+	 *       movesheetleft/right ARE the phone's reorder affordance until touch
+	 *       drag-and-drop exists (_addDnDHandlers is HTML5 DnD).
+	 *
+	 * Every id here is a key _buildMenuEntries emits AND a key of
+	 * _menuCallbacks, so there is no second callback table: a row that stops
+	 * matching simply stops being offered, and the registry test below the
+	 * fold (mocha_tests/CalcPhoneSheetMenu.test.ts) is what makes that loud.
+	 */
+	_phoneSheetActions: [
+		'.uno:RenameTable',
+		'.uno:DuplicateSheet',
+		'.uno:SetTabBgColor',
+		'resettabcolor',
+		'.uno:Protect',
+		'.uno:Hide',
+		'.uno:Show',
+		'movesheetleft',
+		'movesheetright',
+		'.uno:Remove',
+	],
+
+	/*
+	 * The bottom sheet, built AT PRESS TIME from the same entries the desktop
+	 * dropdown opens. That is the whole fix for C6: the labels are the plain
+	 * _UNO strings rather than desktop context-menu markup, `visible` and
+	 * `_checked` are evaluated for THIS tab at THIS moment (the phone used to
+	 * offer Rename/Delete/Set-colour on a protected sheet, because the legacy
+	 * adapter never read `visible`), and the shape is no longer frozen at the
+	 * last `updateparts`.
+	 */
+	_phoneSheetMenu: function() {
+		var order = this._phoneSheetActions;
+		var entries = this._buildMenuEntries().filter(function(entry) {
+			return order.indexOf(entry.id) !== -1;
+		});
+		entries.sort(function(a, b) {
+			return order.indexOf(a.id) - order.indexOf(b.id);
+		});
+
+		var callbacks = this._menuCallbacks;
+		var tab = window.L.DomUtil.get('spreadsheet-tab' + this._tabForContextMenu);
+		var sheetName = tab ? tab.textContent.trim() : '';
+
+		return {
+			// A real id: without one every id-less wizard window pools into the
+			// same content element (Control.MobileWizard._getContentForWindowId),
+			// and the escape ladder has nothing to name.
+			id: 'vulcan-sheet-menu',
+			type: 'container',
+			text: sheetName || _('Sheet'),
+			enabled: true,
+			children: [
+				{
+					id: 'vulcan-sheet-menu-list',
+					type: 'mainmenu',
+					enabled: true,
+					children: entries.map(function(entry, index) {
+						return {
+							// Not the command id: `id` becomes a `ui-header-<id>`
+							// class and is looked up in _menuItemHandlers.
+							id: 'vulcan-sheet-action-' + index,
+							type: 'menuitem',
+							text: entry.text,
+							// Only read to pick the row icon; execution goes
+							// through executionType 'callback' below.
+							command: entry.id,
+							checked: entry.checked,
+							enabled: true,
+							executionType: 'callback',
+							callback: callbacks[entry.id],
+							children: [],
+						};
+					}),
+				},
+			],
+		};
+	},
+
+	/*
+	 * Phone chrome, BOTH halves. js/global.js stamps vulcan-mobile-chrome iff
+	 * `!desktopChrome && isSmallScreenDevice()`, and `?vulcanChrome=desktop` on
+	 * a real phone leaves the screen test TRUE with the class ABSENT — a state
+	 * the screen test alone cannot see. The tap grammar below is a chrome
+	 * behaviour, so it takes both; the label fix above is a bug fix and
+	 * deliberately applies to every small screen.
+	 */
+	_isPhoneSheetStrip: function() {
+		return window.mode.isSmallScreenDevice() &&
+			document.documentElement.classList.contains('vulcan-mobile-chrome');
+	},
+
+	/*
+	 * G27 — TAP THE ACTIVE SHEET TO OPEN ITS MENU.
+	 *
+	 * Google's grammar exactly: a tap on a NON-active tab switches to it (the
+	 * most common action on the strip, so it keeps costing one tap), and a tap
+	 * on the tab you are already on opens the sheet submenu. Off phone chrome
+	 * this reduces to the two handlers it replaced — substitute
+	 * _isPhoneSheetStrip() = false and _setPart + map.focus run in that order,
+	 * exactly as they were chained. A switch refused because a comment is
+	 * being edited has put the caret in that comment, so the grid does not
+	 * take focus: the next keys would overwrite the comment's anchor cell.
+	 */
+	_onTabClick: function(e) {
+		if (this._isPhoneSheetStrip() &&
+			window.L.DomUtil.hasClass(e.currentTarget, 'spreadsheet-tab-selected')) {
+			var match = e.currentTarget.id.match(/\d+/);
+			// No map.focus() here: the sheet is the thing being opened, and
+			// focusing the document behind it is how a keyboard gets raised
+			// under a bottom sheet.
+			if (match) this._openPhoneSheetMenu(parseInt(match[0]));
+			return;
+		}
+		if (!this._setPart(e))
+			this._map.focus();
+	},
+
+	/** Open the phone sheet menu for one tab. The single opener: tap and press. */
+	_openPhoneSheetMenu: function(tabIndex) {
+		if (this._map.isReadOnlyMode())
+			return;
+		this._tabForContextMenu = tabIndex;
+		window.contextMenuWizard = true;
+		this._map.fire('mobilewizard', {data: this._phoneSheetMenu()});
 	},
 
 	_createMenuPositionElement(evt) {
@@ -544,8 +713,9 @@ window.L.Control.Tabs = window.L.Control.extend({
 
 		if (key === 'Enter' || key === ' ' || key === 'Spacebar') {
 			window.L.DomEvent.stop(e);
-			this._setPart(e);
-			this._map.focus();
+			// Not after a refused switch: see _onTabClick.
+			if (!this._setPart(e))
+				this._map.focus();
 			return;
 		}
 
@@ -582,6 +752,7 @@ window.L.Control.Tabs = window.L.Control.extend({
 		this._map.setPart(index, /*external:*/ false, /*calledFromSetPartHandler:*/ true);
 	},
 
+	// Return true if the switch was refused.
 	_setPart: function (e) {
 		var part = e.currentTarget.id.match(/\d+/g)[0];
 		if (part == null) {
@@ -591,7 +762,7 @@ window.L.Control.Tabs = window.L.Control.extend({
 		part = parseInt(part);
 
 		if (part !== this._map._docLayer._selectedPart) {
-			this._setPartIndex(part);
+			return this._setPartIndex(part);
 		}
 	},
 

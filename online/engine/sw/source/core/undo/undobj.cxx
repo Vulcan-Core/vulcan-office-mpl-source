@@ -45,6 +45,7 @@
 #include <frameformats.hxx>
 #include <o3tl/deleter.hxx>
 #include <sal/log.hxx>
+#include <algorithm>
 
 // This class saves the Pam as integers and can recompose those into a PaM
 SwUndRng::SwUndRng()
@@ -741,6 +742,65 @@ OUString SwUndo::GetComment() const
 ViewShellId SwUndo::GetViewShellId() const
 {
     return m_nViewShellId;
+}
+
+std::optional<sw::UndoFootprint> SwUndo::GetFootprint() const
+{
+    return std::nullopt;
+}
+
+std::optional<sw::UndoFootprint> SwUndo::GetActionFootprint(const SfxUndoAction& rAction)
+{
+    if (auto pSwUndo = dynamic_cast<const SwUndo*>(&rAction))
+        return pSwUndo->GetFootprint();
+
+    auto pList = dynamic_cast<const SfxListUndoAction*>(&rAction);
+    if (!pList || pList->maUndoActions.empty())
+        return std::nullopt;
+
+    std::optional<sw::UndoFootprint> oRet;
+    for (const MarkedUndoAction& rChild : pList->maUndoActions)
+    {
+        if (!rChild.pAction)
+            return std::nullopt;
+        std::optional<sw::UndoFootprint> oChild = GetActionFootprint(*rChild.pAction);
+        if (!oChild)
+            return std::nullopt;
+        if (!oRet)
+        {
+            oRet = oChild;
+            continue;
+        }
+        oRet->nStart = std::min(oRet->nStart, oChild->nStart);
+        oRet->nEnd = std::max(oRet->nEnd, oChild->nEnd);
+        oRet->bNodeNeutral = oRet->bNodeNeutral && oChild->bNodeNeutral;
+    }
+    return oRet;
+}
+
+bool SwUndo::IsHistoryNodeNeutral(const SwHistory* pHistory)
+{
+    if (!pHistory)
+        return true;
+    for (sal_uInt16 i = 0; i < pHistory->Count(); ++i)
+    {
+        const SwHistoryHint* pHint = (*pHistory)[i];
+        if (!pHint)
+            continue;
+        switch (pHint->Which())
+        {
+            case HSTRY_SETFTNHNT:
+            case HSTRY_FLYCNT:
+            case HSTRY_CHGFLYANCHOR:
+            case HSTRY_CHGFLYCHAIN:
+            case HSTRY_NOTEXTFIELDMARK:
+            case HSTRY_TEXTFIELDMARK:
+                return false;
+            default:
+                break;
+        }
+    }
+    return true;
 }
 
 SwRewriter SwUndo::GetRewriter() const

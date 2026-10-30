@@ -32,7 +32,7 @@ class MobileBottomBar extends JSDialog.Toolbar {
 				{type: 'toolitem', id: 'italic', text: _UNO('.uno:Italic'), command: '.uno:Italic', context: ['default', 'Text', 'DrawText', 'Table']},
 				{type: 'toolitem', id: 'underline', text: _UNO('.uno:Underline'), command: '.uno:Underline', context: ['default', 'Text', 'DrawText', 'Table']},
 				{type: 'separator', id: 'breakcolor', context: ['default', 'Text', 'DrawText', 'Table']},
-				{type: 'customtoolitem', id: 'fontcolor', text: _UNO('.uno:FontColor'), lockUno: '.uno:FontColor', context: ['default', 'Text', 'DrawText', 'Table']},
+				{type: 'customtoolitem', id: 'fontcolor', text: _UNO('.uno:FontColor', 'text'), lockUno: '.uno:FontColor', context: ['default', 'Text', 'DrawText', 'Table']},
 				{type: 'customtoolitem', id: 'backcolor', text: _UNO('.uno:CharBackColor', 'text'), lockUno: '.uno:CharBackColor', context: ['default', 'Text', 'DrawText', 'Table']},
 				{type: 'menubutton', id: 'setborderstyle:BorderStyleMenu', noLabel: true, command: '.uno:SetBorderStyle', text: _('Borders'), hidden: true, context: ['Table']},
 				{type: 'separator', id: 'breakalign-text', context: ['default', 'Text', 'DrawText']},
@@ -133,7 +133,7 @@ class MobileBottomBar extends JSDialog.Toolbar {
 				{type: 'toolitem', id: 'italic', text: _UNO('.uno:Italic'), command: '.uno:Italic'},
 				{type: 'toolitem', id: 'underline', text: _UNO('.uno:Underline'), command: '.uno:Underline'},
 				{type: 'separator'},
-				{type: 'customtoolitem', id: 'fontcolor', text: _UNO('.uno:FontColor'), lockUno: '.uno:FontColor'},
+				{type: 'customtoolitem', id: 'fontcolor', text: _UNO('.uno:FontColor', 'text'), lockUno: '.uno:FontColor'},
 				{type: 'customtoolitem', id: 'backcolor', text: _UNO('.uno:BackgroundColor'), lockUno: '.uno:BackgroundColor'},
 				{type: 'separator'},
 				{type: 'menubutton', id: 'textalign', noLabel: true, command: 'alignblock', text: _UNO('.uno:TextAlign'), lockUno: '.uno:TextAlign',
@@ -205,10 +205,22 @@ class MobileBottomBar extends JSDialog.Toolbar {
 				{type: 'customtoolitem', id: 'fullscreen', command: 'fullscreen-' + this.docType, text: _UNO('.uno:FullScreen', this.docType), context: ['DrawPage']},
 				// context: ['default', 'Text', 'DrawText', 'Table']
 				{type: 'toolitem', id: 'bold', text: _UNO('.uno:Bold'), command: '.uno:Bold', context: ['default', 'Text', 'DrawText', 'TextObject', 'Table']},
-				{type: 'toolitem', id: 'italic', text: _UNO('.uno:Italic'), command: 'Italic', context: ['default', 'Text', 'DrawText', 'TextObject', 'Table']},
+				// '.uno:' prefix, not a bare 'Italic'. This toolbar has no
+				// callback of its own (Component.Toolbar leaves it
+				// undefined), so clicks land in the builder's
+				// _defaultCallbackHandler, which only calls sendUnoCommand
+				// when the click data contains '.uno:'. A bare 'Italic' fell
+				// past that into the generic dialogevent branch, so the tap
+				// never italicised anything. The button could not light up
+				// either: _unoToolButton's state listener fires on
+				// e.commandName === data.command, and core reports
+				// '.uno:Italic'. Bold and Underline either side of it were
+				// always prefixed; this is the one surface reachable with
+				// the keyboard up.
+				{type: 'toolitem', id: 'italic', text: _UNO('.uno:Italic'), command: '.uno:Italic', context: ['default', 'Text', 'DrawText', 'TextObject', 'Table']},
 				{type: 'toolitem', id: 'underline', text: _UNO('.uno:Underline'), command: '.uno:Underline', context: ['default', 'Text', 'DrawText', 'TextObject', 'Table']},
 				{type: 'separator', context: ['default', 'Text', 'DrawText', 'TextObject', 'Table']},
-				{type: 'customtoolitem', id: 'fontcolor', text: _UNO('.uno:FontColor'), lockUno: '.uno:FontColor', context: ['default', 'Text', 'DrawText', 'TextObject', 'Table']},
+				{type: 'customtoolitem', id: 'fontcolor', text: _UNO('.uno:FontColor', 'text'), lockUno: '.uno:FontColor', context: ['default', 'Text', 'DrawText', 'TextObject', 'Table']},
 				{type: 'customtoolitem', id: 'backcolor', text: _UNO('.uno:BackgroundColor'), lockUno: '.uno:BackgroundColor', context: ['default', 'Text', 'DrawText', 'TextObject', 'Table']},
 				{type: 'separator', context: ['default', 'Text', 'DrawText', 'TextObject', 'Table']},
 				{type: 'menubutton', id: 'textalign', noLabel: true, command: 'alignblock', text: _UNO('.uno:TextAlign'), lockUno: '.uno:TextAlign', context: ['default', 'Text', 'DrawText', 'TextObject', 'Table'],

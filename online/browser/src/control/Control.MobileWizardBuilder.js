@@ -625,6 +625,27 @@ window.L.Control.MobileWizardBuilder = window.L.Control.JSDialogBuilder.extend({
 
 		var callback = function(color) {
 			JSDialog.sendColorCommand(builder, data, color);
+			// sendColorCommand writes the new value straight into the state
+			// cache (`stateChangeHandler.setItemValue`) and that setter fires
+			// NOTHING -- it is a bare map write. Core does not reliably echo a
+			// `commandstatechanged` for the colour slots either (MEASURED on
+			// the Writer twin: applying a highlight moved .uno:CharBackColor
+			// in the cache with no echo behind it), so every control that
+			// paints itself from that slot sits on the PREVIOUS colour until
+			// something unrelated happens to repaint it -- the one thing a
+			// colour control must never do.
+			//
+			// Announcing the write here rather than repainting one known
+			// control is the difference between a fix and a fix each future
+			// caller has to remember: the format rail's colour bars, the
+			// Format sheet's own row swatch and anything added later all
+			// listen to this event already. The value announced is the value
+			// just cached, so a later echo from core repaints the same thing.
+			if (data.command)
+				builder.map.fire('commandstatechanged', {
+					commandName: data.command,
+					state: builder.map['stateChangeHandler'].getItemValue(data.command),
+				});
 		};
 
 		var colorPickerControl = new ColorPicker(
@@ -808,8 +829,18 @@ window.L.Control.MobileWizardBuilder = window.L.Control.JSDialogBuilder.extend({
 	},
 
 	overwriteHandler: function(parentContainer, data, builder) {
-		if (builder.isHyperlinkTarget(builder, data) ||
-			builder.isFindReplaceComboox(builder, data)) {
+		if (builder.isFindReplaceComboox(builder, data)) {
+			// Find/Replace actions are disabled until core receives the current
+			// term. The generic mobile edit below only emits on blur, so a user
+			// who types and immediately taps Find is left with disabled actions.
+			// This welded dialog supports incremental updates: use the modern edit
+			// widget's keyup callback while preserving the combobox wire contract.
+			var findReplaceCallback = function(value) {
+				builder.callback('combobox', 'change', data, value, builder);
+			};
+
+			return JSDialog.edit(parentContainer, data, builder, findReplaceCallback);
+		} else if (builder.isHyperlinkTarget(builder, data)) {
 			// Replace combobox with edit
 			var callback = function(value) {
 				builder.callback('combobox', 'change', data, value, builder);
@@ -891,14 +922,32 @@ window.L.Control.MobileWizardBuilder = window.L.Control.JSDialogBuilder.extend({
 
 			if ((childType === 'mobilewizard' || childType === 'dialog' || childType === 'messagebox' || childType === 'modelessdialog')
 				&& childData.responses) {
+				/*
+				 * Cancel is suppressed here because a wizard panel cancels
+				 * through its own back chevron, so a second control saying the
+				 * same thing is noise. The phone alert card (§13-CALC.17) is
+				 * the one wizard where that premise is false: it hides
+				 * #mobile-wizard-back precisely because a card offers exactly
+				 * the choices in its button row. With the suppression still
+				 * applied it shipped a single OK -- Cancel built, in the DOM,
+				 * and written `display: none` on this line.
+				 *
+				 * The flag is already set: _reset clears it
+				 * (Control.MobileWizardWindow.js:948) and
+				 * _shapeMergeCellsForPhone sets it (:991), both ahead of the
+				 * build that reaches here.
+				 */
+				var keepCancel = !!(this.wizard && this.wizard.isVulcanPhoneAlert);
 				for (var i in childData.responses) {
 					var buttonId = childData.responses[i].id;
 					var response = childData.responses[i].response;
 					var button = parent.querySelector('[id=\'' + buttonId + '\']');
 					var isHelp = response === '-11' || response === -11 || buttonId === 'help';
 					var isClose = response === '7' || response === 7;
+					// vcl's RET_CANCEL, and it is 0 -- measured on the wire,
+					// where MergeCellsDialog sends help 10 / ok 1 / cancel 0.
 					var isCancel = response === '0' || response === 0;
-					if (button && (isHelp || isClose || isCancel))
+					if (button && (isHelp || isClose || (isCancel && !keepCancel)))
 						button.style.display = 'none';
 				}
 			}

@@ -65,6 +65,15 @@ SwUndoSplitNode::SwUndoSplitNode( SwDoc& rDoc, const SwPosition& rPos,
     m_nParRsid = pTextNd->GetParRsid();
 }
 
+std::optional<sw::UndoFootprint> SwUndoSplitNode::GetFootprint() const
+{
+    // A split in front of a table inserts its paragraph before the table node, i.e. before
+    // m_nNode: report nothing rather than a range that understates what moved.
+    if (m_bTableFlag)
+        return std::nullopt;
+    return sw::UndoFootprint{ m_nNode, m_nNode, /*bNodeNeutral=*/false };
+}
+
 SwUndoSplitNode::~SwUndoSplitNode()
 {
     m_pHistory.reset();

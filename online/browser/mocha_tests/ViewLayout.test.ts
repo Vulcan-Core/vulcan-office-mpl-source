@@ -956,6 +956,366 @@ describe('View Layout Tests', function () {
 		try { assertRaceProtection(ctx); }
 		finally { ctx.restore(); }
 	});
+
+	// ========================================================================
+	// ViewLayoutFileBased: the scroll offset across a zoom change
+	//
+	// scrollProperties.viewX/viewY are plain numbers holding CORE PIXELS
+	// (ViewLayout.ts:25,40). Every other quantity in this layout is a
+	// cool.SimpleRectangle / cool.SimplePoint, which stores twips and converts
+	// on each pixel read, so it re-derives itself whenever app.twipsToPixels
+	// moves. The scroll offset does not, and no writer of it is zoom-aware.
+	//
+	// These tests drive ViewLayoutFileBased.reset() the way 'zoomend' does:
+	// CanvasTileLayer._updateTileTwips has already rewritten app.twipsToPixels
+	// by the time the handler runs, because Map._resetView fires 'viewreset'
+	// (-> _reset -> _updateTileTwips) before it fires 'zoomend'
+	// (Map.js:1374-1403).
+	// ========================================================================
+
+	const SLIDE_W_TWIPS = 25400; // 16:9 slide, the Impress default.
+	const SLIDE_H_TWIPS = 14288;
+	const SLIDE_GAP_TWIPS = 300;
+	const DECK_PARTS = 10;
+
+	// A ten-slide deck in fileBasedView at pixelsToTwips = 15 (100%).
+	// The constructor queues updateViewData, which needs a live socket and
+	// RenderManager; drain the queue so it never fires and the tests stay on
+	// the synchronous scroll-anchoring path.
+	function setupFileBasedForTest(): ViewLayoutFileBased {
+		setupAppStubs(15);
+
+		// DocumentBase builds an ImpressSelectionMiddleware for presentations,
+		// which registers a SelectionRectangle section. Values mirror
+		// browser/src/canvas/CanvasSectionProps.js:52,111,128.
+		(app.CSections as any).SelectionRectangle = {
+			name: 'selection-rectangle', zIndex: 5,
+			processingOrder: 73, drawingOrder: 72,
+		};
+
+		// That section is a documentObject, so registering it walks
+		// locateSections -> documentToViewX -> getDocumentAnchor. The harness
+		// already fakes getDocumentAnchorSection; this is its position
+		// counterpart, kept consistent with that stub's myTopLeft.
+		(app.sectionContainer as any).getDocumentAnchor = function () {
+			return [0, 0];
+		};
+
+		// refreshVisibleAreaRectangleImpl pushes the new top-left into every
+		// document section on its success path. These tests assert scroll
+		// offsets, not painting, and the harness has no real section geometry
+		// to move.
+		(app.sectionContainer as any).onNewDocumentTopLeft = function () {};
+
+		// ImpressSelectionMiddleware adds its section without an existence
+		// check, so a second setup in the same process warns. Drop it first.
+		if (app.sectionContainer.doesSectionExist('selection-rectangle'))
+			app.sectionContainer.removeSection('selection-rectangle');
+
+		(app.map as any)._docLayer = {
+			_docType: 'presentation',
+			_parts: DECK_PARTS,
+			_partDimensions: [],
+			_partWidthTwips: SLIDE_W_TWIPS,
+			_partHeightTwips: SLIDE_H_TWIPS,
+			_spaceBetweenParts: SLIDE_GAP_TWIPS,
+			isWriter: function () { return false; },
+			_sendClientZoom: function () {},
+			_checkSelectedPart: function () {},
+		};
+		(app.file as any).fileBasedView = true;
+
+		const activeDocument = new DocumentBase();
+		(activeDocument as any)._fileSize = new cool.SimplePoint(
+			SLIDE_W_TWIPS,
+			DECK_PARTS * (SLIDE_H_TWIPS + SLIDE_GAP_TWIPS),
+		);
+		app.activeDocument = activeDocument;
+
+		const layout = new ViewLayoutFileBased();
+		(app.layoutingService as any)._layoutTasks.length = 0;
+		return layout;
+	}
+
+	// What CanvasTileLayer._updateTileTwips does for a `steps`-step zoom.
+	// Positive steps zoom OUT (each step divides the scale by 1.2), matching
+	// the `Math.pow(1.2, options.zoom - _tileZoom)` tile-width factor.
+	function applyZoomSteps(steps: number): void {
+		app.twipsToPixels = app.twipsToPixels / Math.pow(1.2, steps);
+		app.pixelsToTwips = 1 / app.twipsToPixels;
+	}
+
+	// Run queued layouting tasks by hand, up to `limit`. Returns how many ran.
+	// A task that re-queues itself unchanged will consume the whole budget,
+	// which is exactly what the retry-loop test measures.
+	function drainLayoutingTasks(limit: number): number {
+		let ran = 0;
+		while (
+			ran < limit &&
+			(app.layoutingService as any)._layoutTasks.length > 0
+		) {
+			app.layoutingService.runTheTopTask();
+			ran++;
+		}
+		return ran;
+	}
+
+	it('FileBased keeps the same slide across a zoom step', function () {
+		const layout = setupFileBasedForTest();
+
+		// Park the viewport on the top edge of slide 8 (index 7).
+		const targetPart = 7;
+		layout.scrollProperties.viewY =
+			layout.documentRectangles[targetPart].pY1;
+		nodeassert.strictEqual(
+			layout.getPartIndexAtDocumentY(layout.scrollProperties.viewY),
+			targetPart,
+			'precondition: the viewport starts on slide 8',
+		);
+
+		// One zoom-out step, then the handler 'zoomend' would call.
+		applyZoomSteps(1);
+		layout.reset();
+		(app.layoutingService as any)._layoutTasks.length = 0;
+
+		nodeassert.strictEqual(
+			layout.getPartIndexAtDocumentY(layout.scrollProperties.viewY),
+			targetPart,
+			'a zoom step must not move the viewport to a different slide',
+		);
+		nodeassert.strictEqual(
+			layout.scrollProperties.viewY,
+			layout.documentRectangles[targetPart].pY1,
+			'the viewport must land back on the same edge of the same slide',
+		);
+	});
+
+	it('FileBased zoom-out near the end of the deck does not snap to slide 1', function () {
+		const layout = setupFileBasedForTest();
+
+		// Last slide: the case where a stale offset lands past the new stacked
+		// extent, no view rectangle intersects, and
+		// ViewLayoutNewBase.refreshVisibleAreaRectangleImpl snaps the axis to 0.
+		const lastPart = DECK_PARTS - 1;
+		layout.scrollProperties.viewY = layout.documentRectangles[lastPart].pY1;
+
+		applyZoomSteps(1);
+		layout.reset();
+		(app.layoutingService as any)._layoutTasks.length = 0;
+
+		// Drive the snap path itself, then let any retry it queued actually run.
+		(layout as any).refreshVisibleAreaRectangle();
+		drainLayoutingTasks(8);
+
+		nodeassert.notStrictEqual(
+			layout.scrollProperties.viewY,
+			0,
+			'zooming out on the last slide must not throw the deck back to slide 1',
+		);
+
+		// The predicate refreshVisibleAreaRectangleImpl itself uses: with the
+		// offset left at the old scale this is false for every part, which is
+		// what produces the snap.
+		const documentAnchor = (layout as any).getDocumentAnchorSection();
+		const viewport = cool.SimpleRectangle.fromCorePixels([
+			layout.scrollProperties.viewX,
+			layout.scrollProperties.viewY,
+			documentAnchor.size[0],
+			documentAnchor.size[1],
+		]);
+		nodeassert.ok(
+			viewport.intersectsRectangle(
+				layout.viewRectangles[lastPart].toArray(),
+			),
+			'the last slide must still be inside the viewport after zooming out',
+		);
+		nodeassert.strictEqual(
+			layout.getPartIndexAtDocumentY(layout.scrollProperties.viewY),
+			lastPart,
+			'the viewport must still be on the last slide after zooming out',
+		);
+	});
+
+	it('FileBased reset is a no-op when nothing moved', function () {
+		const layout = setupFileBasedForTest();
+
+		layout.scrollProperties.viewY = layout.documentRectangles[4].pY1;
+		layout.scrollProperties.viewX = 0;
+		const viewY = layout.scrollProperties.viewY;
+		const startY = layout.scrollProperties.startY;
+
+		// Five resizes with no zoom change and no canvas change -- what a phone
+		// produces from the keyboard, a sheet, rotation and browser chrome.
+		for (let i = 0; i < 5; i++) {
+			layout.reset();
+			(app.layoutingService as any)._layoutTasks.length = 0;
+			nodeassert.strictEqual(
+				layout.scrollProperties.viewY,
+				viewY,
+				'a resize that moved nothing must not rewrite viewY (pass ' + i + ')',
+			);
+			nodeassert.strictEqual(
+				layout.scrollProperties.startY,
+				startY,
+				'a resize that moved nothing must not rewrite startY (pass ' + i + ')',
+			);
+		}
+	});
+
+	it('FileBased does not re-queue an identical visible-area retry forever', function () {
+		const layout = setupFileBasedForTest();
+
+		// No rectangles: nothing can intersect the viewport at any offset. With
+		// the axis already at 0 the snap changes nothing, so re-running the
+		// computation can only produce the same answer again.
+		layout.documentRectangles.length = 0;
+		layout.viewRectangles.length = 0;
+		layout.scrollProperties.viewX = 0;
+		layout.scrollProperties.viewY = 0;
+		(app.layoutingService as any)._layoutTasks.length = 0;
+
+		(layout as any).refreshVisibleAreaRectangle();
+
+		const budget = 20;
+		const ran = drainLayoutingTasks(budget);
+
+		nodeassert.ok(
+			ran < budget,
+			'the visible-area retry must terminate, not re-queue itself every ' +
+				'layouting frame (ran ' + ran + ' of a ' + budget + ' budget)',
+		);
+		nodeassert.strictEqual(
+			(app.layoutingService as any)._layoutTasks.length,
+			0,
+			'no layouting task may be left pending once the retry has settled',
+		);
+	});
+
+	// ========================================================================
+	// getScrollOrigin: the space a pan target is absolute in.
+	//
+	// MEASURED on slot-01, phone profile, Dinosaurs.pptx: a touch drag on a
+	// deck landed at (viewedRectangle.pY1 + travel) instead of
+	// (viewY + travel) — i.e. it clipped UP the deck by exactly the distance
+	// already scrolled into the current slide, on the first move of every
+	// gesture. 0 px at the top of the deck, 122 / 282 / 482 px at three
+	// offsets further in, matching viewY - viewedRectangle.pY1 every time.
+	// ========================================================================
+
+	// Park the viewport a given fraction into one slide, so that viewY and the
+	// visible-parts bounding box genuinely disagree.
+	function parkMidSlide(
+		layout: ViewLayoutFileBased,
+		part: number,
+		fraction: number,
+	): number {
+		const rect = layout.documentRectangles[part];
+		layout.scrollProperties.viewY = Math.round(
+			rect.pY1 + fraction * rect.pHeight,
+		);
+		(layout as any).refreshVisibleAreaRectangle();
+		(app.layoutingService as any)._layoutTasks.length = 0;
+		return layout.scrollProperties.viewY;
+	}
+
+	it('a deck parked mid-slide reports a scroll origin the viewed rectangle does not', function () {
+		const layout = setupFileBasedForTest();
+		const viewY = parkMidSlide(layout, 4, 0.5);
+
+		nodeassert.strictEqual(
+			layout.getScrollOrigin()[1],
+			viewY,
+			'the scroll origin must be the offset the layout renders from',
+		);
+
+		// The known positive for every assertion below: if these two agreed,
+		// the anchor could be read from either and nothing here would bite.
+		nodeassert.ok(
+			viewY - layout.viewedRectangle.pY1 > 0,
+			'precondition: mid-slide, the viewed rectangle must still start at ' +
+				'the top of that slide (viewY ' + viewY + ', pY1 ' +
+				layout.viewedRectangle.pY1 + ')',
+		);
+	});
+
+	it('a pan anchored on the scroll origin lands where the finger asked', function () {
+		const layout = setupFileBasedForTest();
+		parkMidSlide(layout, 4, 0.5);
+
+		const origin = layout.getScrollOrigin();
+		const travel = 300;
+		layout.scrollTo(origin[0], origin[1] + travel);
+
+		nodeassert.strictEqual(
+			layout.scrollProperties.viewY,
+			origin[1] + travel,
+			'300 px of finger must move the deck 300 px',
+		);
+	});
+
+	it('the pre-fix anchor clips the deck back up by the distance into the slide', function () {
+		const layout = setupFileBasedForTest();
+		const viewY = parkMidSlide(layout, 4, 0.5);
+
+		// The expression this fix replaced, driven against the real layout:
+		// anchor on the viewed rectangle, write through scrollTo.
+		const staleAnchorY = layout.viewedRectangle.pY1;
+		const travel = 300;
+		layout.scrollTo(layout.viewedRectangle.pX1, staleAnchorY + travel);
+
+		const shortfall = viewY + travel - layout.scrollProperties.viewY;
+		nodeassert.strictEqual(
+			shortfall,
+			viewY - staleAnchorY,
+			'the pre-fix anchor must land short by exactly the distance already ' +
+				'scrolled into the current slide — the symptom this rig has to ' +
+				'be able to see',
+		);
+		nodeassert.ok(
+			shortfall > 0,
+			'and the error is always UPWARD, never down the deck',
+		);
+	});
+
+	it('the scroll origin moves on a pan that leaves the viewed rectangle untouched', function () {
+		const layout = setupFileBasedForTest();
+		parkMidSlide(layout, 4, 0.1);
+
+		const rectBefore = layout.viewedRectangle.toArray();
+		const originBefore = layout.getScrollOrigin();
+
+		// One coast frame: far less than a slide, so the same slides stay on
+		// screen. The fling's end-of-document test used to ask the viewed
+		// rectangle whether it had moved and got "no" for frames like this.
+		layout.scrollTo(originBefore[0], originBefore[1] + 40);
+		(layout as any).refreshVisibleAreaRectangle();
+
+		nodeassert.deepStrictEqual(
+			layout.viewedRectangle.toArray(),
+			rectBefore,
+			'precondition: a sub-slide pan does not change which slides are visible',
+		);
+		nodeassert.notStrictEqual(
+			layout.getScrollOrigin()[1],
+			originBefore[1],
+			'so only the scroll origin can tell a moving coast from a stalled one',
+		);
+	});
+
+	it('layouts whose scrollTo speaks the viewed rectangle keep anchoring on it', function () {
+		setupAppStubs(15);
+		const layout = new ViewLayoutBase();
+		(layout as any)._viewedRectangle = cool.SimpleRectangle.fromCorePixels([
+			120, 340, 393, 852,
+		]);
+
+		nodeassert.deepStrictEqual(
+			layout.getScrollOrigin(),
+			[120, 340],
+			'Calc and Writer must be byte-identical: their scrollTo subtracts ' +
+				'the viewed rectangle before delegating to scroll()',
+		);
+	});
 });
 
 });

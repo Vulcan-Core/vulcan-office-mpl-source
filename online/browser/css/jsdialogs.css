@@ -615,7 +615,11 @@ algned to the bottom */
 	outline-offset: -2px;
 }
 
-body button:not(.ui-corner-all):not(.button):not(.button-primary):not(.unobutton):not(.form-field-button):not(.notebookbar.ui-tab):not(.ui-expander-btn):not(.arrowbackground):not(.ui-combobox-button):not(.inserttable-grid .col):not(.spinfieldbutton-up):not(.spinfieldbutton-down):hover {
+/* Vulcan: the .vulcan-pressed twin. Touch sets :hover on a HELD press, so this rule is the press colour customers
+   see on the phone bars. A quick tap on an armed button never gets :hover, because its touchend is cancelled
+   (VulcanSelectionMenu.armButton), so it paints the same rule through the class armButton sets. */
+body button:not(.ui-corner-all):not(.button):not(.button-primary):not(.unobutton):not(.form-field-button):not(.notebookbar.ui-tab):not(.ui-expander-btn):not(.arrowbackground):not(.ui-combobox-button):not(.inserttable-grid .col):not(.spinfieldbutton-up):not(.spinfieldbutton-down):hover,
+body button:not(.ui-corner-all):not(.button):not(.button-primary):not(.unobutton):not(.form-field-button):not(.notebookbar.ui-tab):not(.ui-expander-btn):not(.arrowbackground):not(.ui-combobox-button):not(.inserttable-grid .col):not(.spinfieldbutton-up):not(.spinfieldbutton-down).vulcan-pressed {
 	color: rgba(var(--doc-type), 1) !important;
 	background-color: var(--color-background-darker) !important;
 }
@@ -2328,6 +2332,10 @@ img.context-menu-icon {
 	border-top: 5px solid var(--color-text-darker);
 }
 
+/* phone-ergonomics-lint: allow-small-target — stock-chrome split-button
+ * caret zone, upstream sizing that predates this tree; the vulcan phone
+ * chrome replaces the bar and floors this target at 44px
+ * (vulcan-theme.css §13i .arrowbackground rules). */
 .arrowbackground {
 	box-sizing: border-box;
 	width: 16px;
@@ -2495,74 +2503,6 @@ button.has-img img {
 
 #ui-color-picker-custom input {
 	max-width: 75px;
-}
-
-/* emoji picker */
-.ui-emoji-picker {
-	display: flex;
-	flex-direction: column;
-	gap: var(--spacing-m);
-	padding: var(--spacing-s);
-	box-sizing: border-box;
-}
-
-.ui-emoji-picker-search {
-	width: 100%;
-	box-sizing: border-box;
-	padding: 6px 10px;
-	border: 1px solid var(--color-border);
-	border-radius: 999px;
-	font-size: 12px;
-	font-family: var(--cool-font);
-	color: var(--color-main-text);
-	background: var(--color-main-background);
-}
-
-.ui-emoji-picker-search:focus {
-	border-color: var(--color-primary);
-	outline: none;
-}
-
-.ui-emoji-picker-grid {
-	display: flex;
-	flex-direction: column;
-	gap: 6px;
-}
-
-.ui-emoji-picker-heading {
-	font-size: 10.5px;
-	font-weight: 600;
-	letter-spacing: 0.03em;
-	text-transform: uppercase;
-	color: var(--color-text-lighter);
-	margin-top: 4px;
-}
-
-.ui-emoji-picker-row {
-	display: flex;
-	flex-wrap: wrap;
-	gap: 2px;
-}
-
-.ui-emoji-picker-cell {
-	width: 28px;
-	height: 28px;
-	padding: 0;
-	font-size: 18px;
-	line-height: 1;
-	border: 0;
-	background: transparent;
-	border-radius: 6px;
-	cursor: pointer;
-	display: inline-flex;
-	align-items: center;
-	justify-content: center;
-}
-
-.ui-emoji-picker-cell:hover,
-.ui-emoji-picker-cell:focus-visible {
-	background: rgba(var(--color-primary-rgb, 11, 135, 231), 0.1);
-	outline: none;
 }
 
 /* chip widget - see Widget.Chip.ts for the JSON contract.
@@ -2905,8 +2845,14 @@ button.has-img img {
 	align-items: center;
 }
 
-#toolbar-wrapper:not(.mobile) ~ #toolbar-down .has-dropdown > .ui-content.unobutton {
-	width: max-content;
+/* The desktop-chrome wrap (js/global.js) reparents #toolbar-wrapper into
+   #vulcan-topchrome at window load, so both branches are needed: the wrapped
+   chrome, plus the unwrapped fallback if the wrap ever fails. `auto`, not the
+   inherited 28px --btn-size: WebKit sizes the grid track from the button's
+   specified width, painting the grid-column-3 caret mid-label. */
+#toolbar-wrapper:not(.mobile) ~ #toolbar-down .has-dropdown > .ui-content.unobutton,
+#vulcan-topchrome ~ #toolbar-down .has-dropdown > .ui-content.unobutton {
+	width: auto;
 }
 
 .jsdialog .ui-content.unobutton::after {

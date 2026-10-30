@@ -1088,6 +1088,38 @@ CPPUNIT_TEST_FIXTURE(Test, testCTLPaste)
     CPPUNIT_ASSERT_EQUAL(u"שלום"_ustr, getParagraph(1)->getString());
 }
 
+CPPUNIT_TEST_FIXTURE(Test, testParaPasteKeepsMargins)
+{
+    // Given a document whose paragraph style has no space below, with an empty paragraph after
+    // "A", as an insert at the document's end opens one:
+    createSwDoc();
+    SwWrtShell* pWrtShell = getSwDocShell()->GetWrtShell();
+    pWrtShell->Insert(u"A"_ustr);
+    pWrtShell->SplitNode();
+
+    // When pasting two markdown paragraphs into the empty paragraph:
+    rtl::Reference<TransferDataContainer> xTransferable(new TransferDataContainer);
+    xTransferable->CopyString(SotClipboardFormatId::MARKDOWN, u"First new.\n\nSecond new."_ustr);
+    TransferableDataHelper aHelper(xTransferable);
+    SwTransferable::PasteFormat(*pWrtShell, aHelper, SotClipboardFormatId::MARKDOWN);
+
+    // Then make sure the pasted paragraphs keep the margins of their paragraph style, as "A" does:
+    CPPUNIT_ASSERT_EQUAL(3, getParagraphs());
+    CPPUNIT_ASSERT_EQUAL(u"A"_ustr, getParagraph(1)->getString());
+    CPPUNIT_ASSERT_EQUAL(u"First new."_ustr, getParagraph(2)->getString());
+    CPPUNIT_ASSERT_EQUAL(u"Second new."_ustr, getParagraph(3)->getString());
+    sal_Int32 nABottom = getProperty<sal_Int32>(getParagraph(1), u"ParaBottomMargin"_ustr);
+    CPPUNIT_ASSERT_EQUAL(sal_Int32(0), nABottom);
+    // Without the accompanying fix in place, this test would have failed with:
+    // - Expected: 0
+    // - Actual  : 499
+    // i.e. each pasted paragraph had a direct 5 mm space below, which "A" lacks.
+    CPPUNIT_ASSERT_EQUAL(nABottom,
+                         getProperty<sal_Int32>(getParagraph(2), u"ParaBottomMargin"_ustr));
+    CPPUNIT_ASSERT_EQUAL(nABottom,
+                         getProperty<sal_Int32>(getParagraph(3), u"ParaBottomMargin"_ustr));
+}
+
 CPPUNIT_PLUGIN_IMPLEMENT();
 
 /* vim:set shiftwidth=4 softtabstop=4 expandtab cinoptions=b1,g0,N-s cinkeys+=0=break: */

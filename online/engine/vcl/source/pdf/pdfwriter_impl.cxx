@@ -5921,13 +5921,18 @@ void PDFWriterImpl::drawHorizontalGlyphs(
 
 void PDFWriterImpl::drawLayout( SalLayout& rLayout, const OUString& rText, bool bTextLines )
 {
+    // Invisible text (a hidden-ink OCR line, see playMetafile): the glyphs
+    // with their ToUnicode and ActualText as always, in render mode 3, and
+    // no relief, shadow, outline, fill rectangle, text lines or emphasis.
+    const bool bInvisible = m_nInvisibleTextDepth > 0;
+
     // relief takes precedence over shadow (see outdev3.cxx)
-    if(  m_aCurrentPDFState.m_aFont.GetRelief() != FontRelief::NONE )
+    if( !bInvisible && m_aCurrentPDFState.m_aFont.GetRelief() != FontRelief::NONE )
     {
         drawRelief( rLayout, rText, bTextLines );
         return;
     }
-    else if( m_aCurrentPDFState.m_aFont.IsShadow() )
+    else if( !bInvisible && m_aCurrentPDFState.m_aFont.IsShadow() )
         drawShadow( rLayout, rText, bTextLines );
 
     OStringBuffer aLine( 512 );
@@ -5978,17 +5983,24 @@ void PDFWriterImpl::drawLayout( SalLayout& rLayout, const OUString& rText, bool 
     bool bPop = false;
     bool bABold = false;
     // artificial bold necessary ?
-    if (GetFontInstance()->NeedsArtificialBold())
+    if (!bInvisible && GetFontInstance()->NeedsArtificialBold())
     {
         aLine.append("q ");
         bPop = true;
         bABold = true;
     }
+    // The render mode is graphics state: the invisible text object sits in
+    // its own q ... Q, so the text after it is drawn normally again.
+    if (bInvisible && !bPop)
+    {
+        aLine.append("q ");
+        bPop = true;
+    }
     // setup text colors (if necessary)
     Color aStrokeColor( COL_TRANSPARENT );
     Color aNonStrokeColor( COL_TRANSPARENT );
 
-    if( m_aCurrentPDFState.m_aFont.IsOutline() )
+    if( !bInvisible && m_aCurrentPDFState.m_aFont.IsOutline() )
     {
         aStrokeColor = m_aCurrentPDFState.m_aFont.GetColor();
         aNonStrokeColor = COL_WHITE;
@@ -6017,8 +6029,10 @@ void PDFWriterImpl::drawLayout( SalLayout& rLayout, const OUString& rText, bool 
 
     // begin text object
     aLine.append( "BT\n" );
+    if( bInvisible )
+        aLine.append( "3 Tr\n" ); // neither fill nor stroke: invisible
     // outline attribute ?
-    if( m_aCurrentPDFState.m_aFont.IsOutline() || bABold )
+    else if( m_aCurrentPDFState.m_aFont.IsOutline() || bABold )
     {
         // set correct text mode, set stroke width
         aLine.append( "2 Tr " ); // fill, then stroke
@@ -6128,7 +6142,7 @@ void PDFWriterImpl::drawLayout( SalLayout& rLayout, const OUString& rText, bool 
     // Avoid fill color when map mode is in pixels, the below code assumes
     // logic map mode.
     bool bPixel = m_aCurrentPDFState.m_aMapMode.GetMapUnit() == MapUnit::MapPixel;
-    if (m_aCurrentPDFState.m_aFont.GetFillColor() != COL_TRANSPARENT && !bPixel)
+    if (!bInvisible && m_aCurrentPDFState.m_aFont.GetFillColor() != COL_TRANSPARENT && !bPixel)
     {
         // PDF doesn't have a text fill color, so draw a rectangle before
         // drawing the actual text.
@@ -6225,6 +6239,9 @@ void PDFWriterImpl::drawLayout( SalLayout& rLayout, const OUString& rText, bool 
         aLine.append( "Q\n" );
 
     writeBuffer( aLine );
+
+    if( bInvisible )
+        return;
 
     // draw eventual textlines
     FontStrikeout eStrikeout = m_aCurrentPDFState.m_aFont.GetStrikeout();
@@ -8790,12 +8807,38 @@ bool PDFWriterImpl::writeBitmapObject( const BitmapEmit& rObject )
 
     bool bTrueColor = true;
     sal_Int32 nBitsPerComponent = 0;
+    // The palette entries the Indexed colour space lists (all of them, or
+    // the first two for a 1-bit image).
+    sal_uInt16 nPaletteEntries = (pAccess && pAccess->HasPalette()) ? pAccess->GetPaletteEntryCount() : 0;
     auto const ePixelFormat = rObject.m_aBitmap.getPixelFormat();
     switch (ePixelFormat)
     {
         case vcl::PixelFormat::N8_BPP:
             bTrueColor = false;
             nBitsPerComponent = vcl::pixelFormatBitCount(ePixelFormat);
+            // A bilevel scan - which the PDF importer keeps as a two-entry
+            // palette, and which may reach here with that palette padded to
+            // 256 entries - uses only indices 0 and 1: it is written at 1 bit
+            // per pixel (Indexed over those two entries, Flate), losslessly:
+            // 8x smaller than one byte per pixel before the compression, and
+            // never widened to RGB.
+            if (!bWriteMask && pAccess && pAccess->HasPalette()
+                && pAccess->GetPaletteEntryCount() >= 2)
+            {
+                bool bTwoIndices = true;
+                for (tools::Long nY = 0, nHeight = pAccess->Height(); bTwoIndices && nY < nHeight; ++nY)
+                    for (tools::Long nX = 0, nWidth = pAccess->Width(); nX < nWidth; ++nX)
+                        if (pAccess->GetPixelIndex(nY, nX) > 1)
+                        {
+                            bTwoIndices = false;
+                            break;
+                        }
+                if (bTwoIndices)
+                {
+                    nBitsPerComponent = 1;
+                    nPaletteEntries = 2;
+                }
+            }
             break;
         case vcl::PixelFormat::N24_BPP:
         case vcl::PixelFormat::N32_BPP:
@@ -8827,16 +8870,9 @@ bool PDFWriterImpl::writeBitmapObject( const BitmapEmit& rObject )
     aLine.append( " 0 R\n" );
     if (!g_bDebugDisableCompression)
     {
-        if( nBitsPerComponent != 1 )
-        {
-            aLine.append( "/Filter/FlateDecode" );
-        }
-        else
-        {
-            aLine.append( "/Filter/CCITTFaxDecode/DecodeParms<</K -1/BlackIs1 true/Columns " );
-            aLine.append( static_cast<sal_Int32>(rObject.m_aBitmap.GetSizePixel().Width()) );
-            aLine.append( ">>\n" );
-        }
+        // Every bit depth is Flate: the 1-bit rows below are packed samples,
+        // not a CCITT stream, so a CCITTFaxDecode filter would misdescribe them.
+        aLine.append( "/Filter/FlateDecode" );
     }
     aLine.append( "/ColorSpace" );
     if( bTrueColor )
@@ -8844,16 +8880,16 @@ bool PDFWriterImpl::writeBitmapObject( const BitmapEmit& rObject )
     else
     {
         aLine.append( "[ /Indexed/DeviceRGB " );
-        aLine.append( static_cast<sal_Int32>(pAccess->GetPaletteEntryCount()-1) );
+        aLine.append( static_cast<sal_Int32>(nPaletteEntries-1) );
         aLine.append( "\n<" );
         if (m_aContext.Encryption.canEncrypt())
         {
             enableStringEncryption(rObject.m_nObject);
             //check encryption buffer size
-            m_vEncryptionBuffer.resize(pAccess->GetPaletteEntryCount()*3);
+            m_vEncryptionBuffer.resize(nPaletteEntries*3);
             int nChar = 0;
             //fill the encryption buffer
-            for( sal_uInt16 i = 0; i < pAccess->GetPaletteEntryCount(); i++ )
+            for( sal_uInt16 i = 0; i < nPaletteEntries; i++ )
             {
                 const BitmapColor& rColor = pAccess->GetPaletteColor( i );
                 m_vEncryptionBuffer[nChar++] = rColor.GetRed();
@@ -8868,7 +8904,7 @@ bool PDFWriterImpl::writeBitmapObject( const BitmapEmit& rObject )
         }
         else //no encryption requested (PDF/A-1a program flow drops here)
         {
-            for( sal_uInt16 i = 0; i < pAccess->GetPaletteEntryCount(); i++ )
+            for( sal_uInt16 i = 0; i < nPaletteEntries; i++ )
             {
                 const BitmapColor& rColor = pAccess->GetPaletteColor( i );
                 COSWriter::appendHex( rColor.GetRed(), aLine );
@@ -8902,7 +8938,24 @@ bool PDFWriterImpl::writeBitmapObject( const BitmapEmit& rObject )
     checkAndEnableStreamEncryption( rObject.m_nObject );
     {
         beginCompression();
-        if( ! bTrueColor || pAccess->GetScanlineFormat() == ScanlineFormat::N24BitTcRgb )
+        if( nBitsPerComponent == 1 )
+        {
+            // One bit per sample, most significant first, each row padded to
+            // a byte: palette index 1 is a set bit.
+            const tools::Long nWidth = pAccess->Width();
+            const int nScanLineBytes = static_cast<int>((nWidth + 7) / 8);
+            std::vector<sal_uInt8> aRow(nScanLineBytes);
+            for( tools::Long nY = 0, nHeight = pAccess->Height(); nY < nHeight; nY++ )
+            {
+                std::fill(aRow.begin(), aRow.end(), 0);
+                for( tools::Long nX = 0; nX < nWidth; nX++ )
+                    if( pAccess->GetPixelIndex(nY, nX) )
+                        aRow[nX >> 3] |= static_cast<sal_uInt8>(0x80 >> (nX & 7));
+                if (!writeBufferBytes(aRow.data(), nScanLineBytes))
+                    return false;
+            }
+        }
+        else if( ! bTrueColor || pAccess->GetScanlineFormat() == ScanlineFormat::N24BitTcRgb )
         {
             //With PDF bitmaps, each row is padded to a BYTE boundary (multiple of 8 bits).
             const int nScanLineBytes = ((pAccess->GetBitCount() * pAccess->Width()) + 7U) / 8U;

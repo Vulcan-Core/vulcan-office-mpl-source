@@ -226,6 +226,18 @@ window.L.Map = window.L.Evented.extend({
 		// Document is completely loaded or not
 		this._docLoaded = false;
 
+		// VULCAN: an embedded editor starts with
+		// the keyboard the host page's, as if the host had already posted
+		// Vulcan_FocusPolicy { AutoFocusOnLoad: false }; the host's own policy
+		// replaces this when it arrives. It cannot arrive in time to be the
+		// only word: the host posts it at Frame_Ready, and on the vbox rig it
+		// landed 70-90 ms after 'docloaded' in 2 of 3 Chromium Writer loads
+		// and a deck load, so the 'docloaded' grab read "no policy" and took
+		// the keyboard from the agent composer. A top-level editor (a browser
+		// tab of its own) keeps upstream's grabs.
+		if (window.parent && window.parent !== window)
+			this._vulcanAutoFocusOnLoad = false;
+
 		// Unlike _docLoaded, this is flagged only once,
 		// after we receive status for the first time.
 		this._docLoadedOnce = false;
@@ -318,11 +330,26 @@ window.L.Map = window.L.Evented.extend({
 			if (this._docLoaded) {
 				app.idleHandler.notifyActive();
 				app.dispatcher = new app.definitions['dispatcher']();
-				if (!document.hasFocus()) {
+				// Vulcan Office: the load-time focus grab is the
+				// host's call. A frame that takes the caret the moment its
+				// document finishes loading steals it from whatever the host
+				// was doing - a rename field, a comment box, an agent prompt -
+				// and the host is the only side that knows whether the user is
+				// looking at this editor at all. Absent policy keeps the
+				// upstream grab in a top-level editor (an embedded one starts
+				// host-owned, see initialize), and only this load-time grab is
+				// gated: click, Grab_Focus and the mobile keyboard paths are
+				// gestures and stay as they are.
+				if (this._vulcanAutoFocusOnLoad !== false && !document.hasFocus()) {
 					this.fire('editorgotfocus');
 					this.focus();
 				}
-				app.idleHandler._activate();
+				// Reactivation grabs the caret too (desktop Calc: the tail of
+				// IdleHandler._activate()), so the policy has to reach it as
+				// well - otherwise the gate above only moves the focus steal
+				// two lines down. Every other _activate() caller keeps the
+				// upstream grab.
+				app.idleHandler._activate(this._vulcanAutoFocusOnLoad !== false);
 				if (window.ThisIsTheAndroidApp) {
 					window.postMobileMessage('hideProgressbar');
 				}
@@ -357,7 +384,8 @@ window.L.Map = window.L.Evented.extend({
 
 	initTextInput: function(docType) {
 		var hasAccessibilitySupport =
-			window.enableAccessibility && window.prefs.getBoolean('accessibilityState');
+			(window.vulcanPhoneChrome || window.enableAccessibility) &&
+			window.isAccessibilityStateEffective();
 		hasAccessibilitySupport = hasAccessibilitySupport &&
 			(docType === 'text' || docType === 'presentation'|| docType === 'spreadsheet');
 
@@ -375,12 +403,22 @@ window.L.Map = window.L.Evented.extend({
 	},
 
 	setAccessibilityState: function(enable) {
-		if (window.prefs.getBoolean('accessibilityState') === enable)
-			return;
+		if (window.vulcanPhoneChrome) {
+			// Phone chrome always exposes the document through A11yTextInput.
+			// Keep the user's stored preference untouched so opening the same
+			// document on a stock/desktop surface does not inherit this override.
+			enable = true;
+			if (this._textInput && this._textInput.hasAccessibilitySupport())
+				return;
+		} else {
+			if (window.prefs.getBoolean('accessibilityState') === enable)
+				return;
 
-		window.prefs.set('accessibilityState', enable);
+			window.prefs.set('accessibilityState', enable);
+		}
 		this.setupCoreAccessibility(enable);
-		this.removeLayer(this._textInput);
+		if (this._textInput)
+			this.removeLayer(this._textInput);
 		this.createTextInput(enable);
 		this.fire('a11ystatechanged');
 
@@ -441,7 +479,10 @@ window.L.Map = window.L.Evented.extend({
 		this.fire('postMessage', {msgId: 'View_Added', args: {Deprecated: true, ViewId: viewInfo.id, UserId: viewInfo.userid, UserName: viewInfo.username, UserExtraInfo: viewInfo.userextrainfo, Color: app.LOUtil.rgbToHex(viewInfo.color), ReadOnly: viewInfo.readonly}});
 
 		// Fire last, otherwise not all events are handled correctly.
-		this.fire('addview', {viewId: viewInfo.id, username: viewInfo.username, extraInfo: viewInfo.userextrainfo, readonly: this.isViewReadOnly(viewInfo.id)});
+		// Vulcan: forward userid (the WOPI UserId) so UserList can group
+		// multiple sessions of the same person — the View_Added postMessage
+		// above always kept it, only this internal fire dropped it.
+		this.fire('addview', {viewId: viewInfo.id, username: viewInfo.username, userid: viewInfo.userid, extraInfo: viewInfo.userextrainfo, readonly: this.isViewReadOnly(viewInfo.id)});
 
 		this.updateAvatars();
 	},
@@ -468,8 +509,22 @@ window.L.Map = window.L.Evented.extend({
 
 		//If we pan too far then chrome gets issues with tiles
 		// and makes them disappear or appear in the wrong place (slightly offset) #2602
+		//
+		// This hatch hard-resets the view, and until 2026-08 to a centre
+		// NOTHING had limited -- while setView, the sibling entry point twenty
+		// lines down, has always run its centre through _limitCenter first. So
+		// a pan past the document left _pixelOrigin where no tile will ever
+		// exist, and nothing pulled it back: the ViewLayouts own the scroll
+		// position and never learn the pane moved. That is the permanently
+		// blank canvas; _limitCenterInsideDocument is the missing half.
 		if (!this.getSize().contains(offset)) {
-			this._resetView(this.unproject(this.project(this.getCenter()).add(offset)), this.getZoom());
+			// bounds built before the phone read apron came or went
+			// would clamp this pan to the wrong end.
+			if (this._docLayer && this._docLayer._vulcanRefreshApronBounds)
+				this._docLayer._vulcanRefreshApronBounds();
+			this._resetView(this._limitCenterInsideDocument(
+				this.unproject(this.project(this.getCenter()).add(offset)),
+				this.getZoom()), this.getZoom());
 			return this;
 		}
 
@@ -712,6 +767,12 @@ window.L.Map = window.L.Evented.extend({
 	},
 
 	setZoom: function (zoom, options, animate) {
+		// Automatic Writer fits may follow the pane while it settles. An
+		// explicit zoom takes ownership, even if it returns to the fit rung.
+		if (this._docLayer && this._docLayer._docType === 'text' &&
+			this._docLayer._firstFitDone && !this._docLayer._vulcanWriterFitInProgress &&
+			document.documentElement.classList.contains('vulcan-desktop-chrome'))
+			this._docLayer._vulcanWriterUserViewport = true;
 		// do not animate zoom when in a cypress test.
 		if (animate && window.L.Browser.cypressTest)
 			animate = false;
@@ -781,8 +842,31 @@ window.L.Map = window.L.Evented.extend({
 			return;
 		}
 
+		// Vector Impress relies on setView's OWN clamps for the zoom
+		// target: a fitting axis letterbox-centers, an overflowing axis
+		// clamps to the slide edge plus the apron maxBounds carries
+		// (verified live: an offset view passed through setView at fit
+		// zoom lands exactly centered). Zoom-out therefore always lands
+		// centered and zoom-in keeps the user's position — no separate
+		// center computation to disagree with.
+		var discreteZoomCenter = curCenter;
+		if (options && options.around) {
+			// Anchored zoom (ctrl+wheel zoom-in at the mouse): keep the
+			// anchor's document point under the same screen point —
+			// setZoomAround's own formula — then let setView's clamps
+			// bound the result.
+			var aroundScale = this.getZoomScale(zoom);
+			var aroundViewHalf = this.getSize().divideBy(2);
+			var aroundContainerPoint = options.around instanceof cool.Point ?
+				options.around :
+				this.internToContainerPointIgnoreSplits(options.around);
+			var aroundOffset = aroundContainerPoint.subtract(aroundViewHalf)
+				.multiplyBy(1 - 1 / aroundScale);
+			discreteZoomCenter = this.containerPointToInternIgnoreSplits(
+				aroundViewHalf.add(aroundOffset));
+		}
 		mapUpdater = function() {
-			thisObj.setView(curCenter, zoom);
+			thisObj.setView(discreteZoomCenter, zoom);
 		};
 
 		runAtFinish = function() {
@@ -792,7 +876,7 @@ window.L.Map = window.L.Evented.extend({
 		if (animate) {
 			this._docLayer.runZoomAnimation(zoom,
 				// pinchCenter
-				curCenter,
+				discreteZoomCenter,
 				mapUpdater,
 				runAtFinish);
 		} else {
@@ -1479,8 +1563,35 @@ window.L.Map = window.L.Evented.extend({
 	// The editor got focus (probably a dialog closed or user clicked to edit).
 	_onEditorGotFocus: function() {
 		this._changeFocusWidget(null, 0);
-		if (this.formulabar)
-			this.onFormulaBarBlur();
+		if (this.formulabar) {
+			/*
+			 * ROUND-10 S3 — TAP-AWAY NO LONGER DISMISSES, AND THAT IS A RULED
+			 * REVERSAL RATHER THAN A REGRESSION.
+			 *
+			 * This site used to discriminate: it read the Return verb to tell a
+			 * commit-and-advance (keep the keyboard, serial entry is still
+			 * running) from a user's tap on another cell (drop it). Round 10
+			 * rules that BOTH keep it — "single tapping a new cell in cell edit
+			 * still moves you to that cell" — so the two cases it was built to
+			 * separate now want the same answer and the discriminator has no
+			 * job left. Deleting it rather than always passing its true arm is
+			 * the point: a live read that no caller acts on is a trap for the
+			 * next reader.
+			 *
+			 * WHAT STILL CLOSES FOCUSED EDIT, so this is not a keyboard that
+			 * can never be dismissed — three named owners, each at its own
+			 * gesture: the ✓ (docdispatcher acceptformula, which calls this
+			 * method's sibling with the default dismissKeyboard true), the
+			 * double tap (MouseControl onClick, tap 2 of a run that began in
+			 * focused edit) and the drag (MouseControl onMouseUp).
+			 *
+			 * OFF PHONE CALC NOTHING CHANGES: returnInsertsNewline() is
+			 * phone-Calc-scoped and answered false everywhere else, so `false`
+			 * is the value this line already had on desktop, tablet, Writer and
+			 * Impress.
+			 */
+			this.vulcanEndCellEditSession({ dismissKeyboard: false });
+		}
 	},
 
 	// Our browser tab got focus.
@@ -1722,6 +1833,51 @@ window.L.Map = window.L.Evented.extend({
 		    offset = this._getBoundsOffset(viewBounds, bounds, zoom);
 
 		return this.unproject(centerPoint.add(offset), zoom);
+	},
+
+	// The centre a FAR PAN may land on: `center`, pulled back inside maxBounds
+	// on every axis that has an outside to be pulled back from.
+	//
+	// Deliberately not _limitCenter, and the difference is the whole reason
+	// this exists. On an axis whose document is SMALLER than the viewport,
+	// _limitCenter -> _getBoundsOffset -> _rebound takes its `left + right > 0`
+	// branch and re-CENTRES the document instead of clamping it. Writer holds
+	// exactly such an axis deliberately off-centre: panBy's own `text` branch
+	// adds ViewLayoutWriter.getDocumentScrollOffset() to offset.x to slide the
+	// page left and make room for the comments rail, and that only happens when
+	// the margins are wide enough, i.e. when the page is narrower than the view.
+	// Re-centring there would cancel the comment margin the first time a
+	// scrollbar drag produced a pan longer than the screen -- a desktop
+	// regression on the surface that is 95-96% of office usage.
+	//
+	// So: an axis with no more document than viewport is returned untouched,
+	// and an axis with a real edge is clamped so the viewport stops flush
+	// against it. Both production far-pan callers already clamp upstream, so
+	// what they pass in is inside the bounds and comes back unchanged.
+	_limitCenterInsideDocument: function (center, zoom) {
+		var bounds = this.options.maxBounds;
+		if (!bounds) { return center; }
+
+		var half = this.getSize().divideBy(2),
+		    centerPoint = this.project(center, zoom),
+		    tl = this.project(InternBoundsUtil.getTopLeft(bounds), zoom),
+		    br = this.project(InternBoundsUtil.getBottomRight(bounds), zoom);
+
+		return this.unproject(new cool.Point(
+			this._limitAxisInsideDocument(centerPoint.x, tl.x, br.x, half.x),
+			this._limitAxisInsideDocument(centerPoint.y, tl.y, br.y, half.y)), zoom);
+	},
+
+	// One axis of the above, in projected pixels. `half` is half the viewport.
+	//
+	// A viewport of zero (getSize() before the container has layout) is not a
+	// viewport to fit anything into, and options.maxBounds still holds the
+	// 100x100-twip default from the options block above at that point -- barely
+	// six CSS pixels. Clamping to it would be worse than not clamping, so both
+	// degenerate cases are the same early return as the no-outside case.
+	_limitAxisInsideDocument: function (value, min, max, half) {
+		if (half <= 0 || max - min <= half * 2) { return value; }
+		return Math.max(min + half, Math.min(max - half, value));
 	},
 
 	// returns offset needed for pxBounds to get inside maxBounds at a specified zoom

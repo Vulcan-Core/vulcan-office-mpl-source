@@ -611,6 +611,27 @@
 	cursor: default;
 }
 
+/* Dropdown caret as a masked sprite in currentColor (same idiom as
+   vulcan-icons.css); the label itself is plain text. */
+#aichat-tone-chip button.ui-pushbutton::after {
+	content: '';
+	display: inline-block;
+	width: 12px;
+	height: 12px;
+	margin-left: 4px;
+	vertical-align: -2px;
+	-webkit-mask: url('images/lc_arrowdown.svg') no-repeat center / contain;
+	mask: url('images/lc_arrowdown.svg') no-repeat center / contain;
+	background-color: currentColor;
+}
+
+/* A pressed chip paints its pill with --color-main-text (jsdialogs.css);
+   flip the sprite so the glyph stays legible in both themes. */
+#aichat-tone-picker .ui-chip:has(.ui-chip-main[aria-pressed='true']) .ui-chip-icon img,
+#aichat-tone-picker .ui-chip:has(.ui-chip-main[aria-pressed='true']) .ui-chip-action img {
+	filter: invert(1);
+}
+
 /* -- Tone picker panel -- */
 
 #aichat-tone-picker {
@@ -834,7 +855,6 @@
 	color: var(--color-main-text);
 }
 
-#aichat-tone-form-icon-label,
 #aichat-tone-form-name-label,
 #aichat-tone-form-desc-label {
 	font-size: 11.5px;
@@ -843,63 +863,6 @@
 	letter-spacing: 0.01em;
 	text-transform: uppercase;
 	margin-top: 2px;
-}
-
-#aichat-tone-form-icons {
-	display: flex !important;
-	grid-auto-flow: unset !important;
-	flex-wrap: wrap;
-	gap: 6px;
-}
-
-#aichat-tone-form-icons > .ui-pushbutton-wrapper {
-	flex: 0 0 auto;
-	margin: 0;
-}
-
-#aichat-tone-form-icons [id^='aichat-tone-form-icon-'] button.ui-pushbutton,
-#aichat-tone-form-emoji-more button.ui-pushbutton {
-	width: 32px;
-	height: 32px;
-	padding: 0;
-	font-size: 18px;
-	line-height: 1;
-	display: inline-flex;
-	align-items: center;
-	justify-content: center;
-	border-radius: 999px;
-	background: var(--color-main-background);
-	border: 1px solid var(--color-border);
-	color: var(--color-main-text);
-	cursor: pointer;
-	transition: border-color 0.15s ease,
-		background 0.15s ease;
-}
-
-#aichat-tone-form-icons
-[id^='aichat-tone-form-icon-']
-button.ui-pushbutton:hover,
-#aichat-tone-form-emoji-more button.ui-pushbutton:hover {
-	border-color: rgb(var(--aichat-accent));
-	background: rgba(var(--aichat-accent), 0.06);
-}
-
-#aichat-tone-form-icons
-[id^='aichat-tone-form-icon-']
-button.ui-pushbutton[aria-pressed='true'] {
-	border-color: rgb(var(--aichat-accent));
-	background: rgba(var(--aichat-accent), 0.18);
-	box-shadow: 0 0 0 2px rgba(var(--aichat-accent), 0.35);
-}
-
-#aichat-tone-form-icons
-[id^='aichat-tone-form-icon-']
-button.ui-pushbutton[aria-pressed='true']:hover {
-	background: rgba(var(--aichat-accent), 0.22);
-}
-
-#aichat-tone-form-emoji-more button.ui-pushbutton {
-	color: var(--color-text-lighter);
 }
 
 #aichat-tone-form-name input.ui-edit {
@@ -1090,31 +1053,6 @@ button.ui-pushbutton[aria-pressed='true']:hover {
 #aichat-tone-delete-confirm-ok button.ui-pushbutton:focus-visible {
 	outline: 2px solid var(--color-error);
 	outline-offset: 2px;
-}
-
-/* -- Emoji picker overlay (anchors the generic .ui-emoji-picker widget) -- */
-
-#aichat-tone-form-emoji-picker {
-	position: absolute;
-	left: 12px;
-	right: 12px;
-	top: 64px;
-	z-index: 20;
-	max-height: 320px;
-	overflow-y: auto;
-	background: var(--color-main-background);
-	border: 1px solid var(--color-border);
-	border-radius: 10px;
-	box-shadow: 0 6px 18px rgba(0, 0, 0, 0.12);
-}
-
-#aichat-tone-form-emoji-picker .ui-emoji-picker-search:focus {
-	border-color: rgb(var(--aichat-accent));
-}
-
-#aichat-tone-form-emoji-picker .ui-emoji-picker-cell:hover,
-#aichat-tone-form-emoji-picker .ui-emoji-picker-cell:focus-visible {
-	background: rgba(var(--aichat-accent), 0.1);
 }
 
 /* -- Markdown rendering in assistant messages -- */
@@ -1564,4 +1502,10 @@ button.ui-pushbutton[aria-pressed='true']:hover {
 	.aichat-reject-btn:active {
 		transform: none;
 	}
+}
+
+/* Tone-form Back is an icon-only pushbutton (image: lc_prevrecord.svg). */
+#aichat-tone-form-back button.ui-pushbutton img {
+	width: 16px;
+	height: 16px;
 }

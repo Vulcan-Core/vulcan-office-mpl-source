@@ -4,7 +4,7 @@
 	 id="ShapeColor-line" 
      d="m 14,2.5 c -5.5,0 0,9.5 -6,9.5 6,0 0.5,9.5 6,9.5"
      fill="none"
-	 stroke="#1e8bcd" 
+	 stroke="currentColor" 
 	 stroke-linecap="round" 
 	 stroke-linejoin="round"
      />

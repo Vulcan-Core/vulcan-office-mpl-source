@@ -33,6 +33,7 @@
 #include <editeng/outliner.hxx>
 
 #include <DrawDocShell.hxx>
+#include <VulcanHiddenInk.hxx>
 #include <editeng/eeitem.hxx>
 #include <comphelper/diagnose_ex.hxx>
 #include <comphelper/processfactory.hxx>
@@ -896,6 +897,9 @@ IMPL_LINK_NOARG(SdDrawDocument, OnlineSpellingHdl, Timer *, void)
 void SdDrawDocument::SpellObject(SdrTextObj* pObj)
 {
     if (!(pObj && pObj->GetOutlinerParaObject()) /* && pObj != pView->GetTextEditObject() */)
+        return;
+    // A hidden-ink OCR line paints nothing over its scan: no squiggles either.
+    if (sd::hiddenink::IsHiddenLine(*pObj))
         return;
 
     mbHasOnlineSpellErrors = false;

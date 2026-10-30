@@ -12,6 +12,20 @@ html[dir='rtl'] .sub-menu-arrow {
 }
 
 /* Related to cool.css */
+/* 🔴 LOAD-BEARING, and it is overridden rather than corrected here.
+ * `width: 36px` is 8px narrower than the 44px kebab it holds, and
+ * #toolbar-hamburger is the LAST item in #toolbar-row, so on a 390px phone the
+ * overflow is not clipped — it hangs off the right edge of the screen. The
+ * Impress phone chrome answers this in css/vulcan-theme.css §13i.11
+ * (`html.vulcan-mobile-chrome body[data-doctype='presentation']
+ * #toolbar-hamburger { width: 44px !important; flex: 0 0 44px }`), which wins
+ * ONLY on specificity: (1,2,2) vs this rule's (1,0,0). It does not win on
+ * order — global.js:398 injects this file AFTER every bundled stylesheet,
+ * vulcan-theme.css included. So do not "tidy" §13i.11's compound selector down
+ * to a bare id, and do not raise the specificity of this rule; either one puts
+ * the kebab back off-screen. Calc has the same override at §13-CALC.10 and
+ * the same (1,2,2) shape, for the same reason. Writer and Draw phone chrome
+ * still have the defect — both of those overrides are doctype-scoped. */
 #toolbar-hamburger {
 	width: 36px !important;
 	position: relative;
@@ -38,6 +52,41 @@ html[dir='rtl'] .sub-menu-arrow {
 	position: relative;
 	z-index: 1003;
 }
+
+/* CS-1 (SPEC-back-escape §4.3). Retire the fork's upper-left control on the
+ * phone. It wore TWO meanings depending on invisible state: a TICK in edit
+ * mode (editmode-on / lc_listitem-selected.svg) that called
+ * setPermission('readonly') — which fires closemobilewizard AND
+ * closealldialogs, i.e. one tap unwound two layers and dropped the document
+ * to the read posture — and a CLOSE glyph in read-only that dispatched
+ * closeapp, which the host already turns into exactly what its own Back
+ * does. So a reader saw two stacked back-ish controls ~50px apart doing the
+ * identical thing, and an editor saw the same two pixels mean something
+ * violently different.
+ *
+ * The escape moves to the host's chevron, which owns the topmost-left pixel
+ * and is already the single funnel the edge-swipe and Escape go through, and
+ * which now pops one rung per tap. Nothing is deleted without a replacement:
+ * the tick's useful half (closing sheets/dialogs) is what back does natively,
+ * one layer at a time, and its read-posture half is now a rung on the ladder.
+ * The only checkmark left in the product is the fx bar's ✓, which commits.
+ *
+ * Vertical cost when this landed: ZERO — #toolbar-row still kept its 48px
+ * min-height from undo/redo, so only horizontal space was freed. That row has
+ * since gone to zero as well (SPEC-one-topbar, vulcan-theme.css §13.2): its
+ * remaining items are published to the host's one app bar. Retiring THIS
+ * control is still the reason there is exactly one back in that bar.
+ *
+ * MUST NOT ship before the host side. An old host never sends
+ * Vulcan_EscapeBack, so a phone running new-fork/old-host with this rule
+ * would have no in-frame escape at all. The reverse skew (new host, old fork)
+ * is safe: the host's depth mirror stays 0 and Back closes as it always did.
+ *
+ * Scoped on html.vulcan-mobile-chrome, so the stock phone chrome, tablets
+ * (neither class) and desktop (vulcan-desktop-chrome) all keep the control. */
+html.vulcan-mobile-chrome #toolbar-mobile-back {
+	display: none;
+}
 .editmode-off {
 	background: url('images/lc_closedocmobile.svg') no-repeat center !important;
 }
@@ -62,6 +111,19 @@ html[dir='rtl'] .sub-menu-arrow {
 }
 
 /* Related to menubar.css */
+/* 🔴 NOT A LIVE TARGET ON ANY PHONE, though it reads as one. .document-logo is
+ * an <a> and carries :hover/:focus/:active rules (menubar.css:273-277), so a
+ * touch-target check is right to class it as a control — but its PARENT is
+ * hidden on every phone, in this file, unconditionally. Both of the two
+ * constructors put it inside an element whose id is `document-header`
+ * (Control.Menubar.ts:3072-3075 and Control.Notebookbar.js:98-106), and
+ * `#document-header { display: none !important }` is 30-odd lines up. The
+ * Notebookbar path then prepends that header into .main-nav, which this file
+ * also hides with `display: none !important`. So 35x38 is dead geometry:
+ * growing it would move nothing a finger can reach. A lint's display:none
+ * check reads a rule's OWN display, not an ancestor's, which is why this needs
+ * saying at the site rather than being inferred.
+ * phone-ergonomics-lint: allow-small-target -- parent #document-header is display:none !important on every phone; both constructors parent it there */
 .document-logo {
 	width: 35px;
 	height: 38px;
@@ -81,6 +143,16 @@ html[dir='rtl'] .sub-menu-arrow {
 	display: none;
 }
 
+/* Un-hides the kebab on phones (menubar.css:350 ships `display: none`), so the
+ * declaration cannot simply be deleted — but the VALUE is the trap. As an
+ * inline-block the label is a block container, which (a) makes it ignore the
+ * centring vulcan-theme.css §13.2 declares with an unflagged `display: flex`
+ * and (b) lets menubar.css's `text-indent: 17px` apply and shove the ⋮ off
+ * centre inside a 44px box. §13i.11 corrects both for the presentation doctype
+ * with `#main-menu-btn { display: flex !important; text-indent: 0 }` — an id
+ * selector, so it beats this class rule despite this file loading later. Same
+ * caution as #toolbar-hamburger above: do not strengthen this selector, and do
+ * not weaken §13i.11's. Writer and Calc are still inline-block. */
 .main-menu-btn {
 	display: inline-block !important;
 }
@@ -254,6 +326,12 @@ textarea.cool-annotation-textarea {
 	font-size: 16px;
 	height: calc(var(--btn-size) + 2px) /* The height of the buttons plus their margin, to align everything... */;
 }
+
+/* The inherited search field is 30px high. Keep that stock size outside the
+ * Vulcan phone takeover, but give the phone's search target a full finger box. */
+html.vulcan-mobile-chrome #toolbar-search input#search-input {
+	min-height: 44px;
+}
 #toolbar-search #search {
 	width: 80%;
 }
@@ -270,7 +348,10 @@ textarea.cool-annotation-textarea {
 }
 
 /* Show sidebar beyond 768px only */
-#sidebar-dock-wrapper, #navigator-dock-wrapper {
+/* #aichat-dock-wrapper is the third dock in the #main-document-content flex
+   row (cool.css) and is the only one with no small-screen rule of its own; at
+   350px it has no business opening on a phone. */
+#sidebar-dock-wrapper, #navigator-dock-wrapper, #aichat-dock-wrapper {
 	display: none !important;
 }
 
@@ -301,6 +382,15 @@ textarea.cool-annotation-textarea {
 	line-height: 60px;
 }
 
+/* This 37px is a FLOOR, and nothing ever sinks to it. .preview-img carries an
+ * inline width/height written by JS from Parts.getPreview()'s aspect fit of
+ * _previewRequestBox() (Control.PartsPreview.js:282-290) — 128x58 on the phone
+ * card strip, 60x60 everywhere else — so the used width is 60px or more and a
+ * min-width can only ever raise a box, never shrink one. Phone Impress
+ * replaces the geometry outright in vulcan-theme.css §13i.4 (`min-width: 0;
+ * height: 58px; max-width: 128px`), which is the card the strip actually
+ * paints and which clears the floor on both axes.
+ * phone-ergonomics-lint: allow-small-target -- min-width is a floor the JS-set inline size never reaches; portrait cards are 58px tall via 13i.4 */
 #slide-sorter.portrait .preview-img {
 	min-width: 37px;
 	max-width: 60px;
@@ -332,6 +422,20 @@ textarea.cool-annotation-textarea {
 	overflow-y: scroll;
 }
 
+/* Same floor, same reason as portrait above — a 60x60 request box fits a 16:9
+ * slide at 60px wide, so this 20px never binds.
+ * 🔴 What IS under the floor in landscape is the HEIGHT, and this lint cannot
+ * see it: that same fit is 60x34, written inline by JS, with no declaration
+ * anywhere to read. It is also not fixable the house way. .preview-img is an
+ * <img> (Control.PartsPreview.js:306) — a replaced element, which generates no
+ * ::before at all, so the hit-box bleed technique does not apply to it. The
+ * frame around it already reserves 5px top and bottom (vulcan-theme.css
+ * §13i.6) for a 44px row, but only `contextmenu` is bound to the frame; the
+ * click is on the img (Control.PartsPreview.js:330). Closing this needs either
+ * the click moved to the frame or real padding on the card, and both re-derive
+ * §13i.6's spacing arithmetic and the drag handler's sizeProperty. Recorded
+ * here, deliberately not done.
+ * phone-ergonomics-lint: allow-small-target -- min-width is a floor the 60px inline width never reaches; the real defect is the JS-set height, recorded above */
 #slide-sorter.landscape .preview-img {
 	min-width: 20px;
 	max-width: 60px;
@@ -535,6 +639,11 @@ textarea.cool-annotation-textarea {
 }
 
 /* Feedback dialog */
+/* phone-ergonomics-lint: allow-translucent -- this is the modal SCRIM behind
+ * the dialog, not a chrome surface over the document. §13's "every surface is
+ * OPAQUE" is about bars the reader has to read the document through; a dim
+ * layer whose whole job is to show the document is still there, dimmed, is
+ * the opposite case and must stay translucent. */
 .iframe-dialog-wrap {
 	left: 0;
 	top: 0;
@@ -614,7 +723,28 @@ div#fontstyletoolbox + div#style.mobile-wizard {
 }
 
 /* Mobile specific buttons */
+/* Insert-comment "+" in the comment-wizard titlebar. This carried a
+ * small-target opt-out reading "44px turns a small badge into a
+ * large filled circle in a titlebar this change cannot see". The first half
+ * of that is true and the second half was never a reason -- so the badge is
+ * kept at 24px and the TAP BOX is grown to 44 by the ::before below. Same
+ * art/hit-box split as .spreadsheet-tab and .ui-pushbutton in
+ * vulcan-theme.css; nothing about the drawing moves.
+ *
+ * What it is, from source rather than from looking at it: a real
+ * <button id="insert_comment"> created at CanvasTileLayer.js:3762-3765 into
+ * a flex .mobile-wizard-titlebar-btn-container whose only other child is an
+ * inert title <span>. That container is .html()'d into
+ * <td id="mobile-wizard-title"> by Control.MobileWizardWindow._setCustomTitle
+ * (:426-429), so the button is the sole interactive thing in that cell.
+ *
+ * position: relative is load-bearing: it makes the button the containing
+ * block for the pseudo-element. Without it the box resolves against the
+ * nearest positioned ancestor -- .mobile-wizard-titlebar is `position:
+ * sticky` (mobilewizard.css:294-300) -- and the hit box lands at the top-left
+ * of the whole titlebar instead of on the badge. */
 .mobile-wizard-titlebar-btn {
+	position: relative;
 	height: 24px !important;
 	display: block;
 	text-align: center;
@@ -624,6 +754,27 @@ div#fontstyletoolbox + div#style.mobile-wizard {
 	width: 24px !important;
 	border-radius: 50% !important;
 	background-color: var(--color-primary) !important;
+}
+
+/* inset -10px: 24 + 10 + 10 = 44 on both axes.
+ *
+ * Symmetric is safe here because the badge has no interactive neighbour on
+ * any side. Left: the title <span>, inert text, and `justify-content:
+ * space-between` on the container parks it at the opposite edge, so a 10px
+ * bleed never reaches it. Right: 8px of the button's own margin, then the
+ * cell edge. Vertically the titlebar row is already >= 44px -- its sibling
+ * <td class="mobile-wizard-back"> is clamped to min-height 44 under phone
+ * chrome (mobilewizard.css, VULCAN PHONE CHROME / CS-5) and a table row is
+ * as tall as its tallest cell -- and the 24px badge is middle-aligned in it,
+ * so the grown box stays inside the row it belongs to.
+ *
+ * Taps on the pseudo-element dispatch to the <button>: a pseudo-element is
+ * never an event target, so `button.onclick = map.insertComment` still gets
+ * them, exactly as .spreadsheet-tab::before keeps _setPart's currentTarget. */
+.mobile-wizard-titlebar-btn::before {
+	content: '';
+	position: absolute;
+	inset: -10px;
 }
 
 .mobile-wizard-titlebar-btn-container {

@@ -594,7 +594,12 @@ void ScViewDataTable::WriteUserDataSequence(cpo::uno::Sequence <beans::PropertyV
     pSettings[SC_POSITION_BOTTOM].Name = SC_POSITIONBOTTOM;
     pSettings[SC_POSITION_BOTTOM].Value <<= sal_Int32(nPosY[SC_SPLIT_BOTTOM]);
 
-    sal_Int32 nZoomValue = tools::Long(fZoomY * 100);
+    // VULCAN FORK -- phone-export-invariant. fZoomY is the RENDERING zoom; in a
+    // COKit session that is the client's tile grid, not the user's intent, and
+    // writing it here rewrote the customer's stored ZoomValue on every save.
+    // See ScViewData::GetKitExportZoomPercent(). The oExportZoom override just
+    // below is unchanged and still wins.
+    sal_Int32 nZoomValue = rViewData.GetKitExportZoomPercent(nTab, tools::Long(fZoomY * 100));
     sal_Int32 nPageZoomValue = tools::Long(fPageZoomY * 100);
     pSettings[SC_TABLE_ZOOM_TYPE].Name = SC_ZOOMTYPE;
     pSettings[SC_TABLE_ZOOM_TYPE].Value <<= sal_Int16(eZoomType);
@@ -706,6 +711,10 @@ void ScViewDataTable::ReadUserDataSequence(const cpo::uno::Sequence <beans::Prop
             rSetting.Value >>= nTemp32;
             double fZoom = double(nTemp32) / 100;
             fZoomX = fZoomY = fZoom;
+            // VULCAN FORK -- phone-export-invariant. This IS the document's own
+            // zoom, so it is authoritative for the export snapshot regardless of
+            // whether SetZoom() already took one. See GetKitExportZoomPercent().
+            moKitDocZoom = static_cast<sal_uInt16>(nTemp32);
             rHasZoom = true;
         }
         else if (sName == SC_PAGEVIEWZOOMVALUE)
@@ -721,9 +730,21 @@ void ScViewDataTable::ReadUserDataSequence(const cpo::uno::Sequence <beans::Prop
         }
         else if (sName == SC_TABLESELECTED)
         {
-            bool bSelected = false;
-            rSetting.Value >>= bSelected;
-            rViewData.GetMarkData().SelectTable( nTab, bSelected );
+            // VULCAN FORK -- no-imported-sheet-group. Keep across upstream rebases.
+            // A COKit view has no way to show or end a sheet group, so it does not
+            // take one from the file. A stale tabSelected (openpyxl's
+            // create_sheet(name, 0) leaves it on the old first sheet) grouped that
+            // sheet with the active one: its tab showed the active sheet's cells
+            // (ScTabControl::SwitchToPageId does not switch inside a group) and
+            // typing wrote to both sheets. The caller's SetTabNo(.., true)
+            // selects the shown sheet alone, and the next save writes tabSelected
+            // on that sheet only.
+            if (!comphelper::COKit::isActive())
+            {
+                bool bSelected = false;
+                rSetting.Value >>= bSelected;
+                rViewData.GetMarkData().SelectTable( nTab, bSelected );
+            }
         }
         else if (sName == SC_UNONAME_TABCOLOR)
         {
@@ -1050,6 +1071,22 @@ void ScViewData::SetZoomType( SvxZoomType eNew, bool bAll )
 
 void ScViewData::SetZoom( double fNewX, double fNewY, std::vector< SCTAB >& tabs )
 {
+    // VULCAN FORK -- phone-export-invariant. Keep across upstream rebases.
+    // Snapshot the DOCUMENT's zoom before a COKit client's rendering zoom
+    // overwrites fZoomX/fZoomY. This is the only path a client zoom takes
+    // (clientzoom -> ScModelObj::setClientZoom -> here); the import paths
+    // write fZoomX/fZoomY DIRECTLY (:708 .ods, :3820/:3831 .xlsx, :4033) and
+    // never call SetZoom, so on the first SetZoom of a COKit session fZoomY
+    // still holds the file's own zoom. Consumed only by
+    // GetKitExportZoomPercent(); moKitDocDefZoom doubles as the once-only flag.
+    if (comphelper::COKit::isActive() && !moKitDocDefZoom)
+    {
+        moKitDocDefZoom = static_cast<sal_uInt16>(fDefZoomY * 100.0);
+        for ( auto & i: maTabData )
+            if ( i && !i->moKitDocZoom )
+                i->moKitDocZoom = static_cast<sal_uInt16>(i->fZoomY * 100.0);
+    }
+
     bool bAll = tabs.empty();
     if ( !bAll ) // create associated table data
         CreateTabData( tabs );
@@ -1120,6 +1157,54 @@ void ScViewData::SetZoom( double fNewX, double fNewY, bool bAll )
         vTabs.insert(vTabs.begin(), itr, itrEnd);
     }
     SetZoom( fNewX, fNewY, vTabs );
+}
+
+tools::Long ScViewData::GetKitExportZoomPercent( SCTAB nTab, tools::Long nLiveZoomPercent ) const
+{
+    // VULCAN FORK -- phone-export-invariant. Keep across upstream rebases.
+    //
+    // In a COKit session the live fZoomY is NOT the user's intent. It is
+    // derived from the tile grid the client asked for (clientzoom
+    // tiletwipwidth -> ScModelObj::setClientZoom -> SetZoom(bAll=true)), and
+    // the phone Calc chrome picks that grid for legibility on a 390px screen.
+    // Three export sinks read it straight out of the live view (spelled
+    // without "::" on purpose -- display-state-export-guard.mjs locates those
+    // two functions by exact qualified name and would slice this comment
+    // instead of the function, reading 0 fields and failing S2):
+    //   ScViewDataTable's WriteUserDataSequence -> .ods per-sheet ZoomValue
+    //   ScViewData's WriteUserDataSequence      -> .ods document ZoomValue
+    //   WriteExtOptions -> mnNormalZoom -> xeview.cxx:387 ->
+    //                      .xlsx <sheetView zoomScale>
+    // so a phone session silently rewrote a workbook stored at zoomScale="75"
+    // to "120" on every save. That is display state reaching a saved customer
+    // file -- the class, which browser/scripts/
+    // display-state-export-guard.mjs exists to stop.
+    //
+    // Withholding `zoompercent` on the wire does NOT fix it: that only leaves
+    // oExportZoom empty, and xeview.cxx:387 then takes its `: mnNormalZoom`
+    // branch, which is the same number by another route.
+    //
+    // Fix shape copied from OverrideWithKitFreeze below (and from the Impress
+    // VisArea swap, sd/source/ui/view/drviews5.cxx:341): leave the live view
+    // alone -- rendering needs it, so the value cannot be withheld -- and swap
+    // it for a document-derived one AT THE SERIALISATION SITE.
+    //
+    // oExportZoom still wins wherever it is set; that logic is untouched at
+    // all three call sites, so a desktop client that sends `zoompercent`
+    // behaves exactly as before, as does every non-COKit build.
+    if (!comphelper::COKit::isActive())
+        return nLiveZoomPercent;
+
+    if (nTab >= 0 && nTab < static_cast<SCTAB>(maTabData.size())
+        && maTabData[nTab] && maTabData[nTab]->moKitDocZoom)
+        return *maTabData[nTab]->moKitDocZoom;
+
+    if (moKitDocDefZoom)
+        return *moKitDocDefZoom;
+
+    // No snapshot yet means no client zoom has arrived, so the live value is
+    // still the document's own.
+    return nLiveZoomPercent;
 }
 
 void ScViewData::SetShowGrid( bool bShow )
@@ -3675,7 +3760,12 @@ void ScViewData::WriteExtOptions( ScExtDocOptions& rDocOpt ) const
 
             // view mode and zoom
             rTabSett.mbPageMode = bPagebreak;
-            rTabSett.mnNormalZoom = static_cast< tools::Long >( pViewTab->fZoomY * 100.0 );
+            // VULCAN FORK -- phone-export-invariant. This is the .xlsx sink:
+            // mnNormalZoom is what xeview.cxx:387 falls back to when
+            // moExportZoom is unset, so withholding `zoompercent` on the wire
+            // never closed it. See ScViewData::GetKitExportZoomPercent().
+            rTabSett.mnNormalZoom = GetKitExportZoomPercent(
+                nTab, static_cast< tools::Long >( pViewTab->fZoomY * 100.0 ) );
             rTabSett.mnPageZoom = static_cast< tools::Long >( pViewTab->fPageZoomY * 100.0 );
             rTabSett.moExportZoom = GetExportZoom();
         }
@@ -3812,12 +3902,23 @@ void ScViewData::ReadExtOptions( const ScExtDocOptions& rDocOpt )
             }
 
             // sheet selection and selected ranges
+            // VULCAN FORK -- no-imported-sheet-group. The .xls side of
+            // ScViewDataTable::ReadUserDataSequence's SC_TABLESELECTED: a COKit view
+            // does not take a sheet group from the file. ScTabViewShell::Activate's
+            // SetTabNo(.., true) selects the shown sheet alone.
             ScMarkData& rMarkData = GetMarkData();
-            rMarkData.SelectTable( nTab, rTabSett.mbSelected );
+            if (!comphelper::COKit::isActive())
+                rMarkData.SelectTable( nTab, rTabSett.mbSelected );
 
             // zoom for each sheet
             if( rTabSett.mnNormalZoom )
+            {
                 rViewTab.fZoomX = rViewTab.fZoomY = double(rTabSett.mnNormalZoom) / 100;
+                // VULCAN FORK -- phone-export-invariant. The .xlsx file's own
+                // zoom, authoritative for the export snapshot. See
+                // ScViewData::GetKitExportZoomPercent().
+                rViewTab.moKitDocZoom = static_cast<sal_uInt16>(rTabSett.mnNormalZoom);
+            }
             if( rTabSett.mnPageZoom )
                 rViewTab.fPageZoomX = rViewTab.fPageZoomY = double(rTabSett.mnPageZoom) / 100;
 
@@ -3890,7 +3991,10 @@ void ScViewData::WriteUserDataSequence(cpo::uno::Sequence <beans::PropertyValue>
     pSettings[SC_ACTIVE_TABLE].Value <<= sName;
     pSettings[SC_HORIZONTAL_SCROLL_BAR_WIDTH].Name = SC_HORIZONTALSCROLLBARWIDTH;
     pSettings[SC_HORIZONTAL_SCROLL_BAR_WIDTH].Value <<= sal_Int32(pView->GetTabBarWidth());
-    sal_Int32 nZoomValue = tools::Long(pThisTab->fZoomY * 100);
+    // VULCAN FORK -- phone-export-invariant, third sink. See
+    // ScViewData::GetKitExportZoomPercent(). The oExportZoom override below is
+    // unchanged and still wins.
+    sal_Int32 nZoomValue = GetKitExportZoomPercent(GetTabNumber(), tools::Long(pThisTab->fZoomY * 100));
     sal_Int32 nPageZoomValue = tools::Long(pThisTab->fPageZoomY * 100);
     pSettings[SC_ZOOM_TYPE].Name = SC_ZOOMTYPE;
     pSettings[SC_ZOOM_TYPE].Value <<= sal_Int16(pThisTab->eZoomType);

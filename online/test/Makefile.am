@@ -55,6 +55,8 @@ all_la_unit_tests = \
 	unit-wopi-async-slow.la \
 	unit-perf.la \
 	unit-wopi-lock.la \
+	unit-wopi-lockfailed.la \
+	unit-wopi-refreshlock.la \
 	unit-save-torture.la \
 	unit-invalidation.la \
 	unit-close.la \
@@ -368,6 +370,10 @@ unit_wopi_languages_la_SOURCES = UnitWOPILanguages.cpp
 unit_wopi_languages_la_LIBADD = $(CPPUNIT_LIBS)
 unit_wopi_lock_la_SOURCES = UnitWOPILock.cpp
 unit_wopi_lock_la_LIBADD = $(CPPUNIT_LIBS)
+unit_wopi_lockfailed_la_SOURCES = UnitWOPILockFailed.cpp
+unit_wopi_lockfailed_la_LIBADD = $(CPPUNIT_LIBS)
+unit_wopi_refreshlock_la_SOURCES = UnitWOPIRefreshLock.cpp
+unit_wopi_refreshlock_la_LIBADD = $(CPPUNIT_LIBS)
 unit_wopi_watermark_la_SOURCES = UnitWOPIWatermark.cpp
 unit_wopi_watermark_la_LIBADD = $(CPPUNIT_LIBS)
 unit_wopi_comment_avatar_la_SOURCES = UnitWopiCommentAvatar.cpp

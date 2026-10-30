@@ -2098,6 +2098,31 @@ namespace
     }
 }
 
+size_t SdrEditView::ImportPdfGraphic(SdrGrafObj& rGraf, SdrObjList& rList, size_t nInsPos,
+                                     std::shared_ptr<ImportedFontMap>* pSharedFonts,
+                                     SvdProgressInfo* pProgrInfo)
+{
+    Graphic aGraphic = rGraf.GetGraphic();
+    auto const& pVectorGraphicData = aGraphic.getVectorGraphicData();
+    if (!pVectorGraphicData || pVectorGraphicData->getType() != VectorGraphicDataType::Pdf)
+        return 0;
+
+    auto pPdfium = vcl::pdf::PDFiumLibrary::get();
+    if (!pPdfium)
+        return 0;
+
+    // Skip embedded-font reconstruction: the decomposed page is for editing,
+    // so its text should be a real container font, not a PDF subset — and the
+    // reconstruction aborts the process on some subsets (see svdpdf.cxx).
+    ImpSdrPdfImport aFilter(rGraf.getSdrModelFromSdrObject(), rGraf.GetLayer(),
+                            rGraf.GetLogicRect(), aGraphic, /*bSkipEmbeddedFonts=*/true,
+                            pSharedFonts);
+    if (aGraphic.getPageNumber() >= aFilter.GetPageCount())
+        return 0;
+
+    return aFilter.DoImport(rList, nInsPos, aGraphic.getPageNumber(), pProgrInfo);
+}
+
 // Metafile Import
 void SdrEditView::DoImportMarkedMtf(SvdProgressInfo *pProgrInfo)
 {
@@ -2138,16 +2163,8 @@ void SdrEditView::DoImportMarkedMtf(SvdProgressInfo *pProgrInfo)
 
             if (pVectorGraphicData && pVectorGraphicData->getType() == VectorGraphicDataType::Pdf)
             {
-                auto pPdfium = vcl::pdf::PDFiumLibrary::get();
-                if (pPdfium)
-                {
-                    aLogicRect = pGraf->GetLogicRect();
-                    ImpSdrPdfImport aFilter(GetModel(), pObj->GetLayer(), aLogicRect, aGraphic);
-                    if (aGraphic.getPageNumber() < aFilter.GetPageCount())
-                    {
-                        nInsCnt = aFilter.DoImport(*pOL, nInsPos, aGraphic.getPageNumber(), pProgrInfo);
-                    }
-                }
+                aLogicRect = pGraf->GetLogicRect();
+                nInsCnt = ImportPdfGraphic(*pGraf, *pOL, nInsPos, nullptr, pProgrInfo);
             }
             else if (pGraf->HasGDIMetaFile() || pGraf->isEmbeddedVectorGraphicData() )
             {

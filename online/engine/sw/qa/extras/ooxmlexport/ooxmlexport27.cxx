@@ -104,6 +104,69 @@ CPPUNIT_TEST_FIXTURE(Test, testCool15788_symbolContentControl)
     assertXPathContent(pXmlDoc, "/w:document/w:body/w:p/w:sdt/w:sdtContent/w:r[2]/w:t", u"\xf04b");
 }
 
+CPPUNIT_TEST_FIXTURE(Test, testEng2435ContentControlAfterHyperlink)
+{
+    // given content controls that start where a hyperlink ends: a Google Docs
+    // suggestion that starts inside a link and runs past its end (one w:sdt
+    // inside the w:hyperlink, one right after it), plain controls right after a
+    // link mid-paragraph and at the paragraph end, a control wrapping a link, and
+    // a link right after a link that starts with a control
+    createSwDoc("eng2435-sdt-after-hyperlink.docx");
+
+    save(TestFilter::DOCX);
+
+    // Without the fix, the hyperlink was closed after the control's first run,
+    // inside its still-open <w:sdtContent>, so word/document.xml was not
+    // well-formed: "Opening and ending tag mismatch: sdtContent ... and hyperlink".
+    xmlDocUniquePtr pXmlDoc = parseExport(u"word/document.xml"_ustr);
+    CPPUNIT_ASSERT(pXmlDoc);
+
+    // The suggestion's first half stays inside the link, its second half after it.
+    assertXPath(pXmlDoc, "/w:document/w:body/w:p[1]/w:hyperlink", 1);
+    assertXPath(pXmlDoc, "/w:document/w:body/w:p[1]/w:hyperlink/w:sdt", 1);
+    assertXPath(pXmlDoc, "/w:document/w:body/w:p[1]/w:sdt", 1);
+    assertXPath(pXmlDoc, "/w:document/w:body/w:p[1]/w:sdt/w:sdtPr/w:tag", "val", u"goog_rdk_0");
+    assertXPathContent(pXmlDoc, "/w:document/w:body/w:p[1]/w:sdt/w:sdtContent/w:r[2]/w:t",
+                       u" and the rest of the sentence.");
+    // A control right after a link is not inside it.
+    assertXPath(pXmlDoc, "/w:document/w:body/w:p[2]/w:hyperlink/w:sdt", 0);
+    assertXPath(pXmlDoc, "/w:document/w:body/w:p[2]/w:sdt", 1);
+    assertXPath(pXmlDoc, "/w:document/w:body/w:p[3]/w:hyperlink/w:sdt", 0);
+    assertXPath(pXmlDoc, "/w:document/w:body/w:p[3]/w:sdt", 1);
+    // A control wrapping a link still wraps it.
+    assertXPath(pXmlDoc, "/w:document/w:body/w:p[4]/w:sdt/w:sdtContent/w:hyperlink", 1);
+    // A link right after a link, starting with a control: the first link closes before
+    // the second opens, and the second keeps the control and the text after it.
+    assertXPath(pXmlDoc, "/w:document/w:body/w:p[5]/w:hyperlink", 2);
+    assertXPath(pXmlDoc, "/w:document/w:body/w:p[5]/w:hyperlink[1]/w:sdt", 0);
+    assertXPath(pXmlDoc, "/w:document/w:body/w:p[5]/w:hyperlink[2]/w:sdt", 1);
+    assertXPathContent(pXmlDoc, "/w:document/w:body/w:p[5]/w:hyperlink[2]/w:r/w:t", u" more");
+}
+
+CPPUNIT_TEST_FIXTURE(Test, testLineNumberingOnlyInNumberedSection)
+{
+    // Given a document whose first section (a cover and contents, paragraphs 1-32) has no
+    // w:lnNumType, and whose second section numbers its lines and restarts page numbers:
+    createSwDoc("line-numbering-unnumbered-first-section.docx");
+
+    // Then only the second section's lines are counted. Without the fix, the cover and contents
+    // were numbered 1-32 and QA01 was line 33.
+    CPPUNIT_ASSERT(!getProperty<bool>(getParagraph(1, u"CV01 cover"_ustr),
+                                      u"ParaLineNumberCount"_ustr));
+    CPPUNIT_ASSERT(!getProperty<bool>(getParagraph(32, u"TC19 contents .......... 19"_ustr),
+                                      u"ParaLineNumberCount"_ustr));
+    CPPUNIT_ASSERT(getProperty<bool>(getParagraph(33, u"QA01 question or answer"_ustr),
+                                     u"ParaLineNumberCount"_ustr));
+
+    // And the save gives lnNumType to the second section only, so Word numbers that one alone.
+    // Without the fix, both sections had it, and Word numbered QA01 as line 34.
+    save(TestFilter::DOCX);
+    xmlDocUniquePtr pXmlDoc = parseExport(u"word/document.xml"_ustr);
+    assertXPath(pXmlDoc, "//w:pPr/w:sectPr", 1);
+    assertXPath(pXmlDoc, "//w:pPr/w:sectPr/w:lnNumType", 0);
+    assertXPath(pXmlDoc, "/w:document/w:body/w:sectPr/w:lnNumType", 1);
+}
+
 } // end of anonymous namespace
 CPPUNIT_PLUGIN_IMPLEMENT();
 

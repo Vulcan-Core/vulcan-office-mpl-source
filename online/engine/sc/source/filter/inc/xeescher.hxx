@@ -26,6 +26,7 @@
 #include "xlformula.hxx"
 #include <svx/sdtaitm.hxx>
 #include <rtl/ustring.hxx>
+#include <cpo/uno/Sequence.hxx>
 #include <unotools/securityoptions.hxx>
 #include <unotools/tempfile.hxx>
 #include <memory>
@@ -191,6 +192,7 @@ private:
     sal_uInt16          mnEntryCount;   /// Number of entries in source range.
 protected:
     ScAddress mxCellLinkAddress;
+    std::optional< ScRange > moSrcRangeAddress;   /// List source range, if bound.
 };
 
 class XclMacroHelper : public XclExpControlHelper
@@ -243,6 +245,58 @@ private:
     OUString            maClassName;        /// Class name of the control.
     sal_uInt32          mnStrmStart;        /// Start position in 'Ctls' stream.
     sal_uInt32          mnStrmSize;         /// Size in 'Ctls' stream.
+};
+
+/** An ActiveX (MS Forms 2.0) control the xlsx import loaded (shape InteropGrabBag
+    XclActiveX::STASH), written back to .xlsx/.xlsm as ActiveX: xl/activeX/activeXN.xml + .bin
+    (persistStreamInit), the VML ObjectType="Pict" shape, the hidden DrawingML anchor and the
+    sheet's <controls> entry. The binary is the loaded one while the control is as it was loaded,
+    else it is made from the control model. */
+class XclExpOcxXmlControlObj : public XclObj, public XclExpControlHelper
+{
+public:
+    explicit            XclExpOcxXmlControlObj(
+                            XclExpObjectManager& rObjMgr,
+                            css::uno::Reference< css::drawing::XShape > const & xShape,
+                            const tools::Rectangle* pChildAnchor );
+
+    /** True when the xlsx import kept this control's parts (cheap; checked before construction). */
+    static bool         IsImportedActiveX( css::uno::Reference< css::drawing::XShape > const & xShape );
+    /** False: nothing can be written as ActiveX; the shape is exported as before (form control or picture). */
+    bool                IsValid() const { return maBinData.hasElements(); }
+
+    const OUString&     GetName() const { return maName; }
+    void                SetName( const OUString& rName ) { maName = rName; }
+    void                setShapeId( sal_Int32 nShapeId ) { mnShapeId = nShapeId; }
+
+    /** The hidden DrawingML twin, into xl/drawings/drawingN.xml. */
+    virtual void        SaveXml( XclExpXmlStream& rStrm ) override;
+    /** The v:shape ObjectType="Pict", into xl/drawings/vmlDrawingN.vml. */
+    void                SaveVml( XclExpXmlStream& rStrm );
+    /** Writes xl/activeX/activeXN.xml and .bin, and this control's mc:AlternateContent (x14 Choice
+        + Fallback) into the sheet's <controls>. */
+    void                SaveSheetXml( XclExpXmlStream& rStrm );
+    /** The bare <control/>, for a Fallback (written by SaveSheetXml; again in the outer Fallback
+        of a sheet that also has form controls). Valid after SaveSheetXml. */
+    void                SaveFallbackXml( XclExpXmlStream& rStrm ) const;
+
+private:
+    sal_Int32           GetPartId( XclExpXmlStream& rStrm );
+    const OUString&     GetPreviewTarget( XclExpXmlStream& rStrm );
+    void                WriteAnchor( const sax_fastparser::FSHelperPtr& rTarget, bool bDrawingML ) const;
+
+private:
+    css::uno::Reference< css::drawing::XShape > mxShape;
+    OUString            maName;             /// Control name: <control name>, VML id, VBA event binding.
+    OUString            maClassId;          /// "{CLSID}" of maBinData.
+    cpo::uno::Sequence< sal_Int8 > maBinData;   /// The persistStreamInit binary.
+    cpo::uno::Sequence< sal_Int8 > maPreview;   /// The loaded preview, only while maBinData is the loaded binary.
+    OUString            maPreviewExt;       /// File extension of maPreview, lower case.
+    OUString            maPreviewTarget;    /// "../media/activeXN.emf" once written.
+    OUString            maControlRelId;     /// Sheet relation to activeXN.xml once written.
+    sal_Int32           mnShapeId;          /// VML o:spid / <control shapeId> / cNvPr id.
+    sal_Int32           mnPartId;           /// N of activeXN.xml/.bin and of the preview.
+    bool                mbPrint;            /// Printable.
 };
 
 //#else

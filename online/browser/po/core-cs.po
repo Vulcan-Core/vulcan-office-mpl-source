@@ -41,8 +41,8 @@ msgid ""
 "Technology, provided by Collabora Productivity. See "
 "https://collaboraoffice.com"
 msgstr ""
-"Collabora Office, kancelářský balík založený na technologii LibreOffice, "
-"poskytovaný společností Collabora Productivity. Viz "
+"Vulcan Office, kancelářský balík založený na technologii Vulcan Office, "
+"poskytovaný společností Vulcan AI. Viz "
 "https://collaboraoffice.com"
 
 #. 4rBwc
@@ -167,7 +167,7 @@ msgid ""
 msgstr ""
 "Další informace naleznete na domovské stránce produktu ${PRODUCTNAME} na "
 "adrese <a "
-"href=\"https://collaboraoffice.com\">https://CollaboraOffice.com/</a>."
+"href=\"https://collaboraoffice.com\">https://Vulcan OfficeOffice.com/</a>."
 
 #. SbQew
 #: chart2/inc/strings.hrc:51

@@ -158,10 +158,16 @@ function setupOverflowMenu(
 		return isCollapsed;
 	};
 
-	(overflowGroupContainer as OverflowGroupContainer).foldGroup = () => {
+	(overflowGroupContainer as OverflowGroupContainer).closeMenu = () => {
+		JSDialog.CloseDropdown(dropdownId);
+	};
+
+	(overflowGroupContainer as OverflowGroupContainer).foldGroup = (
+		keepMenu?: boolean,
+	) => {
 		if (isCollapsed) return;
 		app.console.debug('overflow manager: fold group: ' + id);
-		JSDialog.CloseDropdown(dropdownId);
+		if (!keepMenu) JSDialog.CloseDropdown(dropdownId);
 
 		overflowMenuHandler(true);
 		overflowGroupContainer.classList.remove(
@@ -171,11 +177,13 @@ function setupOverflowMenu(
 		isCollapsed = true;
 	};
 
-	(overflowGroupContainer as OverflowGroupContainer).unfoldGroup = () => {
+	(overflowGroupContainer as OverflowGroupContainer).unfoldGroup = (
+		keepMenu?: boolean,
+	) => {
 		if (!isCollapsed) return;
 
 		app.console.debug('overflow manager: unfold group: ' + id);
-		JSDialog.CloseDropdown(dropdownId);
+		if (!keepMenu) JSDialog.CloseDropdown(dropdownId);
 
 		overflowMenuButton.style.display = 'none';
 		overflowGroupContainer.classList.add(
@@ -428,7 +436,15 @@ JSDialog.OverflowGroup = function (
 			{
 				type: 'menubutton',
 				id: id,
-				text: data.name ? data.name : firstItem ? (firstItem as any).text : '',
+				// A group may name its fold button (a tooltip when unlabelled)
+				// instead of borrowing its first item's name.
+				text: data.name
+					? data.name
+					: data.text
+						? data.text
+						: firstItem
+							? (firstItem as any).text
+							: '',
 				icon: data.icon ? data.icon : getToolitemIcon(firstItem),
 				command: firstItem ? (firstItem as any).command : '',
 				noLabel: !data.name,

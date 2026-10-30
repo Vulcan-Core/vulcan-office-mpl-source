@@ -5,11 +5,14 @@ var mobileHelper = require('../../common/mobile_helper');
 var writerHelper = require('../../common/writer_helper');
 var repairHelper = require('../../common/repair_document_helper');
 
+// NOTE: phone saving is HOST-DRIVEN. Save, Save As and version history were
+// removed from the phone kebab deliberately (Google routes all three to a
+// computer); the host posts Action_Save and coolwsd autosaves. There is
+// therefore no 'Save' case below any more -- do not re-add one against
+// File > Save, it no longer exists in mobiletext.
 describe.skip(['tagmobile'], 'Trigger hamburger menu options.', function() {
-	var newFilePath;
-
 	beforeEach(function() {
-		newFilePath = helper.setupAndLoadDocument('writer/hamburger_menu.odt');
+		helper.setupAndLoadDocument('writer/hamburger_menu.odt');
 
 		mobileHelper.enableEditingMobile();
 	});
@@ -36,22 +39,6 @@ describe.skip(['tagmobile'], 'Trigger hamburger menu options.', function() {
 		cy.cGet('#mobile-wizard-back').click();
 		cy.cGet('#mobile-wizard').should('not.be.visible');
 	}
-
-	it('Save', function() {
-		// Change the document content and save it
-		writerHelper.selectAllTextOfDoc();
-		cy.wait(1000);
-		helper.typeIntoDocument('new');
-		writerHelper.selectAllTextOfDoc();
-		cy.wait(1000);
-		helper.expectTextForClipboard('new');
-		mobileHelper.selectHamburgerMenuItem(['File', 'Save']);
-		// Reopen the document and check content.
-		helper.reloadDocument(newFilePath);
-		mobileHelper.enableEditingMobile();
-		writerHelper.selectAllTextOfDoc();
-		helper.expectTextForClipboard('new');
-	});
 
 	it('Print', function() {
 		// A new window should be opened with the PDF.

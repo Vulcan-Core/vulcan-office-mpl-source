@@ -50,6 +50,55 @@ var b64d = function(base64Str) {
 	return new TextDecoder().decode(u8Array);
 }
 
+// The chrome file-input parking — single source of truth.
+//
+// cool.html.m4 ships a row of <input type="file"> click proxies
+// (#insertgraphic and friends) inside the closed #content-keeper dialog; the
+// load handler below moves them out to be direct <body> children. They are
+// programmatic click targets, never UI — nothing may ever paint them. Two
+// belts exist and both have failed or can fail:
+//   - the cool.css id-list drifts: when #insertgraphiccamera shipped without
+//     its id in the list, phones painted a raw native "Choose File / No file
+//     chosen" strip across the document (prod 8/24: tanner-05 calc,
+//     andrew-02 writer);
+//   - the inline style="position: fixed; top: -100em;" attributes added to
+//     stop that drift are dropped WHOLESALE at runtime: coolwsd serves
+//     cool.html with Content-Security-Policy style-src 'self'
+//     (wsd/FileServer.cpp CSP assembly), and without
+//     'unsafe-inline'/'unsafe-hashes' the browser refuses to APPLY any style
+//     attribute — CSP's inline check (CSP3 §8.3 "Should element's inline
+//     behavior be blocked?") runs when the attribute text is parsed.
+//     Verified live 8/24 (CF-1): computed style from the attributes was
+//     empty on every build served under this CSP.
+//
+// So the parking that actually holds is THIS: a boot-time CSSOM write.
+// el.style.setProperty() mutates the element's style declaration block
+// directly, never re-parses attribute text, and neither CSP3 nor CSSOM
+// defines an enforcement hook on it — no CSP directive can drop it. Priority
+// 'important' so no stylesheet rule (even an !important one) can
+// out-cascade it. Off-screen rather than display:none to keep the stock
+// picker behaviour on .click(). Contract-tested against the real m4 and
+// this real code in mocha_tests/ChromeFileInputsParked.test.ts.
+var VULCAN_FILE_INPUT_PARKING = [
+	['position', 'fixed'],
+	['top', '-100em'],
+];
+
+function vulcanParkChromeFileInputs(container) {
+	if (!container)
+		return 0;
+	var inputs = container.querySelectorAll('input[type="file"]');
+	for (var i = 0; i < inputs.length; i++) {
+		for (var j = 0; j < VULCAN_FILE_INPUT_PARKING.length; j++) {
+			inputs[i].style.setProperty(
+				VULCAN_FILE_INPUT_PARKING[j][0],
+				VULCAN_FILE_INPUT_PARKING[j][1],
+				'important');
+		}
+	}
+	return inputs.length;
+}
+
 // Put these into a class to separate them better.
 class BrowserProperties {
 	static initiateBrowserProperties(global) {
@@ -174,6 +223,19 @@ class BrowserProperties {
 			lang: navigatorLang
 		};
 
+		// Vulcan Office: the resolved form-factor override. initializeViewMode()
+		// sets it once, pre-paint, from the host's EXPLICIT vulcanChrome
+		// declaration reconciled against a physical measurement (screen +
+		// touch points — capabilities, never the UA). The mode predicates
+		// below fold it in so the whole form-factor decision — chrome
+		// classes, device CSS, mobile command set, input grammar, the form
+		// factor sent to core — moves as ONE. Stamping a chrome class while
+		// these predicates keep answering from the UA is how half-applied
+		// chimera layouts happen ("explicit beats UA sniffing", see the
+		// contract comment in initializeViewMode). null = no declaration:
+		// the stock UA sniff below stands untouched.
+		global.vulcanFormFactorOverride = null;
+
 		global.mode = {
 			isChromebook: function() {
 				return chromebook;
@@ -185,6 +247,9 @@ class BrowserProperties {
 
 				if (global.mode.isChromebook())
 					return false;
+
+				if (global.vulcanFormFactorOverride)
+					return global.vulcanFormFactorOverride === 'mobile';
 
 				if (global.L.Browser.mobile && global.L.Browser.cypressTest) {
 					return true;
@@ -200,6 +265,11 @@ class BrowserProperties {
 				if (global.mode.isChromebook())
 					return false;
 
+				// A resolved declaration is never a tablet: 'mobile' is the
+				// phone chrome, 'desktop' the desktop layout wholesale.
+				if (global.vulcanFormFactorOverride)
+					return false;
+
 				return global.L.Browser.mobile && !global.mode.isSmallScreenDevice();
 			},
 			isCODesktop: function() {
@@ -211,6 +281,9 @@ class BrowserProperties {
 
 				if (global.mode.isChromebook())
 					return true;
+
+				if (global.vulcanFormFactorOverride)
+					return global.vulcanFormFactorOverride === 'desktop';
 
 				return !global.L.Browser.mobile;
 			},
@@ -235,9 +308,6 @@ class InitializerBase {
 		this.uriPrefix = document.getElementById('init-uri-prefix').value;
 		this.brandingUriPrefix = this.uriPrefix;
 
-		window.welcomeUrl = document.getElementById("init-welcome-url") ? document.getElementById("init-welcome-url").value: "";
-		window.feedbackUrl = document.getElementById("init-feedback-url") ? document.getElementById("init-feedback-url").value: "";
-		window.buyProductUrl = document.getElementById("init-buy-product-url") ? document.getElementById("init-buy-product-url").value: "";
 		let initCSSVars = document.getElementById("init-css-vars") ? document.getElementById("init-css-vars").value: "";
 
 		if (initCSSVars) {
@@ -265,7 +335,7 @@ class InitializerBase {
 		window.coolwsdVersion = "";
 		window.enableWelcomeMessage = false;
 		window.autoShowWelcome = false;
-		window.autoShowFeedback = true;
+		window.autoShowFeedback = false;
 		window.allowUpdateNotification = false;
 		window.useIntegrationTheme = false;
 		window.enableMacrosExecution = false;
@@ -308,10 +378,40 @@ class InitializerBase {
 			window.fullyLoadedAndReady = true;
 
 			const contentKeeper = document.getElementById('content-keeper');
+			// Park the file-input click proxies via the CSSOM while they are
+			// still inside this closed (unrendered) dialog. Same synchronous
+			// task as the move below, so there is no frame in which an
+			// unparked input is a painted <body> child. Their inline style
+			// attributes are CSP-inert under the served style-src 'self' and
+			// the cool.css id-list can drift — this write is the parking
+			// that holds (see vulcanParkChromeFileInputs above).
+			vulcanParkChromeFileInputs(contentKeeper);
 			while (contentKeeper.children.length > 0)
 				document.body.insertBefore(contentKeeper.children[contentKeeper.children.length - 1], document.body.firstChild);
 
 			document.getElementById('content-keeper').remove();
+
+			// Vulcan Office: merge the menu row and the formatting toolbar row into a
+			// single floating chrome container so they read as ONE glass bar (styled
+			// in css/vulcan-theme.css §4). Both are plain flex-column siblings of
+			// <body> at this point; wrapping them keeps normal flow (the wrapper is a
+			// single flex item and #main-document-content still fills the rest).
+			// DESKTOP-ONLY: mobile/tablet keep the stock layout — its hamburger
+			// header and bottom toolbar assume these bars stay direct children of
+			// <body> (re-parenting them stacks the mobile header into overlapping
+			// text). Keyed off the marker initializeViewMode stamps at boot.
+			try {
+				const desktopChrome = document.documentElement.classList.contains('vulcan-desktop-chrome');
+				const mainNav = document.querySelector('body > nav.main-nav');
+				const toolbarWrapper = document.getElementById('toolbar-wrapper');
+				if (desktopChrome && mainNav && toolbarWrapper && mainNav.parentNode === document.body && toolbarWrapper.parentNode === document.body) {
+					const chrome = document.createElement('div');
+					chrome.id = 'vulcan-topchrome';
+					document.body.insertBefore(chrome, mainNav);
+					chrome.appendChild(mainNav);
+					chrome.appendChild(toolbarWrapper);
+				}
+			} catch (e) { /* non-fatal: fall back to two separate bars */ }
 		}, false);
 
 		let productName = document.getElementById("init-product-branding-name").value;
@@ -396,6 +496,148 @@ class InitializerBase {
 
 	initializeViewMode() {
 		const darkTheme = window.coolParams.get('darkTheme');
+		// Vulcan Office: stamp the theme on <html> at boot. vulcan-theme.css keys
+		// every token (chrome glass, color-scheme) off [data-theme]; the runtime
+		// paths that set it (UIManager.loadDark/LightMode via Vulcan_SetTheme /
+		// Host_ThemeChanged) only run after the document loads AND the host's
+		// fork handshake completes, so without this the chrome first paints with
+		// light tokens — and color-scheme mismatches a dark embedder, which makes
+		// Chromium paint an opaque backplate behind the transparent workspace.
+		document.documentElement.setAttribute(
+			'data-theme', darkTheme === 'true' ? 'dark' : 'light');
+		// Vulcan Office: the floating glass chrome (vulcan-theme.css §3-§12 and
+		// the #vulcan-topchrome wrap below) is DESKTOP-ONLY. Mobile and tablet
+		// keep Collabora's stock layout untouched: the mobile experience bans
+		// backdrop-filter (force-disabled app-side for perf; surfaces must be
+		// opaque) and its hamburger + bottom-toolbar layout breaks if the bars
+		// are re-parented.
+		//
+		// Form-factor contract (docs/mobile-redesign/04 Part 1): the embedding
+		// app knows which shell it renders and declares it via the
+		// `vulcanChrome=desktop|stock` URL param — explicit beats UA sniffing
+		// (iPadOS WKWebView defaults to a desktop "Macintosh" UA, and Safari's
+		// sticky "Request Desktop Website" swaps the UA AND removes
+		// window.orientation, so isDesktop() alone can lie on touch devices).
+		// Without the param (other embedders), fall back to
+		// belt-and-suspenders feature detection evaluated in THIS frame — the
+		// iframe's own viewport is narrow on any phone regardless of UA games —
+		// and default to STOCK chrome when uncertain: fail toward the layout
+		// that never breaks. Runs before first paint (same boot path as the
+		// data-theme stamp), so CSS keys off explicit markers instead of the
+		// stock .mobile classes that only appear later at map init.
+		//
+		// An explicit declaration is RECONCILED, not pasted onto whatever
+		// layout the UA sniff builds: it resolves window.
+		// vulcanFormFactorOverride, which every mode predicate folds in, so
+		// the chrome classes and the layout machinery cannot disagree.
+		// Explicit beats sniffing in BOTH directions; the single exception
+		// is a physical veto — 'desktop' declared on a frame that measures a
+		// phone — and that veto is LOUD (console + telemetry), never silent.
+		let desktopChrome = false;
+		// The physical phone measurement (capabilities, never the UA — the
+		// UA is exactly the signal this contract documents as a liar): the
+		// platform's phone line, screen short edge < 700 CSS px — every
+		// phone, no iPad — on real touch hardware. Same constant as the
+		// host's isPhoneScreen (in the host application)
+		// so the fork never overrules a declaration the
+		// current host makes deliberately.
+		let phoneMeasured = false;
+		try {
+			phoneMeasured =
+				Math.min(window.screen.width, window.screen.height) < 700
+				&& (navigator.maxTouchPoints || 0) > 1;
+		} catch (e) {
+			phoneMeasured = false;
+		}
+		const vulcanChrome = window.coolParams.get('vulcanChrome');
+		if (vulcanChrome === 'desktop') {
+			if (phoneMeasured) {
+				// The one veto: desktop chrome on a physical phone is
+				// unusable, so the declaration is refused and the frame
+				// resolves to full phone chrome. Loud on three channels —
+				// the postMessage is best-effort (the host drops Vulcan_*
+				// messages that arrive before Vulcan_Ready), so the DOM
+				// marker and the ordinary post-load Vulcan_Posture report
+				// (which reads the stamped classes) carry the fact for
+				// anything that looks later.
+				window.vulcanFormFactorOverride = 'mobile';
+				try {
+					console.warn('vulcanChrome=desktop refused: this frame measures a phone ('
+						+ window.screen.width + 'x' + window.screen.height + ' CSS px, '
+						+ navigator.maxTouchPoints + ' touch points); resolving to phone chrome');
+					document.documentElement.setAttribute(
+						'data-vulcan-chrome-veto', 'desktop-on-phone');
+					if (window.parent && window.parent !== window) {
+						window.parent.postMessage(JSON.stringify({
+							'MessageId': 'Vulcan_Chrome_Veto',
+							'SendTime': Date.now(),
+							'Values': {
+								'Declared': 'desktop',
+								'Resolved': 'mobile',
+								'ScreenWidth': window.screen.width,
+								'ScreenHeight': window.screen.height,
+								'MaxTouchPoints': navigator.maxTouchPoints
+							}
+						}), window.postMessageOriginExt || '*');
+					}
+				} catch (e) { /* loudness is best-effort; the veto is not */ }
+			} else {
+				desktopChrome = true;
+				// Honored WHOLESALE: the mode predicates now answer desktop
+				// (isTablet() false), so the window-load re-parent above
+				// never runs over a tablet layout the UA sniff built — the
+				// half-applied state the DESKTOP-ONLY comment forbids. A
+				// desktop-declared mobile-UA tablet gets exactly what a
+				// desktop-UA iPad gets today.
+				window.vulcanFormFactorOverride = 'desktop';
+			}
+		} else if (vulcanChrome === 'stock') {
+			desktopChrome = false;
+			// A measured phone declared stock gets FULL phone chrome — CSS,
+			// mobile commands, bars, input grammar, not just the class —
+			// even when its UA reads desktop-ish (Safari's sticky "Request
+			// Desktop Website", an unusual WebView UA). Not measured a
+			// phone: the UA-resolved stock layout (desktop or tablet)
+			// stands — the documented three-state contract.
+			if (phoneMeasured)
+				window.vulcanFormFactorOverride = 'mobile';
+		} else {
+			try {
+				desktopChrome = !window.L.Browser.mobile
+					&& window.matchMedia('(pointer: fine)').matches
+					&& window.matchMedia('(min-width: 768px)').matches
+					&& (navigator.maxTouchPoints || 0) <= 1;
+			} catch (e) {
+				desktopChrome = false; // uncertain → stock
+			}
+		}
+		if (desktopChrome)
+			document.documentElement.classList.add('vulcan-desktop-chrome');
+
+		// Google-style phone chrome (docs/mobile-redesign/01, Phase 1): phones
+		// only — tablets keep the untouched stock UI this phase. Same pre-paint
+		// marker pattern; all phone styling in vulcan-theme.css §13 is scoped
+		// to this class (opaque surfaces, no backdrop-filter — hard mobile
+		// perf rules).
+		// Combined: the Impress lane exported this decision as a global so its
+		// phone code can branch on it without recomputing the media queries;
+		// the Calc lane kept the braced block because it stamps a SECOND class
+		// here. Taking the Impress side verbatim would have dropped the brace
+		// and left `vulcan-topbar-unhosted` outside the condition.
+		window.vulcanPhoneChrome =
+			!desktopChrome && window.mode.isSmallScreenDevice();
+		if (window.vulcanPhoneChrome) {
+			document.documentElement.classList.add('vulcan-mobile-chrome');
+			// SPEC-one-topbar: #toolbar-row collapses to zero only once the
+			// embedding host has said it is drawing our controls in its own
+			// header (Vulcan_TopBarHosted -> VulcanTopBar.setHosted). Stamped
+			// HERE, in the same statement as the chrome class and before
+			// paint, so there is no frame in which phone chrome is on and the
+			// fallback is not -- the failure mode that rule guards against is
+			// a phone with a host bar and no toolbar, which is worse than the
+			// two bars it replaces.
+			document.documentElement.classList.add('vulcan-topbar-unhosted');
+		}
 		if (window.mode.isCODesktop()) {
 			// The desktop app passes the saved (or system) dark-mode choice here.
 			// prefs isn't constructed yet at this point in init, so write
@@ -405,7 +647,16 @@ class InitializerBase {
 				catch (e) { /* localStorage may be unavailable */ }
 			}
 		} else if (darkTheme) {
-			window.uiDefaults = { 'darkTheme': 'true' };
+			// MERGE, never replace: the constructor has already parsed the
+			// server-translated ui_defaults JSON into window.uiDefaults
+			// (uiMode + per-family ShowRuler/ShowSidebar/ShowStatusbar). The
+			// darkTheme param is the same theme fact on a second carrier; a
+			// wholesale assign here destroyed every other parsed default, so
+			// with SavedUIState=false prefs.get() fell through to the saved
+			// UI state the integrator suppressed — dark sessions only.
+			if (!window.uiDefaults)
+				window.uiDefaults = {};
+			window.uiDefaults['darkTheme'] = 'true';
 		}
 	}
 
@@ -435,9 +686,10 @@ class BrowserInitializer extends InitializerBase {
 		window.postMessageOriginExt = element.dataset.postMessageOriginExt;
 		window.coolLogging = element.dataset.coolLogging;
 		window.coolwsdVersion = element.dataset.coolwsdVersion;
-		window.enableWelcomeMessage = element.dataset.enableWelcomeMessage.toLowerCase().trim() === "true";
-		window.autoShowWelcome = element.dataset.autoShowWelcome.toLowerCase().trim() === "true";
-		window.autoShowFeedback = element.dataset.autoShowFeedback.toLowerCase().trim() === "true";
+		// Vulcan Office: the welcome/feedback phone-home surfaces are removed.
+		window.enableWelcomeMessage = false;
+		window.autoShowWelcome = false;
+		window.autoShowFeedback = false;
 		window.allowUpdateNotification = element.dataset.allowUpdateNotification.toLowerCase().trim() === "true";
 		window.userInterfaceMode = element.dataset.userInterfaceMode;
 		window.useIntegrationTheme = element.dataset.useIntegrationTheme.toLowerCase().trim() === "true";
@@ -731,33 +983,6 @@ function getInitializerClass() {
 	}
 }
 
-function showWelcomeSVG() {
-	const loaderDiv = document.createElement('div');
-	loaderDiv.id = 'welcome-loader';
-	loaderDiv.style.cssText = `
-        position: fixed;
-        top: 0;
-        left: 0;
-        width: 100vw;
-        height: 100vh;
-        background-color: #faf8fc;
-        z-index: 9999999999;
-        opacity: 1;
-        transition: opacity 0.8s ease-out;
-    `;
-
-	const img = document.createElement('img');
-	img.src = 'welcome/welcome.svg';
-	img.alt = 'Welcome';
-	img.style.cssText = `
-        width: 100%;
-        height: 100%;
-        object-fit: fill;
-    `;
-
-	loaderDiv.appendChild(img);
-	document.body.insertBefore(loaderDiv, document.body.firstChild);
-}
 
 (function (global) {
 	const initializer = getInitializerClass();
@@ -1137,6 +1362,11 @@ function showWelcomeSVG() {
 		},
 	};
 
+	global.isAccessibilityStateEffective = function () {
+		return global.vulcanPhoneChrome === true ||
+			global.prefs.getBoolean('accessibilityState');
+	};
+
 	global.getAccessibilityState = function () {
 		var isCalcTest =
 			global.docURL.includes('data/desktop/calc/') ||
@@ -1151,7 +1381,7 @@ function showWelcomeSVG() {
 		if (L.Browser.cypressTest)
 			global.prefs.set('accessibilityState', global.enableAccessibility);
 
-		return global.prefs.getBoolean('accessibilityState');
+		return global.isAccessibilityStateEffective();
 	};
 
 	// Renamed in 24.04.4.1
@@ -1369,6 +1599,159 @@ function showWelcomeSVG() {
 	document.addEventListener('mouseleave', registerGuessEmulatedFromTouch, { capture: true });
 	document.addEventListener('mouseover', registerGuessEmulatedFromTouch, { capture: true });
 	document.addEventListener('mouseout', registerGuessEmulatedFromTouch, { capture: true });
+
+	// ── Fork touch beacon ────────────────────────────────────────────────
+	//
+	// A touch that starts inside this iframe is dispatched in THIS document
+	// only: the embedding host cannot see it, so a pinch with one finger on
+	// host chrome and one on the canvas reads to the host as a lone host
+	// finger — exactly the shape its edge-swipe-to-go-back arms on. The
+	// host's arbitration (MobileLayout shouldArmTakeoverBackSwipe) can only
+	// count HOST-side fingers; this beacon is the other half: post the
+	// ACTIVE TOUCH COUNT on every transition (0→1→2…→0) so the host can
+	// refuse to arm — and disarm mid-gesture — while a finger is down here.
+	//
+	// FAILURE POSTURE: toward ARMING. A beacon wedged at a positive count
+	// would turn the host's back-swipe off forever, so the host trusts a
+	// nonzero report only within a ~1s staleness window and this side
+	// re-posts the current count every 400ms while it is nonzero (2.5 beats
+	// inside that window). Count 0 posts once — it is the release edge, and
+	// silence already means "no fork touches". If this frame dies
+	// mid-touch, the heartbeat dies with it and the host re-arms on
+	// staleness alone.
+	//
+	// SKEW: old fork + new host ⇒ no beacon ⇒ the host behaves exactly as
+	// today. New fork + old host ⇒ an unknown MessageId the host ignores.
+	// Standalone (no parent) posts nothing and starts no timers.
+	//
+	// Same best-effort carrier as Vulcan_Chrome_Veto above — raw
+	// window.parent.postMessage — deliberately NOT the map's postMessage
+	// rail: touches exist before any map, and arbitration must not wait for
+	// a document to load. Capture-phase on the document so canvas sections
+	// and libraries that stopPropagation cannot starve the count; passive
+	// so it can never add gesture latency.
+	//
+	// Contract pinned in mocha_tests/ForkTouchBeacon.test.ts, which extracts
+	// this section by its banner comments — keep them.
+	var vulcanForkTouchCount = 0;
+	var vulcanForkTouchHeartbeat = null;
+	var VULCAN_FORK_TOUCH_HEARTBEAT_MS = 400;
+
+	function vulcanForkTouchEmbedded() {
+		try {
+			return !!window.parent && window.parent !== window;
+		} catch (e) {
+			return false;
+		}
+	}
+
+	function vulcanPostForkTouches(count) {
+		try {
+			window.parent.postMessage(JSON.stringify({
+				'MessageId': 'Vulcan_ForkTouches',
+				'SendTime': Date.now(),
+				'Values': { 'Count': count }
+			}), window.postMessageOriginExt || '*');
+		} catch (e) { /* best-effort: the host fails toward arming */ }
+	}
+
+	function vulcanForkTouchTransition(count) {
+		if (!vulcanForkTouchEmbedded())
+			return;
+		if (count === vulcanForkTouchCount)
+			return;
+		vulcanForkTouchCount = count;
+		vulcanPostForkTouches(count);
+		if (count > 0 && vulcanForkTouchHeartbeat === null) {
+			vulcanForkTouchHeartbeat = setInterval(function() {
+				vulcanPostForkTouches(vulcanForkTouchCount);
+			}, VULCAN_FORK_TOUCH_HEARTBEAT_MS);
+		} else if (count === 0 && vulcanForkTouchHeartbeat !== null) {
+			clearInterval(vulcanForkTouchHeartbeat);
+			vulcanForkTouchHeartbeat = null;
+		}
+	}
+
+	function vulcanForkTouchEvent(e) {
+		// touchend/touchcancel report the REMAINING touches — the event's
+		// own list is the authority, never a manual increment.
+		vulcanForkTouchTransition(e && e.touches ? e.touches.length : 0);
+	}
+
+	document.addEventListener('touchstart', vulcanForkTouchEvent, { capture: true, passive: true });
+	document.addEventListener('touchend', vulcanForkTouchEvent, { capture: true, passive: true });
+	document.addEventListener('touchcancel', vulcanForkTouchEvent, { capture: true, passive: true });
+	// A system takeover (app switcher, notification shade) can eat the
+	// touchend; report the release so the host is not left waiting out its
+	// staleness window on every backgrounding.
+	document.addEventListener('visibilitychange', function() {
+		if (document.visibilityState === 'hidden')
+			vulcanForkTouchTransition(0);
+	});
+	// ── end fork touch beacon ────────────────────────────────────────────
+
+	// ── Fork frame gesture report ────────────────────────────────────────
+	// The host hands back a focus move into this frame made just after the
+	// document is ready, because the fork's own load-time grabs land then
+	// too. It cannot see a click in here, so tell it, from the window's
+	// capture phase, ahead of this frame's own handlers. The host waits for
+	// this a little after its blur: a browser that runs the frame in its
+	// own process moves focus into it before the frame sees the pointer.
+	//
+	// A mouse button moves focus as it goes down. A finger or a pen moves it
+	// only by a tap, so it is reported as it lifts, and only within the
+	// fork's tap slop (MouseControl.tapSlop) of where it went down. A swipe
+	// or a pinch moves no focus, and a report of one would excuse the next
+	// grab or Tab: the keys typed in the host would land in the document.
+	//
+	// Contract pinned in mocha_tests/ForkFrameGesture.test.ts, which extracts
+	// the touch beacon above through the end of this section by their banner
+	// comments — keep them.
+	var VULCAN_FRAME_TAP_SLOP_PX = 10;
+	var vulcanFrameTapStarts = {};
+
+	function vulcanFrameTapMoved(e, start) {
+		return Math.abs(e.clientX - start.x) > VULCAN_FRAME_TAP_SLOP_PX ||
+			Math.abs(e.clientY - start.y) > VULCAN_FRAME_TAP_SLOP_PX;
+	}
+
+	function vulcanPostFrameGesture() {
+		if (!vulcanForkTouchEmbedded())
+			return;
+		try {
+			window.parent.postMessage(JSON.stringify({
+				'MessageId': 'Vulcan_FrameGesture',
+				'SendTime': Date.now()
+			}), window.postMessageOriginExt || '*');
+		} catch (e) { /* best-effort: a host that never hears it reverts the move as before */ }
+	}
+
+	// A finger that lands while another is down makes the gesture a pinch,
+	// and no finger of a pinch is a tap. The browser makes a finger primary
+	// only when it lands with no other down, so a tap after the pinch counts.
+	window.addEventListener('pointerdown', function(e) {
+		if (e.pointerType !== 'touch' && e.pointerType !== 'pen')
+			vulcanPostFrameGesture();
+		else if (e.isPrimary)
+			vulcanFrameTapStarts[e.pointerId] = { x: e.clientX, y: e.clientY };
+		else
+			vulcanFrameTapStarts = {};
+	}, { capture: true, passive: true });
+	window.addEventListener('pointermove', function(e) {
+		var start = vulcanFrameTapStarts[e.pointerId];
+		if (start && vulcanFrameTapMoved(e, start))
+			delete vulcanFrameTapStarts[e.pointerId];
+	}, { capture: true, passive: true });
+	window.addEventListener('pointerup', function(e) {
+		var start = vulcanFrameTapStarts[e.pointerId];
+		delete vulcanFrameTapStarts[e.pointerId];
+		if (start && !vulcanFrameTapMoved(e, start))
+			vulcanPostFrameGesture();
+	}, { capture: true, passive: true });
+	window.addEventListener('pointercancel', function(e) {
+		delete vulcanFrameTapStarts[e.pointerId];
+	}, { capture: true, passive: true });
+	// ── end fork frame gesture report ────────────────────────────────────
 
 	global.deviceFormFactor = global.mode.getDeviceFormFactor();
 
@@ -2226,6 +2609,7 @@ function showWelcomeSVG() {
 				var now2 = Date.now();
 				global.socket.send('coolclient ' + ProtocolVersionNumber + ' ' + ((now0 + now2) / 2) + ' ' + now1);
 
+				msg += ' vulcanPhoneChrome=' + (global.vulcanPhoneChrome === true);
 				msg += ' accessibilityState=' + global.getAccessibilityState();
 
 				if (global.ThisIsAMobileApp) {
@@ -2257,11 +2641,6 @@ function showWelcomeSVG() {
 
 				msg += ' timezone=' + Intl.DateTimeFormat().resolvedOptions().timeZone;
 				msg += ' clientvisiblearea=' + window.makeClientVisibleArea();
-
-				if (global.coolParams.get('welcome') === 'true') {
-					msg += ' batch=true';
-					showWelcomeSVG();
-				}
 
 				global.socket.send(msg);
 			}
@@ -2725,14 +3104,482 @@ function showWelcomeSVG() {
 		global.app.socket.connect(ws);
 	};
 
+	// ── Soft-keyboard geometry ───────────────────────────────────────────────
+	//
+	// <body> is sized to the space the keyboard leaves. That single write is
+	// what makes the bottom-docked phone chrome — formula bar, operator strip
+	// — ride above the keyboard as ordinary in-flow rows instead of needing
+	// positioned overlays (vulcan-theme.css §13-CALC.1).
+	//
+	// Two sources feed it, in priority order:
+	//
+	//   1. Vulcan_HostKeyboard, from the host application (Map.WOPI.js). Inside
+	//      a cross-origin iframe `visualViewport` describes THIS FRAME's box,
+	//      so it never learns that the platform laid a keyboard over the
+	//      bottom of the page — only the embedder can know that. The embedder
+	//      also knows it EARLY: it starts the lift at focusin rather than
+	//      waiting for the native show event, which is the difference between
+	//      the docked row moving *with* the keyboard and moving after it.
+	//   2. `visualViewport`, for every other embedder. Standalone — and any
+	//      host that never sends the message — keeps exactly the behaviour it
+	//      had: the host height stays 0 and the arithmetic below collapses to
+	//      the stock `body.height = visualViewport.height`.
+	//
+	// The two must not double-count. An embedder that ALSO shrinks the iframe
+	// element has already given this frame part (or all) of the keyboard back
+	// through a resize, and subtracting the full height again would fold the
+	// editor in half. So the host height is applied only as the RESIDUAL over
+	// whatever the frame's own viewport has already surrendered against its
+	// keyboard-closed resting height.
+	var vulcanHostKeyboard = { open: false, height: 0, resizes: false };
+	var vulcanRestViewportHeight = 0;
+	var vulcanKeyboardTransitionTimer = null;
+
+	// The host's own keyboard curve (globals.css `--ease-keyboard`): the
+	// standard bezier fit for UIViewAnimationCurve 7, the private curve iOS
+	// actually reports on keyboard notifications. It has to be the same value
+	// on both sides of the iframe or the two edges visibly diverge mid-flight.
+	// The duration is never guessed here — it rides on each message.
+	var VULCAN_KEYBOARD_EASE = 'cubic-bezier(0.38, 0.70, 0.125, 1.00)';
+
+	function vulcanIsPhoneChrome() {
+		return document.documentElement.classList.contains('vulcan-mobile-chrome')
+			&& !!window.mode && window.mode.isSmallScreenDevice();
+	}
+
+	// `data-doctype` is stamped late (Control.UIManager.initializeSpecializedUI),
+	// so this reads false for the whole pre-load window. That is the safe
+	// default at every call site here, exactly as the positive-match rule in
+	// handleViewportChange below requires: false takes the path this file has
+	// always taken.
+	function vulcanIsPhoneImpress() {
+		return vulcanIsPhoneChrome()
+			&& document.body.getAttribute('data-doctype') === 'presentation';
+	}
+
+	/*
+	 * How much of THIS FRAME the keyboard covers that the frame has not itself
+	 * already given up, in CSS px. Zero on every surface that never sends
+	 * Vulcan_HostKeyboard, and zero whenever the embedder shrank the iframe by
+	 * at least the keyboard's height -- which is the whole point of measuring
+	 * it as a residual rather than trusting the reported height.
+	 *
+	 * Extracted so the body-height write and the phone-Impress custom property
+	 * below cannot drift apart: they are two consumers of ONE number.
+	 */
+	function vulcanKeyboardResidual() {
+		var viewportHeight = window.visualViewport
+			? window.visualViewport.height : window.innerHeight;
+		// Zero rest height means nothing has been measured yet; assume the
+		// frame has absorbed none of the keyboard rather than guess.
+		var absorbed = vulcanRestViewportHeight > 0
+			? Math.max(0, vulcanRestViewportHeight - viewportHeight) : 0;
+		return Math.max(0, vulcanHostKeyboard.height - absorbed);
+	}
+
+	function vulcanApplyBodyHeight() {
+		/*
+		 * 🔴 PHONE IMPRESS IS THE ONE SURFACE WHERE NOTHING ELSE KNOWS ABOUT
+		 * THE KEYBOARD, SO THIS PUBLISH IS THE WHOLE MECHANISM.
+		 *
+		 * Traced end to end on the shipping mobile surface, and every link is
+		 * a dead end except this one:
+		 *
+		 *   - Capacitor runs `Keyboard resize: 'none'`
+		 *     (the host's mobile shell config), so the WKWebView is never
+		 *     resized; the keyboard is drawn OVER it.
+		 *   - The host mounts the editor in a `fixed inset-0` takeover
+		 *     (MobileLayout.tsx), OUTSIDE the keyboard-reactive
+		 *     `.host-mobile-shell`, and the iframe is `flex-1` inside
+		 *     it. The iframe box therefore never changes size.
+		 *   - Inside a cross-origin iframe `visualViewport` describes THIS
+		 *     FRAME, so it never shrinks either, and `100svh` with it.
+		 *   - So no container resize ever reaches the map, and every automatic
+		 *     caret reveal in the tree hangs off exactly that resize:
+		 *     CanvasTileLayer._mobileChecksAfterResizeEvent,
+		 *     _nonDesktopChecksAfterResizeEvent, and VulcanCaretReveal.
+		 *   - TextInput.focus() passes `{preventScroll: true}` on purpose, so
+		 *     the UA's own focus reveal is suppressed as well.
+		 *
+		 * Net: you type below the midpoint of a slide and you type blind, with
+		 * nothing client-side or platform-side able to notice. `open`/`height`
+		 * from Vulcan_HostKeyboard is the only fact about the keyboard that
+		 * crosses the iframe boundary, and until now the branch below threw it
+		 * away for presentations.
+		 *
+		 * WHY A CUSTOM PROPERTY AND NOT THE BODY-HEIGHT WRITE. The write is
+		 * still barred here, for the reason the branch below states: <body> is
+		 * a flex column whose remaining space IS #document-container, so a
+		 * value that moves with browser chrome retimes the fit. A custom
+		 * property cannot feed anything back by itself -- it moves only when
+		 * the host says the keyboard moved -- and it leaves the body's inline
+		 * height at the empty string, which is the contract css/vulcan-theme.css
+		 * 13i.0 needs in order to own that height at all. 13i.0 subtracts this
+		 * inset from its own `100svh`, so the stylesheet stays the single owner
+		 * and the two files still describe one change.
+		 *
+		 * Published on BOTH paths, like --vulcan-visible-height beside it: it
+		 * is a fact about the frame, not a phone-Impress instruction, and only
+		 * 13i.0 consumes it. Nothing can double-count a property nobody else
+		 * reads.
+		 */
+		var residual = vulcanKeyboardResidual();
+		document.documentElement.style.setProperty(
+			'--vulcan-keyboard-inset', residual + 'px');
+
+		// Phone Impress intentionally keeps viewport height out of the document
+		// flex layout. The live value is published for overlays by the viewport
+		// handler below, but must not feed the canvas ResizeObserver/refit loop.
+		if (vulcanIsPhoneImpress()) {
+			document.body.style.height = '';
+			return;
+		}
+		document.body.style.height = vulcanBodyHeightTarget();
+	}
+
+	function vulcanBodyHeightTarget() {
+		var viewportHeight = window.visualViewport
+			? window.visualViewport.height : window.innerHeight;
+		return Math.max(0, viewportHeight - vulcanKeyboardResidual()) + 'px';
+	}
+
+	function vulcanApplyViewportHeight(height) {
+		if (!vulcanHostKeyboard.open)
+			vulcanRestViewportHeight = height;
+		vulcanApplyBodyHeight();
+	}
+
+	/**
+	 * Apply `Vulcan_HostKeyboard { open, height, durationMs, predicted }`.
+	 *
+	 * `predicted` marks a lift the host started before the platform confirmed
+	 * the keyboard. It is applied exactly like a confirmed one on purpose:
+	 * waiting for confirmation would put back the ~150ms this contract exists
+	 * to remove, and a guess that turns out wrong is retracted through this
+	 * same message, so the correction costs one retarget of an in-flight
+	 * transition. The flag is mirrored onto <html> next to the open state so
+	 * fork CSS and anyone debugging on a real device can read what the fork
+	 * believes, rather than re-deriving geometry it cannot see.
+	 */
+	function vulcanSetHostKeyboard(values) {
+		// Phone chrome only. Desktop and tablet keep the stock viewport-only
+		// behaviour — nothing is bottom-docked there to move.
+		if (!values || !vulcanIsPhoneChrome())
+			return;
+
+		var open = values.open === true;
+		var height = typeof values.height === 'number' && isFinite(values.height)
+			? Math.max(0, values.height) : 0;
+		var durationMs = typeof values.durationMs === 'number' && isFinite(values.durationMs)
+			? Math.max(0, values.durationMs) : 0;
+
+		vulcanHostKeyboard.open = open;
+		vulcanHostKeyboard.height = open ? height : 0;
+		// The host's keyboard MODEL, not its geometry: `resizes` says the host
+		// shrinks the page for the keyboard (the Android app's WebView, RU-38)
+		// rather than laying it over the page (iOS). Read by the sheets that
+		// follow the platform's own rule for keeping the keyboard up
+		// (MobileWizardWindow._vulcanHostKeepsKeyboard). Absent means overlay,
+		// so the iOS shell and every older host keep today's behaviour.
+		vulcanHostKeyboard.resizes = values.resizes === true;
+
+		if (vulcanKeyboardTransitionTimer !== null) {
+			clearTimeout(vulcanKeyboardTransitionTimer);
+			vulcanKeyboardTransitionTimer = null;
+		}
+		if (durationMs > 0 && !vulcanIsPhoneImpress()) {
+			document.body.style.transition =
+				'height ' + durationMs + 'ms ' + VULCAN_KEYBOARD_EASE;
+			// Animating rather than snapping is the point: the host starts
+			// the keyboard and this message together, so a body that jumped
+			// straight to its final height would park the docked row at the
+			// destination and leave a strip of grid showing under it until
+			// the keyboard caught up. The cost is that the grid relayouts
+			// across the movement — a cost it already pays today, and one
+			// that belongs to the container-resize work, not here.
+			//
+			// Scoped to this one movement: <body> height also changes on
+			// rotation and on container resize, and neither should inherit
+			// the keyboard's curve.
+			vulcanKeyboardTransitionTimer = setTimeout(function () {
+				vulcanKeyboardTransitionTimer = null;
+				document.body.style.transition = '';
+			}, durationMs);
+		} else {
+			// Duration 0 is an instruction to snap — the host sends it for a
+			// finger-dragged keyboard and for field-to-field focus swaps —
+			// never a state to animate through.
+			//
+			// PHONE IMPRESS ALWAYS SNAPS, whatever duration the host sent, and
+			// that is the second half of the guard above. Its body height comes
+			// from the stylesheet (13i.0, `calc(100svh - var(...))`), so an
+			// animated `height` would run the canvas band through ~250ms of
+			// intermediate sizes — and every one of them is a
+			// #document-container resize, i.e. a full tile-layer resync per
+			// frame. docs/mobile-redesign/04-constraints.md §2.4 rules out
+			// per-frame DOM work in phone chrome, and Calc only gets away with
+			// the animation because what moves there is a docked ROW, not the
+			// document canvas. One resize per keyboard event is the whole
+			// budget this can afford.
+			document.body.style.transition = '';
+		}
+
+		vulcanApplyBodyHeight();
+
+		var root = document.documentElement;
+		if (open)
+			root.setAttribute('data-vulcan-keyboard-open', 'true');
+		else
+			root.removeAttribute('data-vulcan-keyboard-open');
+		if (open && values.predicted === true)
+			root.setAttribute('data-vulcan-keyboard-predicted', 'true');
+		else
+			root.removeAttribute('data-vulcan-keyboard-predicted');
+	}
+
+	window.VulcanKeyboard = {
+		setHostGeometry: vulcanSetHostKeyboard,
+		hostResizes: function () { return vulcanHostKeyboard.resizes === true; },
+		applyViewportHeight: vulcanApplyViewportHeight,
+		bodyHeightTarget: vulcanBodyHeightTarget,
+	};
+
 	function handleViewportChange(event) {
 		var visualViewport = event.target;
 
-		window.scroll(0, 0);
-		document.body.style.height = visualViewport.height + 'px';
+		// Keep the stock Safari layout-viewport correction for every surface
+		// except Vulcan phone chrome. On that surface WebKit's scroll event is
+		// either its own caret reveal or retracting browser chrome; both must stay
+		// entirely outside the document/layout path below.
+		if (event.type === 'scroll' && vulcanIsPhoneChrome())
+			return;
+
+		var heightPx = visualViewport.height + 'px';
+
+		/*
+		 * PHONE IMPRESS PUBLISHES THE HEIGHT AND WRITES NO LAYOUT.
+		 *
+		 * 🔴 THE SCOPE IS THE DOCTYPE, NOT THE FORM FACTOR, AND THAT IS THE
+		 * WHOLE POINT OF THIS BLOCK. An earlier revision of this fix gated on
+		 * phone chrome alone, i.e. on ALL phone doctypes, and that silently
+		 * deleted a contract Calc depends on -- see THE CALC CONTRACT below.
+		 * If you are about to widen this gate back to `phoneChrome`, read that
+		 * paragraph first.
+		 *
+		 * The two writes below this block -- `window.scroll(0, 0)` and
+		 * `document.body.style.height` -- are STOCK, and the second is the mover
+		 * in the reported "it keeps resizing". <body> is
+		 * `display:flex; flex-direction:column` with #main-document-content at
+		 * `flex:1; min-height:0` (css/cool.css), so writing the body height
+		 * resizes #document-container, which is the element CanvasTileLayer's
+		 * ResizeObserver watches. A viewport-height signal therefore reached the
+		 * document fit, once per browser-chrome tick, on a surface where the
+		 * chrome retracts as you scroll.
+		 *
+		 * Google's published Slides viewer registers ZERO visualViewport
+		 * listeners and ZERO ResizeObserver.observe calls (measured by wrapping
+		 * addEventListener before its page scripts ran: 19 registrations on
+		 * `window`, none on `window.visualViewport`). It does not defend against
+		 * this class of feedback; it never signed up for the signal. The rule
+		 * that generalises is give a live viewport height to OVERLAYS and never
+		 * to a layout consumer -- which is a rule this codebase had already
+		 * written down for itself, on the host side, at
+		 * the host application:
+		 * "driving layout from `visualViewport` -- was never done here and must
+		 * never be." The fork was violating a rule the host states.
+		 *
+		 * 🔴 THE CALC CONTRACT -- WHY THIS IS NOT GATED ON PHONE CHROME.
+		 * `document.body.style.height` is not only the refit driver; on phone
+		 * Calc it is the ONLY thing that lifts the bottom-docked formula bar
+		 * clear of the soft keyboard, and that is written down twice as a
+		 * contract: docs/mobile-redesign/04-constraints.md Part 3 (:73-77) and
+		 * css/vulcan-theme.css 13-CALC.1 (:1504-1509), which re-parents
+		 * #formulabar-row into the body flex column ABOVE the sheet-tab strip
+		 * precisely because <body> shrinks for the keyboard.
+		 *
+		 * Nothing else shrinks it on the reported platform. The served meta does
+		 * carry `interactive-widget=resizes-content`
+		 * (online/wsd/FileServer.cpp:110-111), which would shrink the LAYOUT
+		 * viewport on keyboard open -- but that keyword is a Chromium feature
+		 * and iOS Safari does not implement it, so on iOS the layout viewport is
+		 * keyboard-blind and this write is the entire mechanism. Suppressing it
+		 * for every phone doctype put phone Calc's formula bar UNDER the
+		 * keyboard on iOS. That is the regression this gate exists to not
+		 * reintroduce.
+		 *
+		 * WHY GATED RATHER THAN DELETED. Both writes are stock, so removing them
+		 * outright changes desktop and the MOBILEAPP builds, neither of which
+		 * has coverage for it and neither of which is the reported surface.
+		 *
+		 * WHAT THE GATE READS, AND WHY IT IS TRUSTWORTHY HERE. Two terms:
+		 *   - the phone-chrome class this same file stamps pre-paint. It is the
+		 *     only half of the two-part phone test that needs to be spelled out,
+		 *     because the class is added at exactly one site in the tree
+		 *     (initializeViewMode, `!desktopChrome &&
+		 *     window.mode.isSmallScreenDevice()`), so class-present already
+		 *     implies both halves — the resolved form-factor override keeps
+		 *     `mode.isSmallScreenDevice()` in agreement with the stamp in
+		 *     every declaration state, including the loud veto that turns
+		 *     `?vulcanChrome=desktop` on a measured phone into phone chrome.
+		 *     (An earlier comment here justified the single-term test by saying
+		 *     `window.mode` does not exist yet. That was wrong and is corrected
+		 *     rather than repeated: `window.mode` is assigned at :177 from the
+		 *     InitializerBase constructor, which the enclosing IIFE runs at :812
+		 *     -- ~1900 lines before this function is even declared, and this
+		 *     function body runs later still, on an event. `window.mode` is
+		 *     available here. The class test is sufficient on the merits above,
+		 *     not for lack of the other half.)
+		 *   - `<body data-doctype>`, stamped by
+		 *     Control.UIManager.initializeSpecializedUI (:739, as `data-docType`
+		 *     -- HTML lowercases attribute names, which is why every selector in
+		 *     css/vulcan-theme.css spells it `data-doctype`). This is the same
+		 *     marker §13-CALC and §13-IMPRESS are scoped to, so the CSS and this
+		 *     handler cannot disagree about which document they are in.
+		 *
+		 * 🔴 THE STAMP IS LATE, SO THE DEFAULT MATTERS. `data-doctype` does not
+		 * exist until the server's `status` message has arrived. Every tick
+		 * before that reads null, which is NOT 'presentation', so it takes the
+		 * stock write path -- deliberately, because that is byte-for-byte the
+		 * behaviour this file had before any of this, and because the failure
+		 * being fixed (a chasing refit while the user reads a deck) requires a
+		 * loaded document. The test is therefore written as a positive match on
+		 * 'presentation' and must stay that way: inverted to `!== 'spreadsheet'`
+		 * it would suppress the write for the entire pre-load window on every
+		 * doctype, which is the Calc regression again with a longer fuse.
+		 *
+		 * Deleting the pair everywhere is the cleaner end state and it is owed a
+		 * desktop wet test; nothing in this worktree can run one.
+		 *
+		 * THE --vulcan-visible-height PUBLISH IS KEPT ON BOTH PATHS. It is a
+		 * custom property: it cannot feed back, because `visualViewport.height`
+		 * is browser-owned and no DOM content height changes it. Its consumers
+		 * are audited in css/vulcan-theme.css and the phone bottom sheet is an
+		 * overlay, not a flex sibling of the canvas -- that one is the escape
+		 * hatch the phone design makes load-bearing.
+		 */
+		var phoneChrome = document.documentElement.classList.contains(
+			'vulcan-mobile-chrome');
+		// No null test on `document.body`, deliberately: html/cool.html.m4:346
+		// loads this file from a non-deferred <script> INSIDE <body> (opened at
+		// :130), so the element exists before this line is ever parsed, let
+		// alone before an event can reach this function. A `document.body &&`
+		// here would be a term that cannot go false -- which is how a gate stops
+		// meaning anything. The stock write below has always dereferenced it
+		// unguarded for the same reason.
+		var phoneImpress = phoneChrome &&
+			document.body.getAttribute('data-doctype') === 'presentation';
+
+		// Equality no-op guard: read back the two values this handler writes,
+		// and do nothing when both already hold the target and the page is
+		// already pinned to the origin.
+		//
+		// `window.scroll(0,0)` can re-enter this handler through visualViewport
+		// 'scroll' outside Vulcan phone chrome. Every genuine tick would then pay
+		// for two full passes, so this guard collapses that correction cycle back
+		// to one. Vulcan phone scrolls return above before reaching any of it.
+		//
+		// What the guard still earns: it drops the ticks that carry no new
+		// information. 'resize' can fire with the height unchanged, and each
+		// such pass would otherwise rewrite --vulcan-visible-height on <html>.
+		// A custom property on the root invalidates every element that
+		// references it, and css/vulcan-theme.css binds the phone sheet's
+		// height/max-height (§1341-1350) to exactly that variable.
+		//
+		// This is a guard, NOT a debounce -- no timer, no rAF, no coalescing
+		// window. A real height change (keyboard opening, rotation) still
+		// applies on the tick it arrives. That immediacy is what Calc's
+		// body-shrink contract needs (docs/mobile-redesign/04-constraints.md,
+		// Part 3: the bottom-docked formula bar rides above the keyboard because
+		// <body> shrinks) -- and on the phone Calc path the write itself is
+		// still here to be immediate, which is the correction this block used to
+		// get wrong. The rAF that would otherwise coalesce these is avoided:
+		// 04-constraints.md §2.4 rules out per-frame DOM work in phone chrome,
+		// and a deferred frame is not delivered to a hidden document, which
+		// would leave the body height stale across a backgrounded tab.
+		//
+		// Reading the DOM back rather than remembering the last value makes it
+		// self-healing: if anything ever clobbers the body height or the custom
+		// property, the next tick restores it.
+		//
+		// THE BODY TERM FLIPS WITH THE PATH RATHER THAN DROPPING OUT. On phone
+		// Impress the target for `body.style.height` is the empty string, not
+		// `heightPx`, so the term is still a real comparison against a value
+		// this handler really writes -- it just writes a different one. The
+		// earlier revision deleted the term on the phone path because nothing
+		// was written there at all; now something is (the clear below), and a
+		// guard that ignored it would let every tick re-clear an already-clear
+		// property. Both branches are testable and both can go false, so
+		// neither reads like a guard that is working while it cannot fire.
+		var keyboardBridge = window.VulcanKeyboard;
+		var bodyHeightTarget = phoneImpress ? '' :
+			(keyboardBridge && typeof keyboardBridge.bodyHeightTarget === 'function'
+				? keyboardBridge.bodyHeightTarget() : heightPx);
+		if (document.documentElement.style.getPropertyValue(
+			'--vulcan-visible-height') === heightPx &&
+			document.body.style.height === bodyHeightTarget &&
+			(phoneImpress ||
+				(window.scrollX === 0 && window.scrollY === 0)))
+			return;
+
+		if (!phoneImpress) {
+			window.scroll(0, 0);
+			if (keyboardBridge && typeof keyboardBridge.applyViewportHeight === 'function')
+				keyboardBridge.applyViewportHeight(visualViewport.height);
+			else
+				document.body.style.height = heightPx;
+		} else if (document.body.style.height !== '') {
+			// HAND THE BODY BACK TO THE STYLESHEET, ONCE.
+			//
+			// This is not cosmetic cleanup; without it the rest of this gate
+			// does nothing on the surface it was written for. `data-doctype` is
+			// stamped late (see the block above), so every viewport tick during
+			// load takes the stock path and leaves an INLINE `height` on <body>.
+			// Inline beats any stylesheet rule, so css/vulcan-theme.css 13i.0's
+			// `100svh` would never apply and the body would stay frozen at
+			// whatever visualViewport.height happened to be at load -- which on
+			// iOS, with the URL bar expanded at load, is the small viewport
+			// baked in permanently. Clearing it is what lets 13i.0 take over.
+			//
+			// Conditional so it is a one-shot at the doctype transition rather
+			// than a write on every tick: an unconditional clear would dirty
+			// the body's inline style on every browser-chrome twitch, which is
+			// the per-frame DOM work 04-constraints.md §2.4 rules out and a
+			// smaller version of the very fan-out this change exists to stop.
+			document.body.style.height = '';
+		}
+
+		// Publish the same number as a custom property so CSS can size against
+		// the VISIBLE viewport.
+		//
+		// Nothing in CSS can currently express this height. `vh` resolves
+		// against the initial containing block, which does not shrink for the
+		// software keyboard, and `dvh` does not help either -- it tracks
+		// retracting browser chrome, not the iOS keyboard. So a `height: 100vh`
+		// panel inside a body we have just shrunk to visualViewport.height is
+		// taller than the space it lives in, and whichever end of it is not
+		// anchored gets pushed off-screen. For the phone bottom sheet that end
+		// carries the title bar and the upper-left way out, which the phone
+		// design makes load-bearing (docs/mobile-redesign, the escape hatch:
+		// the back affordance is always in the upper left).
+		//
+		// Set on <html> rather than <body> so it is readable from rules that
+		// match the body itself.
+		document.documentElement.style.setProperty(
+			'--vulcan-visible-height', heightPx);
 	}
 
+	/*
+	 * Keep both signals. Safari can pan the layout viewport to reveal a focused
+	 * field without changing visualViewport.height, so iPad, desktop Safari and
+	 * stock phone chrome need the 'scroll' event to run window.scroll(0,0) and
+	 * recover fixed chrome. Vulcan phone chrome returns at the top of the handler
+	 * before reading viewport height or writing layout; its browser-chrome and
+	 * caret-reveal scrolls therefore cannot feed the Impress refit loop. 'resize'
+	 * remains the keyboard-height signal for the bottom sheet and Calc dock.
+	 * scripts/phone-ergonomics-lint.mjs R9 pins this composed contract.
+	 */
 	if (window.visualViewport !== undefined) {
+		vulcanRestViewportHeight = window.visualViewport.height;
 		window.visualViewport.addEventListener('scroll', handleViewportChange);
 		window.visualViewport.addEventListener('resize', handleViewportChange);
 	}

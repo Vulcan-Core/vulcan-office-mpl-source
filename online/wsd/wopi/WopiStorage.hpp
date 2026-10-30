@@ -195,12 +195,16 @@ public:
         std::string _presentationLeader;
     };
 
+    /// serverToServer is the trust of the request that opened the loading session
+    /// (ClientRequestDispatcher::isServerToServer()); a GetFile redirect is followed
+    /// only to a URL that StorageBase::validate() accepts as WOPI with that trust.
     WopiStorage(const Poco::URI& uri, const std::string& localStorePath,
-                const std::string& jailPath)
+                const std::string& jailPath, bool serverToServer)
         : StorageBase(uri, localStorePath, jailPath)
         , _wopiSaveDuration(std::chrono::milliseconds::zero())
         , _utf7Converter("UTF-8", "UTF-7")
         , _legacyServer(ConfigUtil::getConfigValue<bool>("storage.wopi.is_legacy_server", false))
+        , _serverToServer(serverToServer)
     {
         LOG_INF("WopiStorage ctor with localStorePath: ["
                 << localStorePath << "], jailPath: [" << jailPath << "], uri: ["
@@ -306,6 +310,9 @@ private:
 
     /// Whether or not this is a legacy server.
     const bool _legacyServer;
+
+    /// The trust GetFile redirect targets are vetted with. See the constructor.
+    const bool _serverToServer;
 };
 
 /* vim:set shiftwidth=4 softtabstop=4 expandtab: */

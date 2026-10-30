@@ -210,7 +210,15 @@ void JSInstanceBuilder::initializeSidebarSender(sal_uInt64 nKitWindowId,
         for (unsigned i = 0; i < nLevelsUp && m_aContentWindow; i++)
         {
             if (!bIsDockingWindow && m_aContentWindow->get_id() == "Deck")
+            {
                 nLevelsUp = i + 3;
+
+                // A few controls are shared by the notebookbar and a real
+                // sidebar panel.  Their actual parent is authoritative: the
+                // phone wizard ignores notebookbar updates from a sidebar.
+                if (m_sTypeOfJSON == "notebookbar")
+                    m_sTypeOfJSON = u"sidebar"_ustr;
+            }
 
             // Useful to check if any panel doesn't appear
             // SAL _ DEBUG ("SIDEBAR CONTENT LOOK UP FROM: " << m_aContentWindow->get_id());

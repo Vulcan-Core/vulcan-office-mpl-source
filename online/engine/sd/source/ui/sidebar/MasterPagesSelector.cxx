@@ -37,6 +37,7 @@
 #include <o3tl/safeint.hxx>
 #include <vcl/image.hxx>
 #include <sfx2/dispatch.hxx>
+#include <sfx2/sidebar/Deck.hxx>
 #include <sfx2/viewfrm.hxx>
 #include <sfx2/sidebar/Theme.hxx>
 #include <memory>
@@ -57,6 +58,7 @@ MasterPagesSelector::MasterPagesSelector(weld::Widget* pParent, SdDrawDocument& 
     , mrDocument(rDocument)
     , mrBase(rBase)
     , mxSidebar(std::move(xSidebar))
+    , mbSidebarReadySnapshotSent(false)
     , maUpdateTask(*this)
 {
     mxPreviewIconView->connect_item_activated(LINK(this, MasterPagesSelector, MasterPageSelected));
@@ -78,6 +80,7 @@ MasterPagesSelector::MasterPagesSelector(weld::Widget* pParent, SdDrawDocument& 
     , mxPreviewIconView(m_xBuilder->weld_icon_view(rIconViewId))
     , mrDocument(rDocument)
     , mrBase(rBase)
+    , mbSidebarReadySnapshotSent(false)
     , maUpdateTask(*this)
 {
     mxPreviewIconView->connect_item_activated(LINK(this, MasterPagesSelector, MasterPageSelected));
@@ -211,7 +214,30 @@ void MasterPagesSelector::ExecuteCommand(const OUString &rIdent)
     else if (rIdent == "applyselect")
     {
         mrBase.SetBusyState (true);
-        AssignMasterPageToSelectedSlides (GetSelectedMasterPage());
+        // On a COKit phone this deck is reached as the phone kebab's "Change
+        // theme", where a tap has to mean the whole deck.
+        // AssignMasterPageToSelectedSlides cannot mean that: it builds its page
+        // list only out of a visible SlideSorterViewShell, which a phone client
+        // never shows or drives, so it either does nothing at all or reaches
+        // the single current slide.  The applyall route that would say this properly is
+        // unreachable from a COKit client -- it hangs off the right-click
+        // context menu (MousePressHdl -> ShowContextMenu, whose ExecuteCommand
+        // argument is the return value of weld::Menu::popup_at_rect), and
+        // JSMenu::popup_at_rect always returns an empty ident because it sends
+        // the menu to the client instead of blocking.  So the fallback has to
+        // be made here.
+        //
+        // Deliberately keyed on the *phone* form factor and not on
+        // COKit::isActive(): a desktop-browser COKit client can multi-select
+        // slides in its own slide panel, that selection is pushed into core
+        // through selectPart(), and selected-slides is the semantics it
+        // expects.  isKitMobilePhone() is false in a non-COKit build
+        // (SfxViewShell::maKitDeviceFormFactor stays UNKNOWN unless the kit
+        // client declares one), so desktop Impress is untouched.
+        if (mrBase.isKitMobilePhone())
+            AssignMasterPageToAllSlides (GetSelectedMasterPage());
+        else
+            AssignMasterPageToSelectedSlides (GetSelectedMasterPage());
         mrBase.SetBusyState (false);
     }
     else if (rIdent == "large")
@@ -602,7 +628,20 @@ void MasterPagesSelector::UpdateItemList (::std::unique_ptr<ItemList> && pNewIte
     maCurrentItemList.swap(*pNewItemList);
 
     if (mxSidebar.is())
+    {
         mxSidebar->requestLayout();
+
+        // Setup() can serialize a newly-created phone sidebar before its
+        // first layout and before this idle fill adds any icons.  Publish one
+        // post-layout snapshot so the mobile wizard receives real controls;
+        // later current/available icon changes use their sidebar sender.
+        if (!mbSidebarReadySnapshotSent && mrBase.isKitMobilePhone()
+            && mxPreviewIconView->n_children() > 0)
+        {
+            sfx2::sidebar::Deck::KitSendSidebarFullUpdate();
+            mbSidebarReadySnapshotSent = true;
+        }
+    }
 }
 
 css::ui::LayoutSize MasterPagesSelector::GetHeightForWidth(const sal_Int32 nWidth)

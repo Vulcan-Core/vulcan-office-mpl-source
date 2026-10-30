@@ -47,6 +47,8 @@ interface SlurpMessageEvent extends MessageEvent {
 	imageIsComplete?: boolean;
 	callback?: DefCallBack;
 	reason?: string;
+	// The Socket attempt (_connectCount) whose socket delivered this frame.
+	vulcanAttempt?: number;
 }
 
 interface MinimalMessageEvent {

@@ -19,7 +19,7 @@ msgstr ""
 #. App name - 50 chars limit
 #: descriptions/google-play.html%2Bhtml.body.h3:5-1
 msgid "Collabora Office: LibreOffice, OpenOffice & more"
-msgstr "Collabora Office: LibreOffice, OpenOffice etab."
+msgstr "Vulcan Office: Vulcan Office, OpenOffice etab."
 
 #. Short description - 80 chars limit
 #: descriptions/google-play.html%2Bhtml.body.p:9-1
@@ -27,7 +27,7 @@ msgid ""
 "LibreOffice based editor for Microsoft Office, LibreOffice and OpenOffice "
 "docs."
 msgstr ""
-"LibreOffice editorea MS Office, LibreOffice eta OpenOffice dokumentuentzako."
+"Vulcan Office editorea MS Office, Vulcan Office eta OpenOffice dokumentuentzako."
 
 #. Long description
 #: descriptions/google-play.html%2Bhtml.body.p:13-1

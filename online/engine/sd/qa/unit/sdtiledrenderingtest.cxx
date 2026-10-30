@@ -245,8 +245,18 @@ void SdTestViewCallback::callbackImpl(int nType, const char* pPayload)
             }
             else
             {
-                editModeOfInvalidation = mpViewShell->getEditMode();
-                partOfInvalidation = mpViewShell->getPart();
+                cpo::uno::Sequence<OUString> aSeq = comphelper::string::convertCommaSeparated(
+                    OUString::createFromAscii(pPayload));
+                if (aSeq.getLength() == 3)
+                {
+                    partOfInvalidation = aSeq[1].toInt32();
+                    editModeOfInvalidation = aSeq[2].toInt32();
+                }
+                else
+                {
+                    partOfInvalidation = mpViewShell->getPart();
+                    editModeOfInvalidation = mpViewShell->getEditMode();
+                }
                 invalidatedAll = true;
             }
         }

@@ -76,7 +76,7 @@ abstract class SidebarBase extends JSDialogComponent {
 
 	/// this is used to determine if we need to send uno command - only for core decks
 	isVisible(): boolean {
-		const node = $(`#${this.type}-dock-wrapper`);
+		const node = this.wrapper ? $(this.wrapper) : $(`#${this.type}-dock-wrapper`);
 		return node.hasClass('visible') && node.hasClass('coreBased');
 	}
 
@@ -87,7 +87,15 @@ abstract class SidebarBase extends JSDialogComponent {
 
 	/// shared implementation for showing/hiding sidebar
 	protected showSidebarImpl(show: boolean) {
-		const wrapper = $(`#${this.type}-dock-wrapper`);
+		// Toggle the wrapper the content actually lives in: the
+		// notebookbar-based panel renders into the sidebar dock captured
+		// at construction (its type flips to 'notebookbar' only after),
+		// and a lookup by type would address #notebookbar-dock-wrapper -
+		// absent in this chrome, so the deck filled a dock that never
+		// became visible and the toolbar button looked dead.
+		const wrapper = this.wrapper
+			? $(this.wrapper)
+			: $(`#${this.type}-dock-wrapper`);
 
 		if (show) {
 			wrapper.addClass('visible');

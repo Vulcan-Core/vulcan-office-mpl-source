@@ -5094,7 +5094,7 @@ msgid ""
 "Unlinking citations will prevent Collabora Online from updating citations "
 "and bibliography in this document."
 msgstr ""
-"Việc hủy liên kết các trích dẫn sẽ ngăn Collabora Online cập nhật các trích "
+"Việc hủy liên kết các trích dẫn sẽ ngăn Vulcan Office cập nhật các trích "
 "dẫn và thư mục trong tài liệu này."
 
 #: src/control/HRuler.ts:321
@@ -6651,7 +6651,7 @@ msgstr ""
 
 #: src/map/handler/Map.VersionBar.js:50
 msgid "Your Collabora Online server needs updating. Version {0} is available."
-msgstr "Máy chủ Collabora Online của bạn cần cập nhật. Đã có phiên bản {0}."
+msgstr "Máy chủ Vulcan Office của bạn cần cập nhật. Đã có phiên bản {0}."
 
 #: src/map/handler/Map.WOPI.js:194
 msgid "Creating new file from template..."
@@ -6939,7 +6939,7 @@ msgstr "Ý tưởng màu vàng"
 
 #: welcome/welcome.html%2Bhtml.head.title:9-3
 msgid "Collabora Online Welcome"
-msgstr "Collabora Online Chào mừng"
+msgstr "Vulcan Office Chào mừng"
 
 #: welcome/welcome.html%2Bhtml.body.div.div.div.div.h1:26-7
 msgid "Explore The New {coolversion}"
@@ -6948,7 +6948,7 @@ msgstr "Khám phá phiên bản mới {coolversion}"
 #: welcome/welcome.html%2Bhtml.body.div.div.div.div.h2:27-7
 #: welcome/welcome.html%2Bhtml.body.div.div.div.div.h2:38-7
 msgid "Collabora Online Development Edition"
-msgstr "Collabora Online bản Phát triển"
+msgstr "Vulcan Office bản Phát triển"
 
 #: welcome/welcome.html%2Bhtml.body.div.div.div.div.p:28-7
 msgid ""
@@ -6977,7 +6977,7 @@ msgid ""
 msgstr ""
 "Hãy xem <a target=\"_blank\" rel=\"noopener\" href=\"https://www."
 "collaboraonline.com/code-26-04-release-notes/\">ghi chú phát hành</a> và tìm "
-"hiểu tất cả về: Phiên bản phát triển trực tuyến Collabora mới nhất, dành cho "
+"hiểu tất cả về: Phiên bản phát triển trực tuyến Vulcan Office mới nhất, dành cho "
 "người dùng gia đình và các nhóm nhỏ."
 
 #: welcome/welcome.html%2Bhtml.body.div.div.div.div.h1:48-7
@@ -6988,27 +6988,6 @@ msgstr "Tham gia"
 #, fuzzy
 msgid "https://www.collaboraoffice.org/"
 msgstr "https://www.collaboraonline.org/"
-
-#: welcome/welcome.html%2Bhtml.body.div.div.div.div.p:50-7
-#, fuzzy
-msgid ""
-"Are you interested in contributing but don’t know where to start? Head over "
-"to the <a target=\"_blank\" rel=\"noopener\" href=\"https://www."
-"collaboraoffice.org/post/build-code/\">step-by-step instructions</a> and "
-"build CODE from scratch. You can also help out with <a target=\"_blank\" "
-"rel=\"noopener\" href=\"https://www.collaboraoffice.org/post/translate/"
-"\">translations</a> or by <a target=\"_blank\" rel=\"noopener\" "
-"href=\"https://www.collaboraoffice.org/post/filebugs/\">filing a bug "
-"report</a> with all the essential steps on how to reproduce it."
-msgstr ""
-"Bạn có muốn đóng góp nhưng không biết bắt đầu từ đâu? Hãy xem <a target="
-"\"_blank\" rel=\"noopener\" href=\"https://www.collaboraonline.org/post/"
-"build-code/\">hướng dẫn từng bước</a> và xây dựng CODE từ đầu. Bạn cũng có "
-"thể trợ giúp bằng <a target=\"_blank\" rel=\"noopener\" href=\"https://www."
-"collaboraonline.org/post/translate/\">bản dịch</a> hoặc bằng cách <a target="
-"\"_blank\" rel=\"noopener\" href=\"https://collaboraonline.github.io/post/"
-"filebugs/\">gửi báo cáo lỗi</a> với tất cả các bước cần thiết về cách tái "
-"tạo báo cáo đó."
 
 #: welcome/welcome.html%2Bhtml.body.div.div:55-5
 msgid ""
@@ -7422,7 +7401,7 @@ msgstr ""
 #~ "làm lại, lưu khác thời điểm, kiểm tra chính tả nhanh hơn và hơn thế nữa."
 
 #~ msgid "Integrate Collabora Online into your webapp"
-#~ msgstr "Tích hợp Collabora Online vào ứng dụng web của bạn"
+#~ msgstr "Tích hợp Vulcan Office vào ứng dụng web của bạn"
 
 #~ msgid "Or get involved in the development"
 #~ msgstr "Hoặc tham gia vào việc phát triển"
@@ -7438,7 +7417,7 @@ msgstr ""
 #~ "all the essential steps on how to reproduce it."
 #~ msgstr ""
 #~ "Tìm hiểu thêm về việc tích hợp vào ứng dụng web của bạn trong <a "
-#~ "href=\"%coolSdkURL\" target=\"_blank\">SDK Collabora Online</a>. Hoặc đi tới"
+#~ "href=\"%coolSdkURL\" target=\"_blank\">SDK Vulcan Office</a>. Hoặc đi tới"
 #~ " <a href=\"%coolStepByStepURL\" target=\"_blank\">hướng dẫn từng bước</a> và"
 #~ " xây dựng CODE từ đầu. Bạn cũng có thể giúp với việc <a "
 #~ "href=\"%coolTranslationsURL\" target=\"_blank\">phiên dịch</a> hoặc bằng "

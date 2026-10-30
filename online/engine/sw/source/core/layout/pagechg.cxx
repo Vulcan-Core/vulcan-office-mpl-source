@@ -1882,7 +1882,231 @@ void SwRootFrame::ImplCalcBrowseWidth()
 
     mbBrowseWidthValid = true;
     SwViewShell *pSh = getRootFrame()->GetCurrShell();
-    mnBrowseWidth = (!comphelper::COKit::isActive() && pSh)? MINLAY + 2 * pSh->GetOut()-> PixelToLogic( pSh->GetBrowseBorder() ).Width(): MIN_BROWSE_WIDTH;
+    // VULCAN: browse (web) mode has to reflow to the CLIENT's width, or it is
+    // useless on a phone. THE CLIENT STATES THAT WIDTH; NOTHING HERE INFERS IT.
+    //
+    // Stock COOL pinned this to MIN_BROWSE_WIDTH (200mm = 11339 twips, i.e. 907
+    // CSS px at 120% zoom) whenever COKit is active. That is WIDER than the text
+    // column of a Letter page with 1in margins (6.5in = 9360 twips), so turning
+    // web view on for a phone reader made the line length LONGER, not shorter --
+    // browse mode could never help the case it looks made for. A 393px phone
+    // still had to pan, by more than a screen width.
+    //
+    // *** THE FIRST FIX FOR THAT USED VisArea(), AND VisArea() IS THIS
+    // FUNCTION'S OWN OUTPUT. Under COKit, SwViewShell::VisArea() does NOT
+    // return the client window at all:
+    //
+    //     const SwRect& SwViewShell::VisArea() const
+    //     {
+    //         // when using the tiled rendering, consider the entire document
+    //         // as our visible area
+    //         return comphelper::COKit::isActive()
+    //                    ? GetLayout()->getFrameArea() : maVisArea;
+    //     }
+    //     (sw/source/core/view/viewsh.cxx)
+    //
+    // GetLayout()->getFrameArea() is the ROOT FRAME's own area -- the width this
+    // very assignment goes on to determine. So the line read "make the browse
+    // width equal to the current layout width", which is a fixed point at EVERY
+    // value and a ratchet in between: reflow narrows the layout, the client
+    // re-fits its zoom to the narrower document, the next call reads the new
+    // narrower layout, and around again. Measured on the built image across
+    // successive scroll/zoom: 35035 -> 19110 -> 12800 twips (2336 -> 1274 -> 853
+    // CSS px), never settling, never approaching the 393px viewport. Every one of
+    // those widths also renders 11pt body text at 6-9 CSS px, because the loop
+    // converges on "the line fits" and says nothing about "the glyphs are
+    // legible" -- those are two different variables and only zoom moves the
+    // second one.
+    //
+    // So the width now comes from the one place that knows it and cannot be
+    // circular: the client. SwViewShell::getKitBrowseWidth() holds exactly what
+    // .uno:BrowseWidth delivered, in twips, computed client-side as
+    // viewportCssPx / zoomFactor * 1440/96. It is never written by layout, so it
+    // cannot feed back.
+    //
+    // MIN_BROWSE_WIDTH stays as the fallback, for the case it was actually
+    // guarding: no client statement yet (initial layout, headless convert, a
+    // non-COKit embedder), where a zero width would collapse the layout.
+    // VisArea() is deliberately NOT kept as a secondary source -- a wrong number
+    // is worse than the documented fallback, and above is what the wrong number
+    // cost.
+    //
+    // THE SCOPE OF THIS NUMBER IS THE DOCUMENT, NOT THE VIEW, AND IT CANNOT BE
+    // MADE PER-VIEW HERE. mnBrowseWidth lives on SwRootFrame, and there is
+    // exactly one SwRootFrame per SwDoc: SwViewShell::Init() forces every
+    // additional view onto the first one's layout, under a comment that says so
+    // ("Here's the code which disables the usage of 'multiple' layouts at the
+    // moment", sw/source/core/view/vnew.cxx). The width is then written into
+    // the shared page frame's own geometry (SwPageFrame::MakeAll,
+    // sw/source/core/layout/calcmove.cxx), so two views could not hold two
+    // widths even if this member were moved.
+    //
+    // AND IT CANNOT BE DONE WITH ZOOM EITHER, which is how the phone Impress
+    // lane reaches its fit. Zoom IS per view -- SwViewOption::m_nZoom is a
+    // per-shell percentage and sw/source/core/layout touches it only in
+    // paintfrm.cxx, i.e. on the paint path, never in formatting. That is
+    // exactly why a slide can be fitted per client. A page cannot: on a 393px
+    // phone, 11pt body needs zoom >= 16*15/220 = 1.09 to clear 16 CSS px,
+    // while a 6.5in text column needs zoom <= 377*15/9360 = 0.60 to fit the
+    // screen, and zoom is one number. The column has to shrink instead, which
+    // is a re-layout, which is this shared tree.
+    //
+    // An earlier revision drew the conclusion "so web view must stay opt-in
+    // per session". That is not the conclusion the product wants, and it is
+    // not what is shipped now: a phone reflows BY DEFAULT, and a phone's
+    // reflow is kept off everyone else's screen by deciding the question for
+    // the DOCUMENT from what every attached client says about itself. Each
+    // view casts a vote (SwViewShell::getKitReflowVote); the document reflows
+    // only when at least one view asks for it and NO view vetoes, at the
+    // narrowest width asked for. The tally is lcl_TallyKitReflowVotes in
+    // sw/source/uibase/uiview/view2.cxx, and setKitBrowseWidth() -- the writer
+    // of the value read below -- is called only from there.
+    if ( comphelper::COKit::isActive() )
+    {
+        // The test used to be spelled out here as
+        // `pSh->getKitBrowseWidth() > MINLAY`. It is now
+        // SwViewShell::hasKitBrowseWidth(), unchanged in meaning, because
+        // SwTabFrame::Format has to gate on the SAME predicate and a second
+        // copy of the literal is how the two drift apart.
+        if ( pSh && pSh->hasKitBrowseWidth() )
+        {
+            /*
+             * VULCAN: A STATED CLIENT WIDTH IS THE ANSWER, NOT A FLOOR.
+             *
+             * MEASURED, on the built image of 2026-08-18: slot-02,
+             * Dinosaurs.docx, phone viewport 393x852 dpr 3, reading the
+             * `status:` page rectangle the engine publishes back while
+             * sweeping the vote.
+             *
+             *     vote 20000 -> page 20016     vote  9400 -> page  9268
+             *     vote 14000 -> page 14016     vote  9000 -> page  9268
+             *     vote 11000 -> page 11016     vote  4700 -> page  9268
+             *
+             * i.e. page width == max(vote, 9252) + 2*browse border. The vote
+             * was honoured EXACTLY whenever it was the larger of the two, so
+             * nothing was dropping it or re-scaling it -- the loop below was
+             * raising it. The document carries
+             * `<w:tblW w:w="9360" w:type="dxa"/>` and a 432pt text box, and
+             * the loop takes a maximum over every table and every anchored
+             * object.
+             *
+             * SwPageFrame::MakeAll writes this number into the page frame's
+             * own width, so the consequence is not "the table stays wide": it
+             * is that EVERY PARAGRAPH in the document is laid out to 9252
+             * twips. On a 392 CSS px phone at zoom 1.2 that is 745 CSS px of
+             * line, and the reader sees headings and body text cut off at the
+             * right edge -- which is exactly what shipped.
+             *
+             * The maximum also closes a feedback loop. The browse width sets
+             * the page width, the page width re-lays the table, and the table
+             * invalidates the browse width (SwTabFrame, tabfrm.cxx:4090, 4578,
+             * 4631). Measured with the client silent and its vote steady, the
+             * engine republished `status:` about ten times a second for ever,
+             * alternating page widths 9268 and 9318 -- the table's indent
+             * counted on alternate passes. Every one of those was a whole-
+             * document invalidation, and the survivors are the overprinted
+             * lines. Taking the client's number verbatim removes the layout
+             * from its own input and the oscillation with it.
+             *
+             * SCOPE. This branch is reachable only when a COKit client has
+             * stated a width, which is only ever VulcanWriterReflow asking for
+             * reflow, which is now opt-in per session. With no stated width
+             * the fallback below is untouched, so a headless convert, a
+             * non-COKit embedder and every session that has not asked for
+             * reflow all take the byte-identical path they took before.
+             *
+             * WHAT IT COSTS, AND IT IS NOT "THE TABLE HAS TO BE PANNED".
+             * An earlier revision of this block said that. It is wrong, by
+             * static reading of the two functions that publish the document
+             * rectangle, and the difference matters to whoever re-runs the
+             * sweep: a table wider than the vote now overflows the PAGE, and
+             * the document rectangle is derived from page widths ALONE --
+             * SwRootFrame::CheckViewLayout sets the root size to
+             * `nMaxPageRight - nBorder` (this file) and
+             * SwXTextDocument::getDocumentSize adds only 2*DOCUMENTBORDER
+             * (sw/source/uibase/uno/unotxdoc.cxx). Nothing there sees an
+             * object hanging off the right edge of a page. So the overflow
+             * falls OUTSIDE the canvas the client tiles and scrolls: the part
+             * of the table past the page edge is not pannable, it is
+             * unreachable.
+             *
+             * Only percent-width tables and flys escape this, because those
+             * resolve through CalcRel/SwViewShell::GetBrowseWidth, which is
+             * the client's width now. A fixed-width one (`w:tblW dxa`, a
+             * pt-sized text box) did not: SwTabFrame::Format clamped to the
+             * browse width only under HoriOrientation::FULL
+             * (`bCheckBrowseWidth`, tabfrm.cxx).
+             *
+             * THE TABLE HALF OF THAT IS NOW FIXED, BY FIT, NOT BY PAN.
+             * SwTabFrame::Format clamps a body table's wished width to the
+             * frame it is in, and re-enables `bCheckBrowseWidth` for
+             * LEFT_AND_WIDTH and NONE, whenever -- and only whenever --
+             * SwViewShell::hasKitBrowseWidth() is true, i.e. this same
+             * branch is the one live above. Widening the document rectangle
+             * to cover the overflow was the alternative and is the weaker
+             * answer: it re-widens the thing reflow exists to narrow. The
+             * cost of fit is column squeeze; the cells follow, because
+             * SwCellFrame::Format scales each cell by
+             * tabPrintWidth/tabFormatWidth. The full derivation, and the one
+             * claim above it refutes (NONE does NOT keep the wished width --
+             * its right spacing is the LRSpace margin, so it already fitted),
+             * are in the VULCAN block in SwTabFrame::Format.
+             *
+             * THE FLY HALF IS FIXED THE SAME WAY. SwFlyFrame::CalcRel used
+             * to resolve against the browse width only for PERCENT sizes, so
+             * a fixed one (`v:shape` at width:432pt = 8640 twips, a pt-sized
+             * image) sailed past it. It now clamps a fixed size down to
+             * nRelWidth -- "100% of whatever this fly is relative to", which
+             * CalcRel already resolves per anchor id -- under the same
+             * hasKitBrowseWidth() gate. A GRAPHIC's height is scaled with the
+             * width, because SwNoTextFrame::GetGrfArea scales X and Y to the
+             * fly print area from independent expressions and a width-only
+             * clamp would SQUASH the picture; a TEXT fly keeps its height as
+             * a MINIMUM and grows to its rewrapped content -- its text has to
+             * rewrap into more of it, not less, and SwFlyFrame::Format
+             * derives minimum-height state while the fit binds so the rewrap
+             * is never clipped at the fixed bottom. Two
+             * cases stay out on purpose and are named in the block there:
+             * autowidth flys, and the text half of a shape+textbox pair,
+             * whose visible rectangle is an SdrObject that layout does not
+             * size.
+             *
+             * ✅ VERIFIED ON THE BUILT IMAGE. The re-run the previous version
+             * of this comment asked for has been done, on build c50ec030c7,
+             * same slot, same fixture, same phone profile -- reading back
+             * `app.activeDocument.fileSize.x`, which is the document rectangle
+             * the client tiles:
+             *
+             *     vote 8000 -> doc 8634      vote 4700 -> doc 5334
+             *     vote 6000 -> doc 6634      vote 4000 -> doc 4634
+             *                                vote 3200 -> doc 3834
+             *
+             * doc == vote + 634 at every rung, spread ZERO, from 3200 twips
+             * up. The vote is honoured verbatim and the max loop no longer
+             * raises it. The oscillation went with it: 0-1 whole-document
+             * invalidations per second while reflowed, against the ~10/s
+             * republish the loop produced. And re-voting after a page-layout
+             * excursion DOES restore reflow -- toggle on/off/on returned the
+             * identical reflowed width, which refutes the "mode change does
+             * not come back" defect recorded on the client side.
+             *
+             * The 634 is `2*browseBorder + 2*DOCUMENTBORDER`. The client does
+             * not spell it: VulcanWriterReflow learns it from this very
+             * number and re-votes once with it removed, so the reader gets
+             * zero horizontal pan.
+             *
+             * ⚠ STILL NOT VERIFIED: the two CLAMPS below this function's own
+             * change -- SwTabFrame::Format and SwFlyFrame::CalcRel -- have
+             * never been compiled or run. They are what the client default
+             * now waits on, not this.
+             */
+            mnBrowseWidth = pSh->getKitBrowseWidth();
+            return;
+        }
+        mnBrowseWidth = MIN_BROWSE_WIDTH;
+    }
+    else
+        mnBrowseWidth = pSh ? MINLAY + 2 * pSh->GetOut()->PixelToLogic( pSh->GetBrowseBorder() ).Width() : MIN_BROWSE_WIDTH;
 
     do
     {
@@ -2226,7 +2450,14 @@ void SwRootFrame::CheckViewLayout( const SwViewOption* pViewOpt, const SwRect* p
         mbSidebarChanged = false;
     }
 
-    if( GetFormat()->getIDocumentSettingAccess().get(DocumentSettingId::BROWSE_MODE ) )
+    // VULCAN (Lane W, W5): under COKit the persisted BROWSE_MODE document
+    // setting is deliberately never written (a reflow vote is presentation
+    // state, not content -- SwDocShell::ToggleLayoutMode), so the live mode
+    // is asked from the current shell's view options, like every other
+    // browse-mode branch in the layout.
+    if( GetFormat()->getIDocumentSettingAccess().get(DocumentSettingId::BROWSE_MODE )
+        || ( comphelper::COKit::isActive() && pSh
+             && pSh->GetViewOptions()->getBrowseMode() ) )
     {
         mnColumns = 1;
         mbBookMode = false;

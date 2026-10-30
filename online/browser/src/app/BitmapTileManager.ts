@@ -34,6 +34,13 @@ class BitmapTileManager extends RenderManagerBase {
 	private _zoom: number;
 	private _preFetchPart: number;
 	private _preFetchMode: number[] = [];
+
+	// R6-7 lever L3: the settle stop a live pinch is predicted to commit —
+	// set by prefetchZoomStop while the painter's zoom-animation window is
+	// open, cleared by the commit's update(). updateTileDistance keeps this
+	// rung's tiles near so a mid-gesture garbage collect cannot evict the
+	// speculation before the swap consumes it.
+	private _vulcanSpeculativeRung: number = -1;
 	private _hasEditPerm: boolean;
 	private _pixelBounds: any;
 	private _splitPos: any;
@@ -61,13 +68,48 @@ class BitmapTileManager extends RenderManagerBase {
 	// The tile distance around the visible tile area that will be requested when updating
 	private visibleTileExpansion: number = 1;
 	// The tile expansion ratio that the visible tile area will be expanded towards when
-	// updating during scrolling
-	private directionalTileExpansion: number = 2;
+	// updating during scrolling.
+	//
+	// FOUR, NOT TWO, AND THE ARITHMETIC IS THE ARGUMENT. Tiles are 256px. At 2
+	// the directional lookahead is 512px and the visible expansion adds one more
+	// row, so a scroll ran about 768px ahead of the finger -- LESS THAN ONE
+	// 844px phone screen. Any flick outruns it and you scroll into the loading
+	// skeleton, which is the "janky loading constantly" a reader actually sees.
+	// At 4 the lookahead is 1024px, comfortably more than a screen, so a normal
+	// flick lands on tiles that were already requested.
+	//
+	// The cost is bounded by the bitmap cap (250 below 1280 physical px, i.e.
+	// every phone), so this asks for tiles sooner rather than holding more of
+	// them -- the eviction policy is unchanged.
+	private directionalTileExpansion: number = 4;
 	private pausedForCoherency: boolean = false;
 	private dehydratedCurrentTiles: string[] = [];
 	private shrinkCurrentId: any = null;
 
 	//private static _debugTime: any = {}; Reserved for future.
+
+	// Reused by overlapInvalidatedRectangleWithView; never holds state across
+	// calls.
+	private invalidateScratchKeys: string[] = [];
+
+	// Decoded-bitmap cap input, latched: window.screen was read per decoded
+	// tile, and screen.width follows orientation on Android so rotation
+	// flipped the 250/500 cap mid-session. Refreshed only on a density change
+	// (see initialize) -- rotation cannot reach it.
+	private static cachedPhysicalScreenWidth: number = 0;
+	private static physicalScreenWidthListener: DPIChangeListener = null;
+
+	public static refreshPhysicalScreenWidth(): void {
+		BitmapTileManager.cachedPhysicalScreenWidth = window.screen
+			? window.screen.width * (window.devicePixelRatio || 1)
+			: 0;
+	}
+
+	public static physicalScreenWidth(): number {
+		if (!BitmapTileManager.cachedPhysicalScreenWidth)
+			BitmapTileManager.refreshPhysicalScreenWidth();
+		return BitmapTileManager.cachedPhysicalScreenWidth;
+	}
 
 	// Did we ever get a reply for a tilecombine request?
 	private receivedFirstTile: boolean = false;
@@ -81,6 +123,14 @@ class BitmapTileManager extends RenderManagerBase {
 			this.onWorkerEndTransaction.bind(this),
 		);
 		window.app.socket.addTaskErrorHandler(this.onWorkerError.bind(this));
+
+		if (!BitmapTileManager.physicalScreenWidthListener) {
+			BitmapTileManager.refreshPhysicalScreenWidth();
+			BitmapTileManager.physicalScreenWidthListener = new DPIChangeListener(
+				BitmapTileManager.refreshPhysicalScreenWidth,
+			);
+			BitmapTileManager.physicalScreenWidthListener.start();
+		}
 	}
 
 	public appendAfterFirstTileTask(task: AfterFirstTileTask): void {
@@ -230,9 +280,9 @@ class BitmapTileManager extends RenderManagerBase {
 		// 4k screen -> 8Mpixel, each tile is 64kpixel uncompressed
 		// Most tablets and larger displays (physical width >= 1280) get a
 		// higher cap so more tiles can stay decoded in memory.
-		const physicalScreenWidth =
-			window.screen.width * (window.devicePixelRatio || 1);
-		const highNumBitmaps = physicalScreenWidth >= 1280 ? 500 : 250; // ~120Mb / ~60Mb.
+		const highNumBitmaps = VulcanTilePerf.bitmapCapForPhysicalWidth(
+			BitmapTileManager.physicalScreenWidth(),
+		);
 
 		if (tile.image) {
 			// fast case - no impact on count of tiles or bitmap list:
@@ -496,19 +546,23 @@ class BitmapTileManager extends RenderManagerBase {
 		} else return false;
 	}
 
+	private viewTileCounts(tileSize: number): [number, number] {
+		return [
+			Math.floor((app.sectionContainer.getWidth() + tileSize - 1) / tileSize),
+			Math.floor((app.sectionContainer.getHeight() + tileSize - 1) / tileSize),
+		];
+	}
+
 	private getMaxTileCountToPrefetch(tileSize: number): number {
-		const viewTileWidth = Math.floor(
-			(app.sectionContainer.getWidth() + tileSize - 1) / tileSize,
-		);
-
-		const viewTileHeight = Math.floor(
-			(app.sectionContainer.getHeight() + tileSize - 1) / tileSize,
-		);
-
-		// Read-only views can much more aggressively pre-load
-		return (
-			Math.ceil((viewTileWidth * viewTileHeight) / 4) *
-			(!this._hasEditPerm ? 4 : 1)
+		const [viewTileWidth, viewTileHeight] = this.viewTileCounts(tileSize);
+		// Read-only views pre-load more aggressively — except on the phone
+		// chrome, where read-only is the opening posture and the x4 rate is
+		// what fed the fetch/evict treadmill (see TilePerfBudget.ts).
+		return VulcanTilePerf.prefetchTileBudget(
+			viewTileWidth,
+			viewTileHeight,
+			this._hasEditPerm,
+			this.isVulcanPhoneChrome(),
 		);
 	}
 
@@ -605,6 +659,74 @@ class BitmapTileManager extends RenderManagerBase {
 		}
 	}
 
+	/*
+	 * R6-7 lever L3 — SPECULATIVE SETTLE PREFETCH. A pinch renders scaled
+	 * tiles all gesture and only requests the committed rung's tiles AFTER
+	 * the release ease (~+154ms measured), so every zoom-in swapped at the
+	 * wait deadline with holes (z1 rig: Impress +429ms allTiles=false, then
+	 * a ~4.4s pop-in trail; server RTT for a full viewport is 70-90ms).
+	 * The painter calls this mid-gesture with the rung the release grammar
+	 * predicts: ONE viewport of that rung's missing tiles is requested —
+	 * no rings, no parts fan-out (the round-4 budget spirit) — so the
+	 * commit's own wait exits on its first poll. The receive side is
+	 * already cross-rung (ServerCommand derives the rung from the reply's
+	 * tilewidth); the send side rides the per-rung twips this class now
+	 * threads through sendTileCombineRequest. Tile.requestingTooFast
+	 * dedupes re-fires; a superseded prediction's tiles simply land in the
+	 * cross-rung cache the zoom-out source hunt already reads.
+	 *
+	 * targetZoom: the predicted commit rung. centerCorePx: the predicted
+	 * commit center, core px in targetZoom's frame (the painter's
+	 * _getZoomMapCenter answer).
+	 */
+	public prefetchZoomStop(targetZoom: number, centerCorePx: any): void {
+		if (!this.canDeriveRungTwips()) return;
+		if (targetZoom === Math.round(app.map.getZoom())) return;
+		this._vulcanSpeculativeRung = targetZoom;
+
+		const size: any = app.map.getSize();
+		const halfX = (size.x * app.dpiScale) / 2;
+		const halfY = (size.y * app.dpiScale) / 2;
+		const bounds = new cool.Bounds(
+			new cool.Point(centerCorePx.x - halfX, centerCorePx.y - halfY),
+			new cool.Point(centerCorePx.x + halfX, centerCorePx.y + halfY),
+		);
+
+		const queue: TileCoordData[] = [];
+		const part = app.map._docLayer._selectedPart;
+		const mode = app.activeDocument.activeModes[0];
+		const consider = (coords: TileCoordData): void => {
+			if (!this.isValidTile(coords)) return;
+			if (!this.tileNeedsFetch(coords.key())) return;
+			// Pre-created so requestingTooFast can dedupe re-fires and the
+			// arrival finds its distance already ranked near.
+			this.createTile(coords);
+			queue.push(coords);
+		};
+		if (app.file.fileBasedView) {
+			// The stacked read deck's tiles are per-part; the layout owns
+			// that mapping and can answer for an arbitrary rung (the same
+			// checkOnly route drawZoomFrame's walk uses — its coords already
+			// carry targetZoom).
+			const coordList = this.updateFileBasedView(true, bounds, targetZoom);
+			for (let i = 0; i < coordList.length; i++) consider(coordList[i]);
+		} else {
+			const range = this.pxBoundsToTileRange(bounds);
+			for (let j = range.min.y; j <= range.max.y; j++)
+				for (let i = range.min.x; i <= range.max.x; i++)
+					consider(
+						new TileCoordData(
+							i * this.tileSize,
+							j * this.tileSize,
+							targetZoom,
+							part,
+							mode,
+						),
+					);
+		}
+		this.sendTileCombineRequest(queue);
+	}
+
 	private preFetchPartTiles(part: number, modes: number[]): void {
 		this.updateProperties();
 		const tileRange = this.pxBoundsToTileRange(this._pixelBounds);
@@ -696,10 +818,27 @@ class BitmapTileManager extends RenderManagerBase {
 		// Request a redraw if the tile is visible
 		const tileSizeTwips = Math.round(this.tileSize * app.pixelsToTwips);
 		const tilePos = tile.coords.getPosSimplePoint();
+		// tile.x/y are page-local for fileBasedView while viewedRectangle is
+		// doc-space; without the part's stacked offset every part > 0 reads as
+		// off-screen here.
+		let tileX = tilePos.x;
+		let tileY = tilePos.y;
+		if (app.file.fileBasedView) {
+			const layout = app.activeDocument?.activeLayout;
+			if (layout && layout.type === 'ViewLayoutFileBased') {
+				const partRect = (layout as ViewLayoutFileBased).getDocumentPartRect(
+					tile.coords.part,
+				);
+				if (partRect) {
+					tileX += partRect.x1;
+					tileY += partRect.y1;
+				}
+			}
+		}
 		if (
 			app.isRectangleVisibleInTheDisplayedArea([
-				tilePos.x,
-				tilePos.y,
+				tileX,
+				tileY,
 				tileSizeTwips,
 				tileSizeTwips,
 			])
@@ -1021,6 +1160,11 @@ class BitmapTileManager extends RenderManagerBase {
 		tilePositionsY: number[],
 		tileWids: number[],
 		addedSize: number,
+		// R6-7 lever L3: a speculative request addresses a rung the map is
+		// not on yet, so its twips cannot come from the current-rung
+		// globals. 0 keeps the shipped globals (every same-rung caller).
+		tileTwipsX: number = 0,
+		tileTwipsY: number = 0,
 	) {
 		var msg =
 			'tilecombine ' +
@@ -1045,10 +1189,10 @@ class BitmapTileManager extends RenderManagerBase {
 			tileWids.join(',') +
 			' ' +
 			'tilewidth=' +
-			app.tile.size.x +
+			(tileTwipsX || app.tile.size.x) +
 			' ' +
 			'tileheight=' +
-			app.tile.size.y;
+			(tileTwipsY || app.tile.size.y);
 		if (addedSize) app.socket.sendMessage(msg);
 		else window.app.console.log('Skipped empty (too fast) tilecombine');
 	}
@@ -1056,12 +1200,15 @@ class BitmapTileManager extends RenderManagerBase {
 	private sendTileCombineRequest(tileCombineQueue: Array<TileCoordData>) {
 		if (tileCombineQueue.length <= 0) return;
 
-		// Sort into buckets of consistent part & mode.
+		// Sort into buckets of consistent part, mode & rung. One message
+		// carries ONE tilewidth, so mixed-rung queues (R6-7 speculative
+		// prefetch) must split — a cross-rung position under the wrong
+		// tilewidth would address a different tile.
 		const partMode: any = {};
 		for (var i = 0; i < tileCombineQueue.length; ++i) {
 			const coords = tileCombineQueue[i];
-			// mode is a small number - give it 8 bits
-			const pmKey = (coords.part << 8) + coords.mode;
+			// mode is a small number - give it 8 bits; rungs fit above part.
+			const pmKey = (coords.z << 16) + (coords.part << 8) + coords.mode;
 			if (partMode[pmKey] === undefined) partMode[pmKey] = [];
 			partMode[pmKey].push(coords);
 		}
@@ -1073,6 +1220,36 @@ class BitmapTileManager extends RenderManagerBase {
 			var partTileQueue = partMode[pmKey];
 			var part = partTileQueue[0].part;
 			var mode = partTileQueue[0].mode;
+
+			// Rung twips for this bucket: the shipped globals on the current
+			// rung (0 = "use the global" downstream), the coords' own rung
+			// otherwise. (R6-7 lever L3)
+			var bucketTwipsX = 0;
+			var bucketTwipsY = 0;
+			const anyMap: any = app.map;
+			const offRung =
+				anyMap &&
+				typeof anyMap.getZoom === 'function' &&
+				partTileQueue[0].z !== Math.round(anyMap.getZoom());
+			if (offRung) {
+				if (this.canDeriveRungTwips()) {
+					bucketTwipsX = this.tileTwipsAtZoom(partTileQueue[0].z);
+					bucketTwipsY = bucketTwipsX;
+				} else {
+					// A rung we cannot address on the wire (#7785's stale-zoom
+					// leak, on a layer without rung-twips plumbing): serialised
+					// with the CURRENT tilewidth these positions name the
+					// current rung's tiles, duplicating the current bucket's
+					// entries tile-for-tile — the same wire tile twice, merely
+					// split across combines. The rung-split above keeps
+					// coolwsd's per-message hasDuplicates() quiet, but the
+					// request is still wrong twice over: a duplicate, and
+					// mis-addressed (it could never satisfy the stale rung's
+					// fetch anyway). Drop the bucket, as the shipped
+					// wire-position uniqifier dropped the stale entry.
+					continue;
+				}
+			}
 
 			var tilePositionsX = [];
 			var tilePositionsY = [];
@@ -1087,17 +1264,24 @@ class BitmapTileManager extends RenderManagerBase {
 				// don't send lots of duplicate, fast tilecombines
 				if (tile && tile.requestingTooFast(now)) continue;
 
-				// request each tile just once in these tilecombines
-				if (added.has(key)) continue;
-				added.add(key);
+				const twips = new cool.Point(
+					Math.floor(coords.x / this.tileSize) *
+						(bucketTwipsX || app.tile.size.x),
+					Math.floor(coords.y / this.tileSize) *
+						(bucketTwipsY || app.tile.size.y),
+				);
+
+				// Uniqify on the wire position, not coords.key(): the key carries
+				// zoom, the tilecombine wire format does not, so two coords that
+				// differ only in z serialise to the same tile. coolwsd rejects the
+				// WHOLE combine on a duplicate position (ClientSession.cpp), so one
+				// stale-zoom entry costs every tile in the message.
+				const wireKey = twips.x + ':' + twips.y;
+				if (added.has(wireKey)) continue;
+				added.add(wireKey);
 
 				// build parameters
 				tileWids.push(tile && tile.wireId !== undefined ? tile.wireId : 0);
-
-				const twips = new cool.Point(
-					Math.floor(coords.x / this.tileSize) * app.tile.size.x,
-					Math.floor(coords.y / this.tileSize) * app.tile.size.y,
-				);
 
 				tilePositionsX.push(twips.x);
 				tilePositionsY.push(twips.y);
@@ -1112,6 +1296,8 @@ class BitmapTileManager extends RenderManagerBase {
 				tilePositionsY,
 				tileWids,
 				added.size,
+				bucketTwipsX,
+				bucketTwipsY,
 			);
 
 			// When Writer requests mode=2, also request mode=1.
@@ -1123,6 +1309,8 @@ class BitmapTileManager extends RenderManagerBase {
 					tilePositionsY,
 					tileWids,
 					added.size,
+					bucketTwipsX,
+					bucketTwipsY,
 				);
 			}
 		}
@@ -1150,7 +1338,18 @@ class BitmapTileManager extends RenderManagerBase {
 			tile.coords.part !== app.map._docLayer._selectedPart ||
 			!app.activeDocument.isModeActive(tile.coords.mode)
 		)
-			tile.distanceFromView = Number.MAX_SAFE_INTEGER;
+			// R6-7 lever L3: tiles of the PREDICTED settle stop are the next
+			// swap's content, not stale cross-rung leftovers — rank them just
+			// behind the visible set so a mid-gesture garbage collect cannot
+			// evict the speculation before the commit consumes it. The
+			// marker only lives between prefetchZoomStop and the commit's
+			// update().
+			tile.distanceFromView =
+				tile.coords.z === this._vulcanSpeculativeRung &&
+				tile.coords.part === app.map._docLayer._selectedPart &&
+				app.activeDocument.isModeActive(tile.coords.mode)
+					? 1
+					: Number.MAX_SAFE_INTEGER;
 		else {
 			const tileSizeTwips = Math.round(this.tileSize * app.pixelsToTwips);
 
@@ -1283,7 +1482,12 @@ class BitmapTileManager extends RenderManagerBase {
 	private removeIrrelevantsFromCoordsQueue(coordsQueue: Array<TileCoordData>) {
 		const part: number = app.map._docLayer._selectedPart;
 
-		for (let i = coordsQueue.length - 1; i > 0; i--) {
+		// i >= 0: index 0 is not a distinguished tile — this runs before the
+		// caller's sort, so it is just insertion order. The reachable case is a
+		// stale MODE: updateProperties resyncs _preFetchPart from _selectedPart
+		// every pass, but refreshes _preFetchMode only when activeModes GROWS,
+		// so a shrink leaves the border walk queueing a mode we have left.
+		for (let i = coordsQueue.length - 1; i >= 0; i--) {
 			if (
 				coordsQueue[i].part !== part ||
 				!app.activeDocument.isModeActive(coordsQueue[i].mode) ||
@@ -1434,22 +1638,36 @@ class BitmapTileManager extends RenderManagerBase {
 		let modeArray = [mode];
 		if (app.activeDocument.activeLayout.type === 'ViewLayoutCompareChanges')
 			modeArray = [1, 2];
+		// Only CompareChanges has more than one mode; -1 never matches a mode.
+		const singleMode = modeArray.length === 1 ? modeArray[0] : -1;
 
-		for (const [key, tile] of Array.from(this.tiles.entries())) {
+		// invalidateTile can removeTile, so matches are collected first into a
+		// reused scratch instead of snapshotting every entry with Array.from.
+		const scratch = this.invalidateScratchKeys;
+		scratch.length = 0;
+		for (const [key, tile] of this.tiles) {
 			const coords: TileCoordData = tile.coords;
-			const tileRectangle = this.pixelCoordsToTwipTileBounds(coords);
-
+			if (coords.part !== part) continue;
 			if (
-				coords.part === part &&
-				modeArray.includes(coords.mode) &&
-				(invalidatedRectangle.intersectsRectangle(tileRectangle) ||
-					(calc && !this.tileZoomIsCurrent(coords))) // In calc, we invalidate all tiles with different zoom levels.
-			) {
-				if (tile.distanceFromView === 0) needsNewTiles = true;
+				singleMode !== -1
+					? coords.mode !== singleMode
+					: !modeArray.includes(coords.mode)
+			)
+				continue;
+			if (
+				// In calc, we invalidate all tiles with different zoom levels.
+				!(calc && !this.tileZoomIsCurrent(coords)) &&
+				!invalidatedRectangle.intersectsRectangle(
+					this.pixelCoordsToTwipTileBounds(coords),
+				)
+			)
+				continue;
 
-				this.invalidateTile(key, wireId);
-			}
+			if (tile.distanceFromView === 0) needsNewTiles = true;
+			scratch.push(key);
 		}
+		for (const key of scratch) this.invalidateTile(key, wireId);
+		scratch.length = 0;
 
 		if (
 			app.map._docLayer._debug.tileInvalidationsOn &&
@@ -1514,7 +1732,19 @@ class BitmapTileManager extends RenderManagerBase {
 		const propertiesUpdated = this.updateProperties();
 		const tileSize = this.tileSize;
 		const maxTilesToFetch = this.getMaxTileCountToPrefetch(tileSize);
-		const maxBorderWidth = !this._hasEditPerm ? 40 : 10;
+		const [viewTilesX, viewTilesY] = this.viewTileCounts(tileSize);
+		// On the phone the border walk is bounded by the decoded-bitmap
+		// budget instead of a flat 40/10 — see TilePerfBudget.ts for the
+		// arithmetic. Desktop and tablet keep the upstream constants.
+		const maxBorderWidth = VulcanTilePerf.prefetchBorderLimit(
+			viewTilesX,
+			viewTilesY,
+			this._hasEditPerm,
+			this.isVulcanPhoneChrome(),
+			VulcanTilePerf.bitmapCapForPhysicalWidth(
+				BitmapTileManager.physicalScreenWidth(),
+			),
+		);
 
 		// FIXME: when we are actually editing we should pre-load much less until we stop
 		/*		if (isActiveEditing()) {
@@ -1719,8 +1949,11 @@ class BitmapTileManager extends RenderManagerBase {
 	public sendProcessedResponse() {
 		var toSend = this.queuedProcessed;
 		this.queuedProcessed = [];
-		if (toSend.length > 0)
+		if (toSend.length > 0) {
 			app.socket.sendMessage('tileprocessed wids=' + toSend.join(','));
+			// Vulcan: decoded tiles now carry what the Calc echo was drawing.
+			app.definitions?.vulcanCalcTextEcho?.onTilesProcessed?.();
+		}
 		if (this.fetchKeyframeQueue.length > 0) {
 			window.app.console.warn('re-fetching prematurely GCd keyframes');
 			this.sendTileCombineRequest(this.fetchKeyframeQueue);
@@ -1855,12 +2088,94 @@ class BitmapTileManager extends RenderManagerBase {
 		this.reclaimGraphicsMemory();
 	}
 
+	/*
+	 * Twips one tile covers at rung `zoom` — byte-identical formula to
+	 * CanvasTileLayer._restoreRoundedRungTwips, so a speculative request
+	 * and the commit's own request produce the SAME tile desc (the wireId
+	 * dedupe and the cache key both hang off it). (R6-7 lever L3)
+	 */
+	public tileTwipsAtZoom(zoom: number): number {
+		const map: any = app.map;
+		return Math.round(
+			map._docLayer.options.tileWidthTwips *
+				Math.pow(1.2, map.options.zoom - zoom),
+		);
+	}
+
+	// True when the rig around us can answer tileTwipsAtZoom — the minimal
+	// mocha layers carry no options/zoom and must keep the shipped paths.
+	private canDeriveRungTwips(): boolean {
+		const map: any = app.map;
+		return !!(
+			map &&
+			typeof map.getZoom === 'function' &&
+			map.options &&
+			typeof map.options.zoom === 'number' &&
+			map._docLayer &&
+			map._docLayer.options &&
+			typeof map._docLayer.options.tileWidthTwips === 'number'
+		);
+	}
+
 	public isValidTile(coords: TileCoordData) {
 		if (coords.x < 0 || coords.y < 0) {
 			return false;
-		} else if (
-			coords.x * app.pixelsToTwips >= app.activeDocument.fileSize.x ||
-			coords.y * app.pixelsToTwips >= app.activeDocument.fileSize.y
+		}
+		/*
+		 * R6-7 (speculative settle prefetch): coords carry their OWN rung,
+		 * and a speculative request's rung differs from the map's while
+		 * the gesture is still live. Convert with the coords' rung twips —
+		 * the only frame those core pixels are meaningful in. Same-rung
+		 * coords fall through to the shipped checks below (the R6-4
+		 * zoom-anim window branch included), byte-for-byte.
+		 */
+		if (
+			this.canDeriveRungTwips() &&
+			coords.z !== Math.round(app.map.getZoom())
+		) {
+			const twipsPerPx = this.tileTwipsAtZoom(coords.z) / this.tileSize;
+			return (
+				coords.x * twipsPerPx < app.activeDocument.fileSize.x &&
+				coords.y * twipsPerPx < app.activeDocument.fileSize.y
+			);
+		}
+		/*
+		 * VULCAN (R6-4 zoom-out snap): coords are core pixels in a tile
+		 * rung's frame, but during a zoom animation TilesSection.
+		 * drawZoomFrame drives app.pixelsToTwips by the live pinch scale
+		 * every frame. Rest coords x live scale inflates the tile's twip
+		 * position by 1/scale, so the document's right/bottom EDGE tiles
+		 * cross fileSize and read invalid the moment the frame shrinks
+		 * past tileX / docWidthPx — on the fit-width phone deck (714 px
+		 * slide, third tile column at x=512) that is scale 0.717, the
+		 * founder's "~70%": the zoom-frame draw walk skips the column and
+		 * the right letterbox snaps over the slide, and the coord-list
+		 * build drops it from the fetch set. MEASURED on build #8
+		 * (s1-zoomout-snap, Dinosaurs dpr3): right content edge 669 -> 525
+		 * core px in one frame at frameScale 0.700 with zero layout
+		 * writes; un-snap on the release settle one frame after
+		 * re-crossing 0.717.
+		 *
+		 * The painter parks the rest scale for exactly this window
+		 * (preZoomAnimation -> _zoomBaseTwipsToPixels, alive while
+		 * _inZoomAnim); judge validity there, in the frame the coords are
+		 * actually in. At rest — and for layers without a painter, the
+		 * mocha mirror rigs included — base is unset and this is
+		 * byte-for-byte the shipped check.
+		 */
+		const painter: any = app.map?._docLayer?._painter;
+		const baseTwipsToPixels =
+			painter &&
+			painter._inZoomAnim &&
+			typeof painter._zoomBaseTwipsToPixels === 'number' &&
+			painter._zoomBaseTwipsToPixels > 0
+				? painter._zoomBaseTwipsToPixels
+				: null;
+		const pixelsToTwips =
+			baseTwipsToPixels !== null ? 1 / baseTwipsToPixels : app.pixelsToTwips;
+		if (
+			coords.x * pixelsToTwips >= app.activeDocument.fileSize.x ||
+			coords.y * pixelsToTwips >= app.activeDocument.fileSize.y
 		) {
 			return false;
 		} else return true;
@@ -1875,6 +2190,12 @@ class BitmapTileManager extends RenderManagerBase {
 	}
 
 	public update(center: any = null, zoom: number = null) {
+		// Any real view update ends the speculation window: after the zoom
+		// commit the predicted rung IS the current rung (its tiles rank by
+		// the normal rules), and a pan/abort should not keep stale
+		// cross-rung tiles pinned near. (R6-7 lever L3)
+		this._vulcanSpeculativeRung = -1;
+
 		const map: any = app.map;
 
 		if (
@@ -2094,16 +2415,86 @@ class BitmapTileManager extends RenderManagerBase {
 			this.initPreFetchPartTiles();
 	}
 
+	// How far ahead of the viewport to prefetch, in tiles, at most. 8 tiles is
+	// 2048 core px, which at dpr 3 is 683 CSS px -- about four fifths of an
+	// 844px phone viewport, against the 256 CSS px the fixed margin gives.
+	// Capped rather than unbounded because the ceiling is paid in tile
+	// requests and decoded bitmaps: setBitmapOnTile allows 250 live bitmaps on
+	// a sub-1280px physical screen, and a 6-column phone viewport spends 6 per
+	// row of runway.
+	private static readonly vulcanMaxLeadTiles: number = 8;
+
+	// How much travel the runway should cover, in milliseconds. It has to
+	// absorb the gap between two tile passes plus the round trip of the
+	// requests made in one: the leaflet 'move' event that drives update() is
+	// throttled to options.updateInterval = 200ms
+	// (CanvasTileLayer.js:375,4220), so at 450ms the margin still reaches
+	// beyond where the view will be when the NEXT pass runs.
+	private static readonly vulcanLeadMs: number = 450;
+
+	// True only inside the Vulcan phone chrome on a Calc sheet: a small-screen
+	// device AND the pre-paint html.vulcan-mobile-chrome marker (js/global.js
+	// adds it iff !desktopChrome && mode.isSmallScreenDevice()). Desktop and
+	// tablet fail BOTH halves -- isTablet() is *defined* as
+	// !isSmallScreenDevice() -- and Writer/Impress are excluded by the doctype.
+	private isVulcanPhoneChrome(): boolean {
+		return VulcanTilePerf.isVulcanPhoneChrome();
+	}
+
+	private isVulcanPhoneCalc(): boolean {
+		if (!this.isVulcanPhoneChrome()) return false;
+		return !!app.map._docLayer && app.map._docLayer.isCalc();
+	}
+
+	// Leading-edge expansion, in units of `grow`, for one axis.
+	//
+	// Upstream this is the constant `directionalTileExpansion`, so the range
+	// always reaches `grow * (1 + directionalTileExpansion)` = 3 tiles ahead
+	// however fast the view is moving -- expandTileRange consults
+	// getLastPanDirection, which is Math.sign of the pan delta and carries no
+	// magnitude at all. 3 tiles is 768 core px, i.e. 256 CSS px at dpr 3, under
+	// a third of a phone viewport, and a properly projected fling outruns it
+	// immediately.
+	//
+	// On the phone the runway instead covers the distance the view will
+	// actually cross in vulcanLeadMs, so a slow pan keeps paying upstream's
+	// small margin and only a fast one pays for a long one. Returns the
+	// upstream constant whenever the gate is false or no speed is on record,
+	// which restores the original expression exactly.
+	private leadingTileExpansion(speed: number, grow: number): number {
+		const base = this.directionalTileExpansion;
+		if (!this.isVulcanPhoneCalc()) return base;
+		if (!(speed > 0) || grow <= 0 || this.tileSize <= 0) return base;
+
+		// Tiles the view crosses during one lead window. speed is core px/ms
+		// (ViewLayoutBase.getPanSpeed) and tileSize is core px, so this is a
+		// pure tile count.
+		const leadTiles = Math.min(
+			BitmapTileManager.vulcanMaxLeadTiles,
+			Math.ceil((speed * BitmapTileManager.vulcanLeadMs) / this.tileSize),
+		);
+
+		// The range reaches grow * (1 + expansion) tiles ahead, so invert that
+		// for the expansion which buys `leadTiles`, and never go below
+		// upstream's margin.
+		return Math.max(base, Math.ceil(leadTiles / grow - 1));
+	}
+
 	public expandTileRange(range: cool.Bounds): cool.Bounds {
 		const grow = this.visibleTileExpansion;
 		const direction = app.activeDocument.activeLayout.getLastPanDirection();
+		const speed = app.activeDocument.activeLayout.getPanSpeed();
+		const lead = [
+			this.leadingTileExpansion(speed[0], grow),
+			this.leadingTileExpansion(speed[1], grow),
+		];
 		const minOffset = new cool.Point(
-			grow - grow * this.directionalTileExpansion * Math.min(0, direction[0]),
-			grow - grow * this.directionalTileExpansion * Math.min(0, direction[1]),
+			grow - grow * lead[0] * Math.min(0, direction[0]),
+			grow - grow * lead[1] * Math.min(0, direction[1]),
 		);
 		const maxOffset = new cool.Point(
-			grow + grow * this.directionalTileExpansion * Math.max(0, direction[0]),
-			grow + grow * this.directionalTileExpansion * Math.max(0, direction[1]),
+			grow + grow * lead[0] * Math.max(0, direction[0]),
+			grow + grow * lead[1] * Math.max(0, direction[1]),
 		);
 		return new cool.Bounds(
 			range.min.subtract(minOffset),
@@ -2196,8 +2587,33 @@ class BitmapTileManager extends RenderManagerBase {
 		const maxWidthPx = Math.round(fileSize.x * ratio);
 		const totalHeightPx = Math.round(fileSize.y * ratio);
 
+		// Every operand of this intersection must be in the queried zoom's
+		// rung-px frame. zoomFrameBounds already is (drawZoomFrame's
+		// docRangeScaled); the null case converts viewedRectangle's twips with
+		// `ratio`, never through app.twipsToPixels -- drawZoomFrame mutates
+		// that global by the live pinch scale, which mismatched the part rects
+		// above and selected a wrong/empty part set (blank pinch frames). At
+		// rest the global equals `ratio`, so the null case is a no-op.
+		let visibleAreaRectangle: number[];
+		if (zoomFrameBounds) {
+			visibleAreaRectangle = [
+				zoomFrameBounds.min.x,
+				zoomFrameBounds.min.y,
+				zoomFrameBounds.max.x - zoomFrameBounds.min.x,
+				zoomFrameBounds.max.y - zoomFrameBounds.min.y,
+			];
+		} else {
+			const viewedRectangle = fbLayout.viewedRectangle;
+			visibleAreaRectangle = [
+				Math.round(viewedRectangle.x1 * ratio),
+				Math.round(viewedRectangle.y1 * ratio),
+				Math.round(viewedRectangle.width * ratio),
+				Math.round(viewedRectangle.height * ratio),
+			];
+		}
+
 		var intersectionAreaRectangle = app.LOUtil._getIntersectionRectangle(
-			fbLayout.viewedRectangle.pToArray(),
+			visibleAreaRectangle,
 			[0, 0, maxWidthPx, totalHeightPx],
 		);
 
@@ -2225,23 +2641,22 @@ class BitmapTileManager extends RenderManagerBase {
 				const visY2 = Math.min(viewY2, partY2);
 
 				// Convert to per-part local coords (tile.x/y are page-local for
-				// fileBasedView).
+				// fileBasedView). The tile grid is this.tileSize px in every
+				// rung's frame; app.tile.size.pX rides the mutated global
+				// mid-pinch and would step off-grid, onto keys no tile has.
+				const tileSizePx = this.tileSize;
 				const localX1 = visX1 - partX1;
 				const localY1 = visY1 - partY1;
 				const localX2 = visX2 - partX1;
 				const localY2 = visY2 - partY1;
 
-				const startX =
-					Math.floor(localX1 / app.tile.size.pX) * app.tile.size.pX;
-				const endX =
-					Math.floor((localX2 - 1) / app.tile.size.pX) * app.tile.size.pX;
-				const startY =
-					Math.floor(localY1 / app.tile.size.pY) * app.tile.size.pY;
-				const endY =
-					Math.floor((localY2 - 1) / app.tile.size.pY) * app.tile.size.pY;
+				const startX = Math.floor(localX1 / tileSizePx) * tileSizePx;
+				const endX = Math.floor((localX2 - 1) / tileSizePx) * tileSizePx;
+				const startY = Math.floor(localY1 / tileSizePx) * tileSizePx;
+				const endY = Math.floor((localY2 - 1) / tileSizePx) * tileSizePx;
 
-				for (let j = startX; j <= endX; j += app.tile.size.pX) {
-					for (let k = startY; k <= endY; k += app.tile.size.pY) {
+				for (let j = startX; j <= endX; j += tileSizePx) {
+					for (let k = startY; k <= endY; k += tileSizePx) {
 						queue.push(new TileCoordData(j, k, zoom, i, mode));
 					}
 				}

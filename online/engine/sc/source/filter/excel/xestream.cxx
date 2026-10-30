@@ -71,8 +71,15 @@
 #include <oox/export/shapes.hxx>
 #include <xcl97rec.hxx>
 
+#include <com/sun/star/document/XStorageBasedDocument.hpp>
+#include <com/sun/star/embed/ElementModes.hpp>
+#include <com/sun/star/embed/XStorage.hpp>
+#include <com/sun/star/frame/XModel.hpp>
+#include <com/sun/star/io/XInputStream.hpp>
+#include <com/sun/star/io/XOutputStream.hpp>
 #include <com/sun/star/task/XStatusIndicator.hpp>
 #include <memory>
+#include <comphelper/diagnose_ex.hxx>
 #include <comphelper/servicehelper.hxx>
 #include <comphelper/storagehelper.hxx>
 
@@ -1041,6 +1048,39 @@ ScDocShell* XclExpXmlStream::getDocShell()
     return nullptr;
 }
 
+/** The bytes of a document storage element the import kept for the save, empty when there is none or it cannot be read:
+    the VBA project ("_MS_VBA_Macros", kept by WorkbookFragment::finalizeImport and by the .xls import) or one of its
+    signatures ("_MS_VBA_Signatures_" + kind, kept by WorkbookFragment::finalizeImport). Read whole before its part is
+    opened: an element that fails to read leaves no part, relationship or content type behind, and the save goes on. */
+static cpo::uno::Sequence<sal_Int8> lcl_ReadKeptVbaElement(const uno::Reference<css::frame::XModel>& xModel,
+                                                           const OUString& rName)
+{
+    try
+    {
+        uno::Reference<css::document::XStorageBasedDocument> xStorageDoc(xModel, UNO_QUERY);
+        if (!xStorageDoc.is())
+            return cpo::uno::Sequence<sal_Int8>();
+        uno::Reference<css::embed::XStorage> xDocStorage = xStorageDoc->getDocumentStorage();
+        if (!xDocStorage.is() || !xDocStorage->hasByName(rName))
+            return cpo::uno::Sequence<sal_Int8>();
+        uno::Reference<XInputStream> xKept(xDocStorage->openStreamElement(rName, css::embed::ElementModes::READ),
+                                           UNO_QUERY);
+        if (!xKept.is())
+            return cpo::uno::Sequence<sal_Int8>();
+        std::vector<sal_Int8> aBytes;
+        cpo::uno::Sequence<sal_Int8> aChunk;
+        sal_Int32 nRead = 0;
+        while ((nRead = xKept->readBytes(aChunk, 65536)) > 0)
+            aBytes.insert(aBytes.end(), aChunk.getConstArray(), aChunk.getConstArray() + nRead);
+        return cpo::uno::Sequence<sal_Int8>(aBytes.data(), static_cast<sal_Int32>(aBytes.size()));
+    }
+    catch (const uno::Exception&)
+    {
+        TOOLS_WARN_EXCEPTION("sc.filter", "XclExpXmlStream: cannot read the kept VBA element " << rName);
+    }
+    return cpo::uno::Sequence<sal_Int8>();
+}
+
 bool XclExpXmlStream::exportDocument()
 {
     ScDocShell* pShell = getDocShell();
@@ -1135,20 +1175,60 @@ bool XclExpXmlStream::exportDocument()
 
     if (mbExportVBA)
     {
-        VbaExport aExport(getModel());
-        if (aExport.containsVBAProject())
+        // The project the document was loaded with, as the import kept it, unless the configuration asks for one
+        // rebuilt from the Basic modules (the key the .xls export reads, ExportBiff5::Write). Rebuilt, a project loses
+        // its compiled code, every reference but stdole and Office, its class modules and its forms. A kept project
+        // that cannot be read is rebuilt, as when none was kept.
+        cpo::uno::Sequence<sal_Int8> aKeptProject;
+        if (!officecfg::Office::Calc::Filter::Import::VBA::UseExport::get())
+            aKeptProject = lcl_ReadKeptVbaElement(getModel(), u"_MS_VBA_Macros"_ustr);
+        if (aKeptProject.hasElements())
         {
-            SvMemoryStream aVbaStream(4096, 4096);
-            rtl::Reference<SotStorage> pVBAStorage(new SotStorage(aVbaStream));
-            aExport.exportVBA( pVBAStorage.get() );
-            aVbaStream.Seek(0);
-            css::uno::Reference<css::io::XInputStream> xVBAStream(
-                    new utl::OInputStreamWrapper(aVbaStream));
-            css::uno::Reference<css::io::XOutputStream> xVBAOutput =
+            uno::Reference<XOutputStream> xVBAOutput =
                 openFragmentStream(u"xl/vbaProject.bin"_ustr, u"application/vnd.ms-office.vbaProject"_ustr);
-            comphelper::OStorageHelper::CopyInputToOutput(xVBAStream, xVBAOutput);
-
+            xVBAOutput->writeBytes(aKeptProject);
             addRelation(GetCurrentStream()->getOutputStream(), oox::getRelationship(Relationship::VBAPROJECT), u"vbaProject.bin");
+
+            // Its signatures, kept beside it by the import (WorkbookFragment::finalizeImport), each in Excel's part
+            // with Excel's relationship type, from xl/_rels/vbaProject.bin.rels. A signature is valid only over the
+            // project's exact bytes: never written with a rebuilt project. One that cannot be read is left out.
+            static constexpr std::pair<OUString, OUString> aVbaSignatures[] = {
+                { u"vbaProjectSignature"_ustr,
+                  u"http://schemas.microsoft.com/office/2006/relationships/vbaProjectSignature"_ustr },
+                { u"vbaProjectSignatureAgile"_ustr,
+                  u"http://schemas.microsoft.com/office/2014/relationships/vbaProjectSignatureAgile"_ustr },
+                { u"vbaProjectSignatureV3"_ustr,
+                  u"http://schemas.microsoft.com/office/2020/07/relationships/vbaProjectSignatureV3"_ustr }
+            };
+            for (const auto& [rKind, rRelationType] : aVbaSignatures)
+            {
+                const cpo::uno::Sequence<sal_Int8> aKeptSignature
+                    = lcl_ReadKeptVbaElement(getModel(), "_MS_VBA_Signatures_" + rKind);
+                if (!aKeptSignature.hasElements())
+                    continue;
+                uno::Reference<XOutputStream> xSignatureOutput
+                    = openFragmentStream("xl/" + rKind + ".bin", "application/vnd.ms-office." + rKind);
+                xSignatureOutput->writeBytes(aKeptSignature);
+                addRelation(xVBAOutput, rRelationType, OUString(rKind + ".bin"));
+            }
+        }
+        else
+        {
+            VbaExport aExport(getModel());
+            if (aExport.containsVBAProject())
+            {
+                SvMemoryStream aVbaStream(4096, 4096);
+                rtl::Reference<SotStorage> pVBAStorage(new SotStorage(aVbaStream));
+                aExport.exportVBA( pVBAStorage.get() );
+                aVbaStream.Seek(0);
+                css::uno::Reference<css::io::XInputStream> xVBAStream(
+                        new utl::OInputStreamWrapper(aVbaStream));
+                css::uno::Reference<css::io::XOutputStream> xVBAOutput =
+                    openFragmentStream(u"xl/vbaProject.bin"_ustr, u"application/vnd.ms-office.vbaProject"_ustr);
+                comphelper::OStorageHelper::CopyInputToOutput(xVBAStream, xVBAOutput);
+
+                addRelation(GetCurrentStream()->getOutputStream(), oox::getRelationship(Relationship::VBAPROJECT), u"vbaProject.bin");
+            }
         }
     }
 

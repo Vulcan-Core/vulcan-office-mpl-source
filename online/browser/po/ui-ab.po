@@ -6922,7 +6922,7 @@ msgstr ""
 
 #, fuzzy
 #~ msgid "Oops, there is a problem connecting the document"
-#~ msgstr "Collabora Online ахь аимадара аан аиԥҟьара : "
+#~ msgstr "Vulcan Office ахь аимадара аан аиԥҟьара : "
 
 #~ msgid "Cancel the search"
 #~ msgstr "Иаҟәыхтәуп аҧшаара"

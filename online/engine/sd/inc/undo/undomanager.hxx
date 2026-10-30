@@ -37,6 +37,22 @@ public:
     */
     void SetLinkedUndoManager (SfxUndoManager* pLinkedUndoManager);
 
+    /** Vulcan fork: per-view undo (SfxViewUndoLookup). A view's own most recent action may
+        be undone out of order when it only changed shapes' attributes, geometry, position or
+        text, and every later action by another view (and everything on the redo stack) did
+        the same to OTHER shapes. Inserting, deleting or reordering shapes or slides, any
+        action on a group or on a shape inside a group, and every other kind of action
+        (animations, layouts, custom shows, ...), blocks.
+    */
+    SfxViewUndoLookup LookupViewUndo(ViewShellId nViewId) const;
+    using SdrUndoManager::LookupViewRedo;
+
+    /// Vulcan fork: undo the action nOffset below the top (see LookupViewUndo).
+    bool UndoAtOffset(size_t nOffset);
+
+    /// Vulcan fork: every view's Undo/Redo state depends on every view's actions (COKit).
+    static void InvalidateUndoStateInAllViews();
+
 private:
     using SdrUndoManager::Undo;
     using SdrUndoManager::Redo;

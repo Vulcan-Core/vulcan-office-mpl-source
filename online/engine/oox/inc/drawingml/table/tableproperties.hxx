@@ -58,6 +58,10 @@ public:
         const css::uno::Reference < css::beans::XPropertySet > & xPropSet,
         const ::oox::drawingml::TextListStylePtr& pMasterTextListStyle );
 
+    /// VULCAN: whether rStyleId is one of PowerPoint's built-in table styles, which a
+    /// deck may cite without defining it in ppt/tableStyles.xml
+    static bool isPredefinedStyleId(const OUString& rStyleId);
+
 private:
 
     const TableStyle&                   getUsedTableStyle(const ::oox::core::XmlFilterBase& rFilterBase, std::unique_ptr<TableStyle>& rTableStyleToDelete);

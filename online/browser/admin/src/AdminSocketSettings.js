@@ -88,10 +88,11 @@ var AdminSocketSettings = AdminSocketBase.extend({
 		else if (textMsg.startsWith('coolserver ')) {
 			// This must be the first message, unless we reconnect.
 			var coolwsdVersionObj = JSON.parse(textMsg.substring(textMsg.indexOf('{')));
+			// Vulcan Office: show the git hash as plain text; the admin
+			// console links to no external code-review host.
 			var h = coolwsdVersionObj.Hash;
 			if (parseInt(h,16).toString(16) === h.toLowerCase().replace(/^0+/, '')) {
-				h = '<a target="_blank" href="https://gerrit.collaboraoffice.com/plugins/gitiles/online/+log/' + h + '">' + h + '</a>';
-				$('#coolwsd-version').html(coolwsdVersionObj.Version + ' (git hash: ' + h + ')');
+				$('#coolwsd-version').text(coolwsdVersionObj.Version + ' (git hash: ' + h + ')');
 			}
 			else {
 				$('#coolwsd-version').text(coolwsdVersionObj.Version);

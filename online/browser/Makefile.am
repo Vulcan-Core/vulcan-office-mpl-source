@@ -137,11 +137,6 @@ COOL_IMAGES_CUSTOM_DST = $(patsubst $(CUSTOM_ICONS_DIRECTORY)/%,$(DIST_FOLDER)/i
 COOL_HTML_SRC = $(shell find $(srcdir)/html -name '*.html')
 COOL_HTML_DST = $(patsubst $(srcdir)/html/%.html,$(DIST_FOLDER)/%.html,$(COOL_HTML_SRC))
 
-if ENABLE_WELCOME_MESSAGE
-COOL_WELCOME_SRC = $(shell find $(srcdir)/welcome -name '*')
-COOL_WELCOME_DST = $(patsubst $(srcdir)/welcome/%,$(DIST_FOLDER)/welcome/%,$(COOL_WELCOME_SRC))
-endif
-
 COOL_EXTENSIONS_SRC = $(srcdir)/extensions/cool.js
 COOL_EXTENSIONS_DST = $(patsubst $(srcdir)/extensions/%,$(DIST_FOLDER)/extensions/%,$(COOL_EXTENSIONS_SRC))
 
@@ -259,7 +254,6 @@ COOL_CSS =\
 	$(srcdir)/css/iframedialog.css \
 	$(builddir)/node_modules/smartmenus/dist/css/sm-core-css.css \
 	$(builddir)/node_modules/smartmenus/dist/css/sm-simple/sm-simple.css \
-	$(srcdir)/css/welcome.css \
 	$(srcdir)/css/menubar.css \
 	$(srcdir)/css/mobilewizard.css \
 	$(srcdir)/css/jsdialogs.css \
@@ -276,7 +270,18 @@ COOL_CSS =\
 	$(srcdir)/css/infobar.css \
 	$(srcdir)/css/tooltip.css \
 	$(srcdir)/css/progressbar.css \
-	$(srcdir)/css/settings.css
+	$(srcdir)/css/settings.css \
+	$(srcdir)/css/vulcan-theme.css \
+	$(srcdir)/css/vulcan-icons.css \
+	$(srcdir)/css/vulcan-dialogs.css \
+	$(srcdir)/css/vulcan-statusbar-sheets.css \
+	$(srcdir)/css/vulcan-kit-chrome.css \
+	$(srcdir)/css/vulcan-kit-popovers.css \
+	$(srcdir)/css/vulcan-kit-controls.css \
+	$(srcdir)/css/vulcan-kit-share.css \
+	$(srcdir)/css/vulcan-kit-agent-edits.css \
+	$(srcdir)/css/vulcan-kit-sidebar.css \
+	$(srcdir)/css/vulcan-kit-calc-compact.css
 
 COOL_CSS_DST = $(foreach file,$(COOL_CSS),$(DIST_FOLDER)/$(notdir $(file)))
 COOL_CSS_M4 = $(strip $(foreach file,$(COOL_CSS),$(notdir $(file))))
@@ -314,7 +319,8 @@ NODE_MODULES_JS =\
 
 COOL_LIBS_JS =\
 	Autolinker.js \
-	sanitize-url.js
+	sanitize-url.js \
+	posthog-recorder.js
 
 if !ENABLE_MOBILEAPP
 COOL_LIBS_JS +=\
@@ -339,6 +345,46 @@ COOL_JS_LST =\
 	src/app/DocEvents.ts \
 	src/docstate.ts \
 	src/docstatefunctions.js \
+	src/app/TilePerfBudget.ts \
+	src/app/VulcanTelemetry.ts \
+	src/app/VulcanReplay.ts \
+	src/app/VulcanCommentReader.ts \
+	src/app/VulcanCalcBridge.ts \
+	src/app/VulcanCalcReturnKey.ts \
+	src/app/VulcanCalcMode.ts \
+	src/app/VulcanSmartToolbarMemory.ts \
+	src/app/VulcanFormulaRefColors.ts \
+	src/app/VulcanWriterBridge.ts \
+	src/app/VulcanWriterReflow.ts \
+	src/app/VulcanCaretReveal.ts \
+	src/app/VulcanHostApi.ts \
+	src/app/VulcanLiveCanvas.ts \
+	src/app/VulcanImpressBridge.ts \
+	src/app/VulcanSlideLibrary.ts \
+	src/app/VulcanImpressTextEcho.ts \
+	src/app/VulcanCalcTextEcho.ts \
+	src/app/VulcanCalcCursorEcho.ts \
+	src/app/VulcanImpressNudge.ts \
+	src/app/VulcanImpressResizeReflow.ts \
+	src/app/VulcanImpressSelectEcho.ts \
+	src/app/VulcanImpressInsertPlace.ts \
+	src/app/VulcanPdfCanvas.ts \
+	src/app/VulcanCanvasAutosave.ts \
+	src/app/VulcanDocBridge.ts \
+	src/app/VulcanFilmstripFollow.ts \
+	src/app/VulcanUndoNotice.ts \
+	src/app/VulcanImpressFit.ts \
+	src/app/VulcanWriterFit.ts \
+	src/app/VulcanPageShadow.ts \
+	src/app/VulcanMenuPopup.ts \
+	src/app/VulcanReadImmersion.ts \
+	src/app/VulcanImpressAccessibility.ts \
+	src/app/VulcanImpressPartCommit.ts \
+	src/app/VulcanImpressEditCarousel.ts \
+	src/app/VulcanImpressZoomIntent.ts \
+	src/app/VulcanImpressTextZoom.ts \
+	src/app/VulcanImpressTextDock.ts \
+	src/app/VulcanCalcHostGutterTap.ts \
 	src/docdispatcher.ts \
 	src/app/TableStylesService.ts \
 	src/core/geometry.ts \
@@ -431,6 +477,8 @@ COOL_JS_LST =\
 	src/canvas/vector/primitive/BitmapPrimitive.ts \
 	src/canvas/vector/primitive/ExclusiveEditViewPrimitive.ts \
 	src/canvas/vector/primitive/FilledRectanglePrimitive.ts \
+	src/canvas/vector/primitive/FillGradientPrimitive.ts \
+	src/canvas/vector/primitive/GlowPrimitive.ts \
 	src/canvas/vector/primitive/GraphicPrimitive.ts \
 	src/canvas/vector/primitive/GraphicResource.ts \
 	src/canvas/vector/primitive/GroupPrimitive.ts \
@@ -439,19 +487,31 @@ COOL_JS_LST =\
 	src/canvas/vector/primitive/LineRectanglePrimitive.ts \
 	src/canvas/vector/primitive/ModifiedColorPrimitive.ts \
 	src/canvas/vector/primitive/ObjectInfoPrimitive.ts \
+	src/canvas/vector/primitive/ObjectChildPrimitive.ts \
 	src/canvas/vector/primitive/PointArrayPrimitive.ts \
 	src/canvas/vector/primitive/PolygonHairlinePrimitive.ts \
 	src/canvas/vector/primitive/PolygonStrokePrimitive.ts \
+	src/canvas/vector/primitive/PolyPolygonAlphaGradientPrimitive.ts \
 	src/canvas/vector/primitive/PolyPolygonColorPrimitive.ts \
 	src/canvas/vector/primitive/PolyPolygonRGBAPrimitive.ts \
 	src/canvas/vector/primitive/PolyPolygonStrokePrimitive.ts \
 	src/canvas/vector/primitive/Primitive.ts \
+	src/canvas/vector/primitive/ShadowPrimitive.ts \
 	src/canvas/vector/primitive/SingleLinePrimitive.ts \
+	src/canvas/vector/primitive/SoftEdgePrimitive.ts \
+	src/canvas/vector/primitive/SvgGradient.ts \
+	src/canvas/vector/primitive/SvgLinearGradientPrimitive.ts \
+	src/canvas/vector/primitive/SvgRadialGradientPrimitive.ts \
 	src/canvas/vector/primitive/TextDecoratedPortionPrimitive.ts \
 	src/canvas/vector/primitive/TextSimplePortionPrimitive.ts \
 	src/canvas/vector/primitive/TransformPrimitive.ts \
+	src/canvas/vector/primitive/TransparencePrimitive.ts \
 	src/canvas/vector/primitive/UnifiedTransparencePrimitive.ts \
 	src/canvas/vector/VectorBitmapWalker.ts \
+	src/canvas/vector/VectorWebFonts.ts \
+	src/canvas/vector/VectorEffects.ts \
+	src/canvas/vector/VectorPixelMaps.ts \
+	src/canvas/vector/VectorSvgGradient.ts \
 	src/canvas/vector/VectorPrimitiveRenderer.ts \
 	src/canvas/vector/VectorRenderingConfig.ts \
 	src/canvas/vector/VectorRenderingGraphicsResponse.ts \
@@ -465,6 +525,11 @@ COOL_JS_LST =\
 	src/canvas/sections/TableResizeMarkerSection.ts \
 	src/canvas/sections/TableSelectMarkerSection.ts \
 	src/canvas/sections/FocusCellSection.ts \
+	src/canvas/sections/CalcHighlightSection.ts \
+	src/canvas/sections/CalcCopySourceSection.ts \
+	src/canvas/sections/VulcanTextEchoSection.ts \
+	src/canvas/sections/VulcanCalcEchoSection.ts \
+	src/canvas/sections/VulcanImpressMarqueeSection.ts \
 	src/canvas/sections/URLPopUpSection.ts \
 	src/canvas/sections/InvalidationRectangleSection.ts \
 	src/canvas/sections/ShapeHandlesSection.ts \
@@ -476,6 +541,7 @@ COOL_JS_LST =\
 	src/canvas/sections/ShapeHandleRotationSubSection.ts \
 	src/canvas/sections/ShapeHandleDiagramSubSection.ts \
 	src/canvas/sections/ShapeHandleScalingSubSection.ts \
+	src/canvas/sections/VulcanImpressTableChipSection.ts \
 	src/canvas/sections/ValidityInputHelpSection.ts \
 	src/canvas/sections/CellCursorSection.ts \
 	src/canvas/sections/CellSelectionHandleSection.ts \
@@ -531,10 +597,7 @@ COOL_JS_LST =\
 	src/dom/DomEvent.Pointer.js \
 	src/map/handler/Map.Keyboard.js \
 	src/map/handler/Map.KeyboardShortcuts.ts \
-	src/map/handler/Map.Welcome.js \
-	src/map/handler/Map.Feedback.js \
 	src/map/handler/Map.Settings.ts \
-	src/map/handler/Map.VersionBar.js \
 	src/dom/DomEvent.MultiClick.js \
 	src/map/handler/Map.Print.js \
 	src/map/handler/Map.SlideShow.js \
@@ -542,6 +605,7 @@ COOL_JS_LST =\
 	src/map/handler/Map.StateChanges.js \
 	src/map/handler/Map.WOPI.js \
 	src/control/jsdialog/Util.UniqueId.ts \
+	src/control/jsdialog/Util.PlainLabel.ts \
 	src/control/jsdialog/Definitions.MenuCommands.ts \
 	src/control/jsdialog/Control.ts \
 	src/control/jsdialog/Control.ContextMenu.ts \
@@ -616,7 +680,6 @@ COOL_JS_LST =\
 	src/control/jsdialog/Widget.CsvGrid.ts \
 	src/control/jsdialog/Widget.SpellSentence.ts \
 	src/control/jsdialog/Widget.Edit.ts \
-	src/control/jsdialog/Widget.EmojiPicker.ts \
 	src/control/jsdialog/Widget.FormulabarEdit.js \
 	src/control/jsdialog/Widget.Frame.js \
 	src/control/jsdialog/Widget.HTMLContent.ts \
@@ -647,6 +710,8 @@ COOL_JS_LST =\
 	src/control/Control.JSDialog.js \
 	src/control/Control.JSDialogBuilder.js \
 	src/control/Control.MobileWizardBuilder.js \
+	src/control/VulcanBottomSheetGesture.ts \
+	src/control/VulcanCommentSheet.ts \
 	src/control/Control.MobileWizardWindow.js \
 	src/control/Control.MobileWizard.js \
 	src/control/Control.LanguageDialog.js \
@@ -654,6 +719,31 @@ COOL_JS_LST =\
 	src/control/Control.StatusBar.js \
 	src/control/Control.MobileSearchBar.ts \
 	src/control/Control.MobileTopBar.ts \
+	src/control/VulcanSelectionMenu.ts \
+	src/control/Control.MobileSelectionBar.ts \
+	src/control/Control.ImpressSelectionBar.ts \
+	src/control/Control.CalcOperatorStrip.ts \
+	src/control/Control.SpeakerNotes.ts \
+	src/control/VulcanMobileFormat.ts \
+	src/control/VulcanWriterFormatRow.ts \
+	src/control/VulcanRailIcons.ts \
+	src/control/VulcanCalcRailContent.ts \
+	src/control/VulcanCalcFormatRow.ts \
+	src/control/VulcanCalcAlignPicker.ts \
+	src/control/VulcanCalcFontSizePicker.ts \
+	src/control/VulcanCalcBorderPalette.ts \
+	src/control/VulcanImpressFormatRow.ts \
+	src/control/VulcanCalcCellPreview.ts \
+	src/control/VulcanCalcFunctionBrowser.ts \
+	src/control/VulcanCalcAggregateStrip.ts \
+	src/control/VulcanEscape.ts \
+	src/control/VulcanEditState.ts \
+	src/control/VulcanViewAnchor.ts \
+	src/control/VulcanImpressEditUnits.ts \
+	src/control/VulcanTopBar.ts \
+	src/control/VulcanRedlineBar.ts \
+	src/control/VulcanDocumentOutline.ts \
+	src/control/VulcanCalcDesktopChrome.ts \
 	src/control/Control.MobileBottomBar.js \
 	src/control/Control.UserList.ts \
 	src/control/Control.FormulaBarJSDialog.js \
@@ -882,12 +972,22 @@ define prereq_cool
 	$(if $(IS_SEPARATE),$(COOL_JS_DST),$(COOL_JS_SRC))
 endef
 
+# Paren-holders: a literal paren inside $(if ...) unbalances make's argument
+# scan and truncates the define (it cost a build to learn).
+LEFT_PAREN := (
+RIGHT_PAREN := )
+
 define bundle_css
 	$(if $(IS_SEPARATE),\
 		@touch $@,\
 		@echo "Uglify cool css files..."
-		@$(NODE) node_modules/uglifycss/uglifycss $(COOL_CSS_DST) > $@)
+		@$(NODE) node_modules/uglifycss/uglifycss $(COOL_CSS_DST) | sed -e 's/$(RIGHT_PAREN) or$(LEFT_PAREN)/$(RIGHT_PAREN) or $(LEFT_PAREN)/g' > $@)
 endef
+# The sed is load-bearing: uglifycss emits `or(` with no space in @supports
+# conditions, which tokenizes as a function and invalidates the whole
+# condition in every browser — autoprefixer expands any mask-* condition into
+# the two-clause `A or B` form, so every @supports mask block silently never
+# applied on deployed bundles until this guard.
 
 define prereq_css
 	$(COOL_CSS_DST)
@@ -1041,6 +1141,7 @@ build-cool: \
 	$(DIST_FOLDER)/color-palette-dark.css \
 	$(DIST_FOLDER)/bundle.js \
 	$(DIST_FOLDER)/cool.html \
+	$(DIST_FOLDER)/LICENSE.txt \
 	$(WASM_FILES) \
 	$(WASM_FALLBACK_FILES) \
 	$(TEMPLATE_MANIFEST) \
@@ -1050,17 +1151,9 @@ if APP_HAS_BRANDING
 	@if test -d "$(APP_BRANDING_DIR)" ; then cp -a "$(APP_BRANDING_DIR)"/branding* $(DIST_FOLDER)/ ; fi
 	@if test -d "$(APP_BRANDING_DIR)" ; then cp -a "$(APP_BRANDING_DIR)"/images/*.svg $(DIST_FOLDER)/images/ ; fi
 	@if test -d "$(APP_BRANDING_DIR)" ; then cp -a "$(APP_BRANDING_DIR)/images/toolbar-bg-logo.svg" $(DIST_FOLDER)/images/toolbar-bg.svg ; fi
-if ENABLE_MACOS
-	@if test -d "$(APP_BRANDING_DIR)" ; then cp -a "$(APP_BRANDING_DIR)/welcome" "$(DIST_FOLDER)/" ; fi
-endif
 	@echo
 	@echo "JS, HTML and CSS has been updated ($(DIST_FOLDER))."
 endif
-	@if test "$(ENABLE_QTAPP)" = true || test "$(ENABLE_MACOSAPP)" = true || test "$(ENABLE_WINDOWSAPP)" = true ; then \
-		mkdir -p $(DIST_FOLDER)/welcome && \
-		test -f $(DIST_FOLDER)/welcome/welcome-slideshow.odp || cp $(srcdir)/welcome/welcome-slideshow.odp $(DIST_FOLDER)/welcome/welcome-slideshow.odp ; \
-		test -f $(DIST_FOLDER)/welcome/welcome.svg || cp $(srcdir)/welcome/welcome.svg $(DIST_FOLDER)/welcome/welcome.svg ; \
-	fi
 	@if test "$(ENABLE_QTAPP)" = true || test "$(ENABLE_MACOSAPP)" = true || test "$(ENABLE_WINDOWSAPP)" = true ; then \
 		echo "Generating localized introductory documents"; \
 		mkdir -p $(DIST_FOLDER)/introdocs/preview ; \
@@ -1191,7 +1284,6 @@ $(INTERMEDIATE_DIR)/COOL_JS.m4: $(INTERMEDIATE_DIR)/COOL_JS.m4.jslist
 
 $(DIST_FOLDER)/cool.html: $(srcdir)/html/cool.html.m4 \
 	$(COOL_HTML_DST) \
-	$(COOL_WELCOME_DST) \
 	$(COOL_EXTENSIONS_DST) \
 	$(DIST_FOLDER)/bundle.css \
 	$(DIST_FOLDER)/global.js \
@@ -1284,15 +1376,12 @@ $(DIST_FOLDER)/%.html: $(srcdir)/html/%.html
 		`ln -sf $(abs_srcdir)/$< $@`; \
 	fi
 
-if ENABLE_WELCOME_MESSAGE
-$(DIST_FOLDER)/welcome/%: $(srcdir)/welcome/%
+# Vulcan Office: ship the MPL-2.0 license text with the browser dist so the
+# About dialog can link to it locally (no external license hosts).
+$(DIST_FOLDER)/LICENSE.txt: $(abs_top_srcdir)/COPYING
 	@mkdir -p $(dir $@)
-	@if test -z '$(ENABLE_BROWSERSYNC)'; then \
-		`cp $< $@`; \
-	else \
-		`ln -sf $(abs_srcdir)/$< $@`; \
-	fi
-endif
+	@cp $< $@
+
 
 $(DIST_FOLDER)/extensions/%: $(srcdir)/extensions/%
 	@mkdir -p $(dir $@)
@@ -1479,6 +1568,29 @@ pot:
 		src/control/Control.MobileBottomBar.js \
 		src/control/Control.MobileSearchBar.ts \
 		src/control/Control.MobileTopBar.ts \
+		src/control/VulcanSelectionMenu.ts \
+		src/control/Control.MobileSelectionBar.ts \
+		src/control/Control.ImpressSelectionBar.ts \
+		src/control/Control.CalcOperatorStrip.ts \
+		src/control/Control.SpeakerNotes.ts \
+		src/control/VulcanMobileFormat.ts \
+		src/control/VulcanWriterFormatRow.ts \
+		src/control/VulcanCalcRailContent.ts \
+		src/control/VulcanCalcFormatRow.ts \
+		src/control/VulcanCalcAlignPicker.ts \
+		src/control/VulcanCalcFontSizePicker.ts \
+		src/control/VulcanCalcBorderPalette.ts \
+		src/control/VulcanImpressFormatRow.ts \
+		src/control/VulcanCalcCellPreview.ts \
+	src/control/VulcanCalcFunctionBrowser.ts \
+		src/control/VulcanCalcAggregateStrip.ts \
+		src/control/VulcanCommentSheet.ts \
+		src/control/VulcanEscape.ts \
+		src/control/VulcanImpressEditUnits.ts \
+		src/control/VulcanTopBar.ts \
+		src/control/VulcanRedlineBar.ts \
+		src/control/VulcanDocumentOutline.ts \
+		src/control/VulcanCalcDesktopChrome.ts \
 		src/control/Control.MobileWizardBuilder.js \
 		src/control/Control.NavigatorPanel.ts \
 		src/control/Control.QuickFindPanel.ts \
@@ -1526,7 +1638,6 @@ pot:
 		src/control/jsdialog/Widget.Combobox.js \
 		src/control/jsdialog/Widget.CsvGrid.ts \
 		src/control/jsdialog/Widget.SpellSentence.ts \
-		src/control/jsdialog/Widget.EmojiPicker.ts \
 		src/control/jsdialog/Widget.PageMarginEntry.ts \
 		src/control/jsdialog/Widget.PageSizeEntry.ts \
 		src/control/jsdialog/Widget.HTMLContent.ts \
@@ -1556,15 +1667,12 @@ pot:
 		src/main.js \
 		src/map/Clipboard.js \
 		src/map/Map.js \
-		src/map/handler/Map.Feedback.js \
 		src/map/handler/Map.FileInserter.js \
 		src/map/handler/Map.Keyboard.js \
 		src/map/handler/Map.Print.js \
 		src/map/handler/Map.SlideShow.js \
 		src/map/handler/Map.StateChanges.js \
-		src/map/handler/Map.VersionBar.js \
 		src/map/handler/Map.WOPI.js \
-		src/map/handler/Map.Welcome.js \
 		src/map/handler/Map.Settings.ts \
 		src/slideshow/engine/SlideShowHandler.ts \
 		src/slideshow/PauseTimer.ts \
@@ -1576,9 +1684,6 @@ pot:
 
 	html2po --pot --input=html/cool-help.html --output=po/templates/cool-help.pot --duplicates=merge
 	html2po --pot --input=descriptions/google-play.html --output=po/templates/descriptions.pot --duplicates=merge --keepcomments
-	html2po --pot --input=welcome/welcome.html --output=po/templates/welcome.pot --duplicates=merge
-	$(srcdir)/util/appendwelcome.py po/templates/welcome.pot po/templates/cool-ui.pot
-	rm po/templates/welcome.pot
 	msguniq -w 78 -t UTF-8 po/templates/cool-ui.pot > po/templates/cool-ui.pot.new; mv po/templates/cool-ui.pot.new po/templates/cool-ui.pot
 
 l10n: pot

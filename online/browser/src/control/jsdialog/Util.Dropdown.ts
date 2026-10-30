@@ -34,7 +34,19 @@ JSDialog.OpenDropdown = function (
 	isSubmenu: boolean,
 	earlyCallbackCall?: boolean,
 	noDefaultSelection?: boolean,
+	options?: DropdownOpenOptions,
 ) {
+	const headerList = options?.headerList;
+	const header = headerList?.header;
+	const entriesGrid = {
+		id: JSDialog.CreateDropdownEntriesId(id),
+		type: 'grid',
+		allyRole: 'listbox',
+		cols: 1,
+		rows: entries.length,
+		children: [] as Array<WidgetJSON>,
+		aria: headerList ? { label: headerList.listboxLabel } : undefined,
+	} as GridWidgetJSON;
 	const json = {
 		id: _createDropdownId(id),
 		type: 'dropdown',
@@ -43,17 +55,9 @@ JSDialog.OpenDropdown = function (
 		popupParent: popupParent,
 		popupAnchor: popupAnchor,
 		gridKeyboardNavigation: false,
+		dropdownHeaderId: header?.id,
 		cancellable: true,
-		children: [
-			{
-				id: JSDialog.CreateDropdownEntriesId(id),
-				type: 'grid',
-				allyRole: 'listbox',
-				cols: 1,
-				rows: entries.length,
-				children: [] as Array<WidgetJSON>,
-			} as GridWidgetJSON,
-		],
+		children: header ? [header, entriesGrid] : [entriesGrid],
 	} as JSDialogJSON;
 
 	if (
@@ -200,14 +204,15 @@ JSDialog.OpenDropdown = function (
 			}
 		}
 
-		if (entry && json?.children?.length) json.children[0].children?.push(entry);
+		if (entry) entriesGrid.children?.push(entry);
 	}
 
 	const focusId = initialSelectedId || checkedFocusId;
-	if (focusId && json?.children?.length) {
-		json.init_focus_id = focusId;
-		(json.children[0] as ComboBoxEntry).initialSelectedId = focusId;
+	if (focusId) {
+		entriesGrid.initialSelectedId = focusId;
 	}
+	if (header) json.init_focus_id = header.id;
+	else if (focusId) json.init_focus_id = focusId;
 
 	const generateCallback = function (
 		targetEntries: Array<MenuDefinition>,

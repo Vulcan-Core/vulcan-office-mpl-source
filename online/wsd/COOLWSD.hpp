@@ -273,7 +273,6 @@ protected:
 
 private:
 #if !MOBILEAPP
-    void processFetchUpdate(const std::shared_ptr<SocketPoll>& poll);
     static bool testMountingNSInFork();
     static void setupChildRoot(bool UseMountNamespaces);
     void initializeEnvOptions();

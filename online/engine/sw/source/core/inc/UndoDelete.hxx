@@ -104,6 +104,9 @@ public:
     // SwUndoTableCpyTable needs this information:
     bool IsDelFullPara() const { return m_bDelFullPara; }
 
+    /// Vulcan fork: only a plain text delete inside one paragraph is node-neutral.
+    std::optional<sw::UndoFootprint> GetFootprint() const override;
+
     void dumpAsXml(xmlTextWriterPtr pWriter) const override;
 };
 

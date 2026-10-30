@@ -2421,10 +2421,16 @@ const SwRedlineData & SwRangeRedline::GetRedlineData(const sal_uInt16 nPos) cons
 
 static OUString getRedlineDescrFromPaM(const SwPaM& rPaM, bool bSimplified)
 {
-    if (const SwTextNode* pTextNode = rPaM.GetPointNode().GetTextNode())
+    // Vulcan: look at the change's own last character, whichever end of it the point is at. With
+    // the point at the start, as a redline can be imported, the character before the change was
+    // looked at instead: a field there named a change that holds none, and a change of only a
+    // field was described as "$2". The tracked-change read used to hide this by reshowing every
+    // redline, which leaves the point at the end.
+    const SwPosition& rEnd = *rPaM.End();
+    if (const SwTextNode* pTextNode = rEnd.GetNode().GetTextNode())
     {
         if (const SwTextAttr* pTextAttr = pTextNode->GetFieldTextAttrAt(
-                rPaM.GetPoint()->GetContentIndex() - 1, ::sw::GetTextAttrMode::Default))
+                rEnd.GetContentIndex() - 1, ::sw::GetTextAttrMode::Default))
         {
             OUString result = pTextAttr->GetFormatField().GetField()->GetFieldName();
             return bSimplified ? result

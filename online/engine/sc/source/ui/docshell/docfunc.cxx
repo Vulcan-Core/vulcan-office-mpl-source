@@ -37,6 +37,7 @@
 #include <osl/diagnose.h>
 
 #include <com/sun/star/container/XNameContainer.hpp>
+#include <com/sun/star/embed/XStorage.hpp>
 #include <com/sun/star/script/ModuleType.hpp>
 #include <com/sun/star/script/XLibraryContainer.hpp>
 #include <com/sun/star/script/vba/XVBAModuleInfo.hpp>
@@ -151,6 +152,8 @@
 #include <set>
 #include <vector>
 #include <sfx2/viewfrm.hxx>
+#include <sot/storage.hxx>
+#include <sot/storinfo.hxx>
 
 using namespace com::sun::star;
 
@@ -866,6 +869,34 @@ static script::ModuleInfo lcl_InitModuleInfo( const SfxObjectShell& rDocSh, cons
     return sModuleInfo;
 }
 
+/** The module streams of the VBA project the document keeps for its save ("_MS_VBA_Macros", kept by the .xlsx/.xlsm
+    and .xls imports), upper case. A sheet deleted in this session leaves its module there: a new sheet must not take
+    that name, or the deleted sheet's code binds to it once the kept project is written back. */
+static std::set< OUString > lcl_GetKeptVbaModules( ScDocShell& rDocSh )
+{
+    std::set< OUString > aNames;
+    try
+    {
+        const uno::Reference< embed::XStorage >& xRoot = rDocSh.GetStorage();
+        if( !xRoot.is() || !xRoot->hasByName( u"_MS_VBA_Macros"_ustr ) )
+            return aNames;
+        rtl::Reference< SotStorage > xProject = SotStorage::OpenOLEStorage( xRoot, u"_MS_VBA_Macros"_ustr, StreamMode::STD_READ );
+        if( !xProject.is() || xProject->GetError() || !xProject->IsStorage( u"VBA"_ustr ) )
+            return aNames;
+        rtl::Reference< SotStorage > xVba = xProject->OpenSotStorage( u"VBA"_ustr, StreamMode::STD_READ );
+        SvStorageInfoList aInfos;
+        if( xVba.is() && !xVba->GetError() )
+            xVba->FillInfoList( &aInfos );
+        for( const SvStorageInfo& rInfo : aInfos )
+            if( rInfo.IsStream() )
+                aNames.insert( rInfo.GetName().toAsciiUpperCase() );
+    }
+    catch( const uno::Exception& )
+    {
+    }
+    return aNames;
+}
+
 void VBA_InsertModule( ScDocument& rDoc, SCTAB nTab, const OUString& sSource )
 {
     ScDocShell& rDocSh = *rDoc.GetDocumentShell();
@@ -888,10 +919,11 @@ void VBA_InsertModule( ScDocument& rDoc, SCTAB nTab, const OUString& sSource )
     if( !xLib.is() )
         return;
 
-    // if the Module with codename exists then find a new name
+    // if the Module with codename exists, in Basic or in the kept project, then find a new name
     sal_Int32 nNum = 1;
     OUString genModuleName = u"Sheet1"_ustr;
-    while( xLib->hasByName( genModuleName ) )
+    const std::set< OUString > aKeptModules = lcl_GetKeptVbaModules( rDocSh );
+    while( xLib->hasByName( genModuleName ) || aKeptModules.count( genModuleName.toAsciiUpperCase() ) )
         genModuleName = "Sheet" + OUString::number( ++nNum );
 
     cpo::uno::Any aSourceAny;
@@ -1069,6 +1101,10 @@ bool ScDocFunc::DeleteTable( SCTAB nTab, bool bRecord )
         }
     }
 
+    // read before DeleteTab: afterwards nTab is the next sheet, whose module must stay (as in ScViewFunc::DeleteTables)
+    OUString sCodeName;
+    bool bHasCodeName = rDoc.GetCodeName( nTab, sCodeName );
+
     if (rDoc.DeleteTab(nTab))
     {
         if (bRecord)
@@ -1079,13 +1115,9 @@ bool ScDocFunc::DeleteTable( SCTAB nTab, bool bRecord )
                         std::make_unique<ScUndoDeleteTab>( rDocShell, theTabs, std::move(pUndoDoc), std::move(pUndoData) ));
         }
         //  Update views:
-        if( bVbaEnabled )
+        if( bVbaEnabled && bHasCodeName )
         {
-            OUString sCodeName;
-            if( rDoc.GetCodeName( nTab, sCodeName ) )
-            {
-                VBA_DeleteModule( rDocShell, sCodeName );
-            }
+            VBA_DeleteModule( rDocShell, sCodeName );
         }
         rDocShell.Broadcast( ScTablesHint( SC_TAB_DELETED, nTab ) );
 

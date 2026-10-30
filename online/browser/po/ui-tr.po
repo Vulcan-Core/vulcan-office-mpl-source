@@ -5105,7 +5105,7 @@ msgid ""
 "Unlinking citations will prevent Collabora Online from updating citations "
 "and bibliography in this document."
 msgstr ""
-"Atıfların bağlantısını kaldırmak Collabora Online'ın bu belgedeki atıfları "
+"Atıfların bağlantısını kaldırmak Vulcan Office'ın bu belgedeki atıfları "
 "ve kaynakçayı güncellemesini engelleyecektir."
 
 #: src/control/HRuler.ts:321
@@ -6665,7 +6665,7 @@ msgstr ""
 #: src/map/handler/Map.VersionBar.js:50
 msgid "Your Collabora Online server needs updating. Version {0} is available."
 msgstr ""
-"Collabora Online sunucunuzun güncelleştirilmesi gerekiyor. Sürüm {0} mevcut."
+"Vulcan Office sunucunuzun güncelleştirilmesi gerekiyor. Sürüm {0} mevcut."
 
 #: src/map/handler/Map.WOPI.js:194
 msgid "Creating new file from template..."
@@ -6955,7 +6955,7 @@ msgstr ""
 
 #: welcome/welcome.html%2Bhtml.head.title:9-3
 msgid "Collabora Online Welcome"
-msgstr "Collabora Online'a Hoş Geldiniz"
+msgstr "Vulcan Office'a Hoş Geldiniz"
 
 #: welcome/welcome.html%2Bhtml.body.div.div.div.div.h1:26-7
 msgid "Explore The New {coolversion}"
@@ -6964,7 +6964,7 @@ msgstr "Yeni {coolversion} sürümünü keşfedin"
 #: welcome/welcome.html%2Bhtml.body.div.div.div.div.h2:27-7
 #: welcome/welcome.html%2Bhtml.body.div.div.div.div.h2:38-7
 msgid "Collabora Online Development Edition"
-msgstr "Collabora Online Development Edition"
+msgstr "Vulcan Office Development Edition"
 
 #: welcome/welcome.html%2Bhtml.body.div.div.div.div.p:28-7
 #, fuzzy
@@ -6994,7 +6994,7 @@ msgid ""
 msgstr ""
 "<a target=\"_blank\" href=\"https://www.collaboraonline.com/"
 "code-26-04-release-notes/\">Sürüm notlarına</a> göz atın ve ilgili her şeyi "
-"öğrenin: Ev kullanıcıları ve küçük takımlara yönelik en yeni Collabora "
+"öğrenin: Ev kullanıcıları ve küçük takımlara yönelik en yeni Vulcan Office "
 "Online Geliştirme Sürümü."
 
 #: welcome/welcome.html%2Bhtml.body.div.div.div.div.h1:48-7
@@ -7552,7 +7552,7 @@ msgstr ""
 #~ "noktası hakkında her şeyi öğrenin."
 
 #~ msgid "Integrate Collabora Online into your webapp"
-#~ msgstr "Collabora Online'ı web uygulamanızla bütünleştirin"
+#~ msgstr "Vulcan Office'ı web uygulamanızla bütünleştirin"
 
 #~ msgid "Or get involved in the development"
 #~ msgstr "Veya geliştirmeye dahil olun"
@@ -7567,7 +7567,7 @@ msgstr ""
 #~ "href=\"%coolBugreportURL\" target=\"_blank\">filing a bug report</a> with "
 #~ "all the essential steps on how to reproduce it."
 #~ msgstr ""
-#~ "<a href=\"%coolSdkURL\" target=\"_blank\">Collabora Online SDK</a>'da web "
+#~ "<a href=\"%coolSdkURL\" target=\"_blank\">Vulcan Office SDK</a>'da web "
 #~ "uygulamanızla bütünleştirme hakkında daha fazla bilgi edinin. Veya <a href=\""
 #~ "%coolStepByStepURL\" target=\"_blank\">adım adım talimatlara</a> gidin ve "
 #~ "CODE'yi sıfırdan oluşturun. Ayrıca, <a href=\"%coolTranslationsURL\" target="
@@ -7640,4 +7640,4 @@ msgstr ""
 #~ msgstr "Sunucu yeniden başlatılıyor ve kısa süre sonra kullanılabilir olacak"
 
 #~ msgid "Oops, there is a problem connecting to Collabora Online : "
-#~ msgstr "Collabora Online'a bağlanırken bir sorunla karşılaşıldı: "
+#~ msgstr "Vulcan Office'a bağlanırken bir sorunla karşılaşıldı: "

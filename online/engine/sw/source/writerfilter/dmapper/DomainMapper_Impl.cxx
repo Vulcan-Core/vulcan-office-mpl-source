@@ -134,8 +134,11 @@
 #include <com/sun/star/drawing/FillStyle.hpp>
 
 #include <docufld.hxx>
+#include <fmtline.hxx>
 #include <txtfld.hxx>
 #include <ndtxt.hxx>
+#include <IDocumentRedlineAccess.hxx>
+#include <redline.hxx>
 #include <unicode/errorcode.h>
 #include <unicode/regex.h>
 #include <unotextcursor.hxx>
@@ -382,8 +385,6 @@ DomainMapper_Impl::DomainMapper_Impl(
         m_eSkipFootnoteState(SkipFootnoteSeparator::OFF),
         m_nFootnotes(-1),
         m_nEndnotes(-1),
-        m_nFirstFootnoteIndex(-1),
-        m_nFirstEndnoteIndex(-1),
         m_bLineNumberingSet( false ),
         m_bIsParaMarkerChange( false ),
         m_bIsParaMarkerMove( false ),
@@ -1043,6 +1044,52 @@ const std::stack<BookmarkInsertPosition>& DomainMapper_Impl::GetSdtStarts() cons
     return m_xSdtStarts;
 }
 
+/// Whether the content control's content holds tracked changes and, read with them accepted,
+/// already shows rValue. The DOCX export stores a data-bound control's value that way
+/// (DocxAttributeOutput::WriteContentControlStart()).
+static bool lcl_ShowsBoundValueWithTrackedChanges(const uno::Reference<text::XTextCursor>& xCursor,
+                                                  const OUString& rValue)
+{
+    auto pSwCursor = dynamic_cast<const SwXTextCursor*>(xCursor.get());
+    const SwPaM* pPaM = pSwCursor ? pSwCursor->GetPaM() : nullptr;
+    if (!pPaM)
+    {
+        return false;
+    }
+
+    auto [pStart, pEnd] = pPaM->StartEnd();
+    const SwTextNode* pTextNode = pStart->GetNode().GetTextNode();
+    if (!pTextNode || pStart->GetNode() != pEnd->GetNode())
+    {
+        return false;
+    }
+
+    const IDocumentRedlineAccess& rIDRA = pTextNode->getIDocumentRedlineAccess();
+    if (rIDRA.GetRedlineTable().empty())
+    {
+        return false;
+    }
+
+    const OUString& rText = pTextNode->GetText();
+    OUStringBuffer aShown;
+    bool bTracked = false;
+    for (sal_Int32 i = pStart->GetContentIndex(); i < pEnd->GetContentIndex(); ++i)
+    {
+        const SwRangeRedline* pRedline = rIDRA.GetRedline(SwPosition(*pTextNode, i), nullptr);
+        if (pRedline)
+        {
+            bTracked = true;
+            // A tracked format change over a deletion stacks on top of it: still a deletion.
+            if (pRedline->GetTypeIgnoringAdditonalFormat() == RedlineType::Delete)
+            {
+                continue;
+            }
+        }
+        aShown.append(rText[i]);
+    }
+    return bTracked && aShown.makeStringAndClear() == rValue;
+}
+
 void DomainMapper_Impl::PopSdt()
 {
     if (m_xSdtStarts.empty())
@@ -1117,8 +1164,13 @@ void DomainMapper_Impl::PopSdt()
     xCursor->gotoRange(xEnd, /*bExpand=*/true);
 
     std::optional<OUString> oData = m_pSdtHelper->getValueFromDataBinding();
+    // Content that already shows the bound value with its tracked changes accepted keeps them:
+    // refilling it from the data binding would drop the changes before anyone reviewed them.
+    const bool bKeepTrackedContent
+        = oData.has_value() && lcl_ShowsBoundValueWithTrackedChanges(xCursor, *oData);
     if (oData.has_value()
-        && m_pSdtHelper->getControlType() != SdtControlType::picture)
+        && m_pSdtHelper->getControlType() != SdtControlType::picture
+        && !bKeepTrackedContent)
     {
         // Data binding has a value for us, prefer that over the in-document value.
         // But not for picture content controls: their sdtContent has the rendered
@@ -1295,7 +1347,7 @@ void DomainMapper_Impl::PopSdt()
 
     xText->insertTextContent(xCursor, xContentControl, /*bAbsorb=*/true);
 
-    if (bDateFromDataBinding)
+    if (bDateFromDataBinding && !bKeepTrackedContent)
     {
         OUString aDateString;
         xContentControl->getPropertyValue(u"DateString"_ustr) >>= aDateString;
@@ -4310,6 +4362,10 @@ void DomainMapper_Impl::PopPageHeaderFooter(PagePartType ePagePartType, PageType
 void DomainMapper_Impl::PushFootOrEndnote( bool bIsFootnote )
 {
     SAL_WARN_IF(m_StreamStateStack.top().eSubstreamType != SubstreamType::Body, "writerfilter.dmapper", "PushFootOrEndnote() is called from another foot or endnote");
+    // The first reference preloads all the notes (see PopFootOrEndnote()): remember which note
+    // it cites, its content goes into this note in RemoveTemporaryFootOrEndnotes().
+    if (m_pOOXMLDocument && (bIsFootnote ? GetFootnoteCount() : GetEndnoteCount()) == -1)
+        (bIsFootnote ? m_oFirstFootnoteRefId : m_oFirstEndnoteRefId) = m_pOOXMLDocument->getXNoteId();
     m_StreamStateStack.top().eSubstreamType = bIsFootnote ? SubstreamType::Footnote : SubstreamType::Endnote;
     try
     {
@@ -4660,7 +4716,8 @@ static void lcl_PasteRedlines(
 
 bool DomainMapper_Impl::CopyTemporaryNotes(
         const rtl::Reference< SwXFootnote > & xNoteSrc,
-        const rtl::Reference< SwXFootnote > & xNoteDest )
+        const rtl::Reference< SwXFootnote > & xNoteDest,
+        bool bIsFootnote )
 {
     if (!m_bSaxError && xNoteSrc != xNoteDest)
     {
@@ -4671,16 +4728,23 @@ bool DomainMapper_Impl::CopyTemporaryNotes(
 //        xTxt2.set( xDest, uno::UNO_QUERY_THROW );
         xNoteDest->copyText( xNoteSrc );
 
-        // copy its redlines
+        // copy its redlines (the caller gives the kind of the note: at the end of the import,
+        // IsInFootnote() can't tell footnotes from endnotes)
         std::vector<sal_Int32> redPos, redLen;
         sal_Int32 redIdx;
-        enum StoredRedlines eType = IsInFootnote() ? StoredRedlines::FOOTNOTE : StoredRedlines::ENDNOTE;
-        lcl_CopyRedlines(xNoteSrc, m_aStoredRedlines[eType], redPos, redLen, redIdx);
-        lcl_PasteRedlines(xNoteDest, m_aStoredRedlines[eType], redPos, redLen, redIdx);
+        std::deque<StoredRedline>& rRedlines
+            = m_aStoredRedlines[bIsFootnote ? StoredRedlines::FOOTNOTE : StoredRedlines::ENDNOTE];
+        lcl_CopyRedlines(xNoteSrc, rRedlines, redPos, redLen, redIdx);
+        lcl_PasteRedlines(xNoteDest, rRedlines, redPos, redLen, redIdx);
 
-        // remove processed redlines
-        for( size_t i = 0; redIdx > -1 && i <= sal::static_int_cast<size_t>(redIdx); i++)
-            m_aStoredRedlines[eType].pop_front();
+        // remove the processed redlines, i.e. the redlines of the copied note only: the notes
+        // are copied in the order of their references, not in the loaded order of rRedlines,
+        // so the skipped redlines before them can belong to notes that are not copied yet
+        for( sal_Int32 i = redIdx; i > -1; --i)
+        {
+            if ( redPos[i] != -1 )
+                rRedlines.erase(rRedlines.begin() + i);
+        }
 
         return true;
     }
@@ -4688,19 +4752,39 @@ bool DomainMapper_Impl::CopyTemporaryNotes(
     return false;
 }
 
+// rNoteIds contains the XML identifiers (w:id) of the notes in their loaded order, i.e. in the
+// order of footnotes.xml or endnotes.xml, so for the nNotes preloaded notes the position of an
+// identifier is also the index of the temporary note holding the content of that note.
+// Return that index for the identifier nId, or -1 if no preloaded note has it.
+static sal_Int32 lcl_findNoteIndex(const std::deque<sal_Int32>& rNoteIds, size_t nNotes,
+                                   sal_Int32 nId)
+{
+    const auto itEnd = rNoteIds.begin() + std::min(rNoteIds.size(), nNotes);
+    const auto it = std::find(rNoteIds.begin(), itEnd, nId);
+    return it == itEnd ? -1 : static_cast<sal_Int32>(it - rNoteIds.begin());
+}
+
 void DomainMapper_Impl::RemoveTemporaryFootOrEndnotes()
 {
     rtl::Reference< SwXTextDocument> xTextDoc( GetTextDocument() );
     rtl::Reference< SwXFootnote > xNote;
-    if  (GetFootnoteCount() > 0)
+    if  (GetFootnoteCount() > -1)
     {
         rtl::Reference<SwXFootnotes> xFootnotes = xTextDoc->getSwXFootnotes();
-        if ( m_nFirstFootnoteIndex > 0 )
+        // the first note got the first loaded content: give it the note its reference cites,
+        // or no content at all, if no note has the identifier of its reference
+        const sal_Int32 nFirstFootnoteIndex = m_oFirstFootnoteRefId
+            ? lcl_findNoteIndex(m_aFootnoteIds, GetFootnoteCount() + 1, *m_oFirstFootnoteRefId)
+            : 0;
+        if ( nFirstFootnoteIndex != 0 )
         {
             rtl::Reference< SwXFootnote > xFirstNote = xFootnotes->getFootnoteByIndex(0);
             xFirstNote->setString(u""_ustr);
-            xNote = xFootnotes->getFootnoteByIndex(m_nFirstFootnoteIndex);
-            CopyTemporaryNotes(xNote, xFirstNote);
+            if ( nFirstFootnoteIndex > 0 )
+            {
+                xNote = xFootnotes->getFootnoteByIndex(nFirstFootnoteIndex);
+                CopyTemporaryNotes(xNote, xFirstNote, /*bIsFootnote=*/true);
+            }
         }
         for (sal_Int32 i = GetFootnoteCount(); i > 0; --i)
         {
@@ -4708,15 +4792,21 @@ void DomainMapper_Impl::RemoveTemporaryFootOrEndnotes()
             xNote->getAnchor()->setString(u""_ustr);
         }
     }
-    if  (GetEndnoteCount() > 0)
+    if  (GetEndnoteCount() > -1)
     {
         rtl::Reference<SwXFootnotes> xEndnotes = xTextDoc->getSwXEndnotes();
-        if ( m_nFirstEndnoteIndex > 0 )
+        const sal_Int32 nFirstEndnoteIndex = m_oFirstEndnoteRefId
+            ? lcl_findNoteIndex(m_aEndnoteIds, GetEndnoteCount() + 1, *m_oFirstEndnoteRefId)
+            : 0;
+        if ( nFirstEndnoteIndex != 0 )
         {
             rtl::Reference< SwXFootnote > xFirstNote = xEndnotes->getFootnoteByIndex(0);
             xFirstNote->setString(u""_ustr);
-            xNote = xEndnotes->getFootnoteByIndex(m_nFirstEndnoteIndex);
-            CopyTemporaryNotes(xNote, xFirstNote);
+            if ( nFirstEndnoteIndex > 0 )
+            {
+                xNote = xEndnotes->getFootnoteByIndex(nFirstEndnoteIndex);
+                CopyTemporaryNotes(xNote, xFirstNote, /*bIsFootnote=*/false);
+            }
         }
         for (sal_Int32 i = GetEndnoteCount(); i > 0; --i)
         {
@@ -4724,29 +4814,6 @@ void DomainMapper_Impl::RemoveTemporaryFootOrEndnotes()
             xNote->getAnchor()->setString(u""_ustr);
         }
     }
-}
-
-static void lcl_convertToNoteIndices(std::deque<sal_Int32>& rNoteIds, sal_Int32& rFirstNoteIndex)
-{
-    // rNoteIds contains XML footnote identifiers in the loaded order of the footnotes
-    // (the same order as in footnotes.xml), i.e. it maps temporary footnote positions to the
-    // identifiers. For example: Ids[0] = 100; Ids[1] = -1, Ids[2] = 5.
-    // To copy the footnotes in their final place, create an array, which map the (normalized)
-    // footnote identifiers to the temporary footnote positions. Using the previous example,
-    // Pos[0] = 1; Pos[1] = 2; Pos[2] = 0 (where [0], [1], [2] are the normalized
-    // -1, 5 and 100 identifiers).
-    std::deque<sal_Int32> aSortedIds = rNoteIds;
-    std::sort(aSortedIds.begin(), aSortedIds.end());
-    std::map<sal_Int32, size_t> aMapIds;
-    // normalize footnote identifiers to 0, 1, 2 ...
-    for (size_t i = 0; i < aSortedIds.size(); ++i)
-        aMapIds[aSortedIds[i]] = i;
-    // reusing rNoteIds, create the Pos array to map normalized identifiers to the loaded positions
-    std::deque<sal_Int32> aOrigNoteIds = rNoteIds;
-    for (size_t i = 0; i < rNoteIds.size(); ++i)
-        rNoteIds[aMapIds[aOrigNoteIds[i]]] = i;
-    rFirstNoteIndex = rNoteIds.front();
-    rNoteIds.pop_front();
 }
 
 void DomainMapper_Impl::PopFootOrEndnote()
@@ -4767,35 +4834,23 @@ void DomainMapper_Impl::PopFootOrEndnote()
                        ( xNoteLast = xEndnotes->getFootnoteByIndex(xEndnotes->getCount()-1) ) )
              ) && xNoteLast->getLabel().isEmpty() )
         {
-            // copy content of the next temporary footnote
+            // copy content of the temporary footnote with the identifier of this reference
+            // (w:footnoteReference/@w:id), not of the next one: references can cite the notes
+            // in any order, cite a note twice, or leave a note uncited. A reference to a missing
+            // identifier keeps an empty note.
             try
             {
+                const sal_Int32 nRefId = m_pOOXMLDocument ? m_pOOXMLDocument->getXNoteId() : -1;
+                sal_Int32 nIndex = -1;
                 if ( IsInFootnote() && !m_aFootnoteIds.empty() )
-                {
-                    if ( m_nFirstFootnoteIndex == -1 )
-                        lcl_convertToNoteIndices(m_aFootnoteIds, m_nFirstFootnoteIndex);
-                    if (m_aFootnoteIds.empty()) // lcl_convertToNoteIndices pops m_aFootnoteIds
-                        m_bSaxError = true;
-                    else
-                    {
-                        xNoteFirst = xFootnotes->getFootnoteByIndex(m_aFootnoteIds.front());
-                        m_aFootnoteIds.pop_front();
-                    }
-                }
+                    nIndex = lcl_findNoteIndex(m_aFootnoteIds, GetFootnoteCount() + 1, nRefId);
                 else if ( !IsInFootnote() && !m_aEndnoteIds.empty() )
-                {
-                    if ( m_nFirstEndnoteIndex == -1 )
-                        lcl_convertToNoteIndices(m_aEndnoteIds, m_nFirstEndnoteIndex);
-                    if (m_aEndnoteIds.empty()) // lcl_convertToNoteIndices pops m_aEndnoteIds
-                        m_bSaxError = true;
-                    else
-                    {
-                        xNoteFirst = xEndnotes->getFootnoteByIndex(m_aEndnoteIds.front());
-                        m_aEndnoteIds.pop_front();
-                    }
-                }
+                    nIndex = lcl_findNoteIndex(m_aEndnoteIds, GetEndnoteCount() + 1, nRefId);
                 else
                     m_bSaxError = true;
+                if ( nIndex > -1 )
+                    xNoteFirst = IsInFootnote() ? xFootnotes->getFootnoteByIndex(nIndex)
+                                                : xEndnotes->getFootnoteByIndex(nIndex);
             }
             catch (uno::Exception const&)
             {
@@ -4803,7 +4858,8 @@ void DomainMapper_Impl::PopFootOrEndnote()
                 m_bSaxError = true;
             }
 
-            bCopied = CopyTemporaryNotes(xNoteFirst, xNoteLast);
+            if ( xNoteFirst.is() )
+                bCopied = CopyTemporaryNotes(xNoteFirst, xNoteLast, IsInFootnote());
         }
     }
 
@@ -9865,6 +9921,48 @@ void DomainMapper_Impl::SetLineNumbering( sal_Int32 nLnnMod, sal_uInt32 nLnc, sa
     rtl::Reference<SwXStyleFamily> xStyles = xStyleFamilies->GetParagraphStyles();
     lcl_linenumberingHeaderFooter( xStyles, u"Header"_ustr, this );
     lcl_linenumberingHeaderFooter( xStyles, u"Footer"_ustr, this );
+}
+
+void DomainMapper_Impl::SuppressLineNumbers(uno::Reference<text::XTextRange> const& xFrom,
+                                            uno::Reference<text::XTextRange> const& xTo)
+{
+    // Pasted or inserted text keeps the numbering of the document it lands in.
+    if (!m_bIsNewDoc || IsRTFImport() || IsInComments() || m_aTextAppendStack.empty())
+        return;
+
+    rtl::Reference<SwXTextCursor> xEnd;
+    if (xTo.is())
+        xEnd = dynamic_cast<SwXTextCursor*>(xTo.get());
+    else if (m_aTextAppendStack.top().xCursor.is())
+        xEnd = m_aTextAppendStack.top().xCursor;
+    else if (m_aTextAppendStack.top().xTextAppend.is())
+        // The paragraph after the section is already inserted: it is where the end is.
+        xEnd = dynamic_cast<SwXTextCursor*>(m_aTextAppendStack.top().xTextAppend->getEnd().get());
+    auto pFrom = dynamic_cast<SwXTextCursor*>(xFrom.get());
+    if (!xEnd.is() || !xEnd->GetPaM() || (xFrom.is() && (!pFrom || !pFrom->GetPaM())))
+        return;
+
+    SwNodes& rNodes = xEnd->GetPaM()->GetPointNode().GetNodes();
+    const SwNodeOffset nEndOfExtras = rNodes.GetEndOfExtras().GetIndex();
+    const SwNodeOffset nStart
+        = pFrom ? pFrom->GetPaM()->GetPointNode().GetIndex() : nEndOfExtras + 1;
+    const SwNodeOffset nEnd = xEnd->GetPaM()->GetPointNode().GetIndex();
+    // Body text only: headers, footers, notes and frames are not lines of the section.
+    if (nStart <= nEndOfExtras || nEnd > rNodes.GetEndOfContent().GetIndex())
+        return;
+
+    for (SwNodeOffset n = nStart; n < nEnd; ++n)
+    {
+        SwTextNode* pTextNode = rNodes[n]->GetTextNode();
+        if (!pTextNode)
+            continue;
+        const SwFormatLineNumber& rLineNumber = pTextNode->GetSwAttrSet().GetLineNumber();
+        if (!rLineNumber.IsCount())
+            continue;
+        SwFormatLineNumber aLineNumber(rLineNumber);
+        aLineNumber.SetCountLines(false);
+        pTextNode->SetAttr(aLineNumber);
+    }
 }
 
 

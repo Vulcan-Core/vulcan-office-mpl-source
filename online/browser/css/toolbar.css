@@ -1040,6 +1040,14 @@ button.leaflet-control-search-next
 .w2ui-icon.alignup { background: url('images/lc_alignup.svg') no-repeat center; }
 .w2ui-icon.alignmiddle { background: url('images/lc_alignmiddle.svg') no-repeat center; }
 .w2ui-icon.aligndown { background: url('images/lc_aligndown.svg') no-repeat center; }
+.w2ui-icon.alignonpage { background: url('images/lc_alignonpage.svg') no-repeat center; }
+.w2ui-icon.distributehorzdistance { background: url('images/lc_distributehorzdistance.svg') no-repeat center; }
+.w2ui-icon.distributevertdistance { background: url('images/lc_distributevertdistance.svg') no-repeat center; }
+.w2ui-icon.formatgroup { background: url('images/lc_formatgroup.svg') no-repeat center; }
+.w2ui-icon.formatungroup { background: url('images/lc_formatungroup.svg') no-repeat center; }
+.w2ui-icon.fitframetotext { background: url('images/lc_fitframetotext.svg') no-repeat center; }
+.w2ui-icon.toggleautowidth { background: url('images/lc_toggleautowidth.svg') no-repeat center; }
+.w2ui-icon.toggleautoheight { background: url('images/lc_toggleautoheight.svg') no-repeat center; }
 
 .w2ui-icon.arrangemenu { background: url('images/lc_arrangemenu.svg') no-repeat center; }
 .w2ui-icon.bringtofront { background: url('images/lc_bringtofront.svg') no-repeat center; }
@@ -1325,6 +1333,14 @@ button.leaflet-control-search-next
 [data-theme='dark'] .w2ui-icon.alignup { background: url('images/dark/lc_alignup.svg') no-repeat center; }
 [data-theme='dark'] .w2ui-icon.alignmiddle { background: url('images/dark/lc_alignmiddle.svg') no-repeat center; }
 [data-theme='dark'] .w2ui-icon.aligndown { background: url('images/dark/lc_aligndown.svg') no-repeat center; }
+[data-theme='dark'] .w2ui-icon.alignonpage { background: url('images/dark/lc_alignonpage.svg') no-repeat center; }
+[data-theme='dark'] .w2ui-icon.distributehorzdistance { background: url('images/dark/lc_distributehorzdistance.svg') no-repeat center; }
+[data-theme='dark'] .w2ui-icon.distributevertdistance { background: url('images/dark/lc_distributevertdistance.svg') no-repeat center; }
+[data-theme='dark'] .w2ui-icon.formatgroup { background: url('images/dark/lc_formatgroup.svg') no-repeat center; }
+[data-theme='dark'] .w2ui-icon.formatungroup { background: url('images/dark/lc_formatungroup.svg') no-repeat center; }
+[data-theme='dark'] .w2ui-icon.fitframetotext { background: url('images/dark/lc_fitframetotext.svg') no-repeat center; }
+[data-theme='dark'] .w2ui-icon.toggleautowidth { background: url('images/dark/lc_toggleautowidth.svg') no-repeat center; }
+[data-theme='dark'] .w2ui-icon.toggleautoheight { background: url('images/dark/lc_toggleautoheight.svg') no-repeat center; }
 
 [data-theme='dark'] .w2ui-icon.arrangemenu { background: url('images/dark/lc_arrangemenu.svg') no-repeat center; }
 [data-theme='dark'] .w2ui-icon.bringtofront { background: url('images/dark/lc_bringtofront.svg') no-repeat center; }
@@ -1701,6 +1717,20 @@ menu-entry-with-icon.padding-left + menu-entry-icon.width */
 
 .user-list-item.selected-user .user-list-item--name {
 	padding: 0px 8px;
+}
+
+/* Vulcan: "Active now" / "Active 6m ago" under a person's name,
+ * and a dimmed avatar for anyone who has not moved for two minutes
+ * (Control.UserList.ts personActivity). */
+.user-list-item--activity {
+	padding: 0px 8px;
+	font-size: 0.75em;
+	color: var(--color-text-light);
+}
+
+#userListSummaryButton .avatar-img.vulcan-inactive,
+#userlist-dropdown .avatar-img.vulcan-inactive {
+	opacity: 0.45;
 }
 /* Style for the scrollbar track */
 #userlist-dropdown::-webkit-scrollbar {

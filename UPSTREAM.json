@@ -4,6 +4,13 @@
     "branch": "main",
     "commit": "3e71f749c955014d13e4db055a65ea50c18d64d7",
     "importedAt": "2026-07-19T03:54:05.721Z",
-    "tarballSha256": "e91cd0995b80a722aaf7c2ded6752a56f3f27fdae38c08a0f0837bc4766dedae"
+    "tarballSha256": "e91cd0995b80a722aaf7c2ded6752a56f3f27fdae38c08a0f0837bc4766dedae",
+    "transform": {
+      "rulesVersion": 3,
+      "rulesSha256": "4a606b202681642ad7dd0df1d284ff88511863e15d1d0d61bb70bb92a3be8088",
+      "filesRewritten": 233,
+      "filesRenamed": 3,
+      "appliedInPlace": "2026-08-06"
+    }
   }
 }

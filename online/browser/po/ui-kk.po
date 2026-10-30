@@ -5103,7 +5103,7 @@ msgid ""
 "Unlinking citations will prevent Collabora Online from updating citations "
 "and bibliography in this document."
 msgstr ""
-"Цитаталарды ажырату Collabora Online жүйесіне бұл құжаттағы цитаталарды және "
+"Цитаталарды ажырату Vulcan Office жүйесіне бұл құжаттағы цитаталарды және "
 "библиографияны жаңартуға мүмкіндік бермейді."
 
 #: src/control/HRuler.ts:321
@@ -6654,7 +6654,7 @@ msgstr ""
 #: src/map/handler/Map.VersionBar.js:50
 msgid "Your Collabora Online server needs updating. Version {0} is available."
 msgstr ""
-"Сіздің Collabora Online серверіңіз жаңартуды қажет етеді. {0} нұсқасы "
+"Сіздің Vulcan Office серверіңіз жаңартуды қажет етеді. {0} нұсқасы "
 "қолжетімді."
 
 #: src/map/handler/Map.WOPI.js:194
@@ -6945,7 +6945,7 @@ msgstr ""
 
 #: welcome/welcome.html%2Bhtml.head.title:9-3
 msgid "Collabora Online Welcome"
-msgstr "Collabora Online-ға қош келдіңіз"
+msgstr "Vulcan Office-ға қош келдіңіз"
 
 #: welcome/welcome.html%2Bhtml.body.div.div.div.div.h1:26-7
 msgid "Explore The New {coolversion}"
@@ -6954,7 +6954,7 @@ msgstr "Жаңа {coolversion} туралы білу"
 #: welcome/welcome.html%2Bhtml.body.div.div.div.div.h2:27-7
 #: welcome/welcome.html%2Bhtml.body.div.div.div.div.h2:38-7
 msgid "Collabora Online Development Edition"
-msgstr "Collabora Online әзірлеушілер нұсқасы"
+msgstr "Vulcan Office әзірлеушілер нұсқасы"
 
 #: welcome/welcome.html%2Bhtml.body.div.div.div.div.p:28-7
 #, fuzzy
@@ -6985,7 +6985,7 @@ msgid ""
 msgstr ""
 "<a target=\"_blank\" href=\"https://www.collaboraonline.com/"
 "code-26-04-release-notes/\"> шығару ескертпелері</a>-мен танысып, үй "
-"пайдаланушылары мен шағын командаларға арналған ең соңғы Collabora Online "
+"пайдаланушылары мен шағын командаларға арналған ең соңғы Vulcan Office "
 "Development Edition туралы біліңіз."
 
 #: welcome/welcome.html%2Bhtml.body.div.div.div.div.h1:48-7
@@ -7053,7 +7053,7 @@ msgstr ""
 
 #, fuzzy
 #~ msgid "Oops, there is a problem connecting the document"
-#~ msgstr "Қап, Collabora Online жүйесіне байланысу қатесі орын алды : "
+#~ msgstr "Қап, Vulcan Office жүйесіне байланысу қатесі орын алды : "
 
 #~ msgid "Server is down, restarting automatically. Please wait."
 #~ msgstr ""

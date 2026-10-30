@@ -65,6 +65,8 @@ class FormulaBar {
 
 	_updateEditButtons() {
 		var enabled = !this.map.isReadOnlyMode();
+		// On phones only 'functiondialog' exists; _setButtonEnabled just logs
+		// a not-found warning for the others, and that is fine.
 		for (var btn of ['functiondialog', 'AutoSumMenu', 'startformula'])
 			this._setButtonEnabled(btn, enabled);
 		var inputField = this.getInputField();
@@ -170,6 +172,43 @@ class FormulaBar {
 							symbol: 'SPIN_DOWN',
 						}]
 				}];
+
+			// Google-Sheets phone bar (docs/mobile-redesign/02 §2): under the
+			// Vulcan phone chrome the accept/cancel formula controls live IN
+			// the (bottom-docked) formula bar — ✕ then ✓ at the right edge —
+			// instead of the mobile top bar. Toggled from onFormulaBarFocus/
+			// onFormulaBarBlur (Toolbar.js); stock phone chrome keeps the
+			// top-bar buttons.
+			//
+			// That right-edge slot shows ONLY ✕/✓ during a live edit and
+			// nothing when idle. The ✎ Edit-cell button that used to fill the
+			// idle half was removed under G10 ("NO edit button — double-tap a
+			// cell to edit"): the doors into a cell edit are the double tap
+			// (MouseControl.ts) and this fx field itself.
+			//
+			// 🔴 G10 IS REVERSED FOR EDIT-READY (owner, 2026-08-27) — and NOT
+			// here. That mode does not show this row at all (§13-CALC.2c), so
+			// "tap the fx field" is not a door the user can reach, which was
+			// the whole of what G10 relied on. The ✎ came back as a control of
+			// THAT state, on VulcanCalcCellPreview.ts, calling focus() below
+			// and nothing else — so the door inventory in VulcanCalcReturnKey
+			// .ts stays true, and this idle slot stays empty exactly as G10
+			// left it. A second pencil here would be the same verb built twice.
+			if (document.documentElement.classList.contains('vulcan-mobile-chrome')) {
+				this.data[0].children.push(
+					{
+						id: 'cancelformula',
+						type: 'customtoolitem',
+						text: _UNO('.uno:Cancel', 'spreadsheet'),
+						visible: false
+					},
+					{
+						id: 'acceptformula',
+						type: 'customtoolitem',
+						text: _('Accept'),
+						visible: false
+					});
+			}
 		}
 
 		this.parentContainer.replaceChildren();
@@ -236,6 +275,11 @@ class FormulaBar {
 					return;
 				this.focusField();
 				map.onFormulaBarFocus();
+				// The fx field is an edit-mode door (VulcanCalcReturnKey.ts):
+				// its keystrokes ride map._textInput, so Return here converts
+				// through the same choke as the in-cell doors.
+				if (window.VulcanCalcReturnKey)
+					window.VulcanCalcReturnKey.enterCellEditDoor();
 			}
 
 			map.userList.followUser(map._docLayer._getViewId(), false);
@@ -266,7 +310,60 @@ class FormulaBar {
 		this.map._textInput.focus(true);
 		this.focusField();
 		this.map.onFormulaBarFocus();
+		// Programmatic fx focus (startformula's "=" among the callers) is an
+		// edit-mode door like a user tap on the field (VulcanCalcReturnKey.ts).
+		if (window.VulcanCalcReturnKey)
+			window.VulcanCalcReturnKey.enterCellEditDoor();
 		return true;
+	}
+
+	/*
+	 * THIS ROW CAN ARRIVE UNDER A FINGER THAT IS ALREADY DOWN.
+	 *
+	 * EDIT-READY's ✎ stands in this row's slot: §13-CALC.2c withdraws
+	 * #formulabar-row in that mode and VulcanCalcCellPreview.ts takes the 53px
+	 * it leaves. Opening the door swaps the two MID-GESTURE, so #acceptformula
+	 * lands on the pixels the ✎ just vacated — measured on a 390px phone, ✎ at
+	 * 327,564 44x44 against ✓ at 332,576 44x44, a 39x32 overlap. The rest of
+	 * that ONE gesture (its pointerup, its touchend, the compatibility click
+	 * behind them) then hit-tests to ✓ and dispatches acceptformula, ending the
+	 * edit the same tap had just opened: one tap on the ✎ was a no-op.
+	 *
+	 * So this bar refuses an activation whose gesture began before it was on
+	 * screen. The latch is cleared by a pointerdown ON THIS BAR in the CAPTURE
+	 * phase — the first event of any real tap on ✓ or ✕ — so tap-to-commit
+	 * cannot regress: a fresh finger clears the latch before the control it
+	 * pressed sees anything, and every activation of a control in here is
+	 * preceded by its own pointerdown in here. Nothing else clears it, and an
+	 * armed latch between gestures is inert for the same reason.
+	 *
+	 * DOM EVENTS ONLY. The commit routes that carry no gesture — closeapp, the
+	 * idle handler, TextInput's Return, the escape rung — dispatch straight to
+	 * app.dispatcher and never reach these listeners.
+	 */
+	vulcanGuardDoorGesture() {
+		if (!this.parentContainer)
+			return;
+		if (!this.vulcanResidueGuardBound) {
+			this.vulcanResidueGuardBound = true;
+			this.parentContainer.addEventListener('pointerdown', () => {
+				this.vulcanDoorGestureLive = false;
+			}, true);
+			for (const type of ['pointerup', 'touchend', 'click']) {
+				this.parentContainer.addEventListener(type, (event) => {
+					if (!this.vulcanDoorGestureLive)
+						return;
+					// A keyboard or assistive activation synthesises a
+					// detail-zero click with no pointer behind it, which is
+					// the one activation that can never be this residue.
+					if (event.type === 'click' && event.detail === 0)
+						return;
+					event.preventDefault();
+					event.stopPropagation();
+				}, true);
+			}
+		}
+		this.vulcanDoorGestureLive = true;
 	}
 
 	enable() {
@@ -397,7 +494,18 @@ class FormulaBar {
 				var customEditArea = this.getInputField();
 				if (customEditArea) {
 					var selection = innerData.selection.split(';');
-					customEditArea.setText(innerData.text, selection);
+					var text = innerData.text;
+					// Vulcan: while the Calc echo is ahead of core, keep
+					// showing its prediction rather than stepping back one
+					// character per reply.
+					if (app.definitions && app.definitions.vulcanCalcTextEcho) {
+						var echoed = app.definitions.vulcanCalcTextEcho.formulaBarText(text);
+						if (echoed !== text) {
+							text = echoed;
+							selection = [String(text.length), String(text.length), '0', '0'];
+						}
+					}
+					customEditArea.setText(text, selection);
 				}
 				return;
 			}

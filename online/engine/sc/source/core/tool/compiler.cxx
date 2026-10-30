@@ -3090,6 +3090,22 @@ bool ScCompiler::ParseOpCode( const OUString& rName, bool bInArray )
         aName = rName.copy(7);
     OpCodeHashMap::const_iterator iLook( mxSymbols->getHashMap().find( aName));
     bool bFound = (iLook != mxSymbols->getHashMap().end());
+    if (!bFound && mxSymbols->isOOXML())
+    {
+        // Excel writes a function newer than Excel 2007 with the _xlfn.
+        // prefix (FILTER and SORT with _xlfn._xlws.), and the OOXML names know
+        // it only that way. Other producers write the bare name: a workbook
+        // copied from Google Sheets held IFS(...). Resolve such a name to the
+        // prefixed one rather than to #NAME?, which the export would then
+        // write into the file as a lowercased name with an error result.
+        for (const char* pPrefix : { "_XLFN.", "_XLFN._XLWS." })
+        {
+            iLook = mxSymbols->getHashMap().find( OUString( OUString::createFromAscii( pPrefix) + aName));
+            bFound = (iLook != mxSymbols->getHashMap().end());
+            if (bFound)
+                break;
+        }
+    }
     if (bFound)
     {
         OpCode eOp = iLook->second;

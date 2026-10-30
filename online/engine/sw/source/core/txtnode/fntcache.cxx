@@ -61,7 +61,35 @@
 #include "justify.hxx"
 #include <svtools/colorcfg.hxx>
 #include <basegfx/color/bcolortools.hxx>
+#include <basegfx/range/b2drange.hxx>
 #include <boost/container/vector.hpp>
+#include <drawinglayer/attribute/fillgraphicattribute.hxx>
+#include <drawinglayer/attribute/sdrfillgraphicattribute.hxx>
+#include <IDocumentDrawModelAccess.hxx>
+#include <VulcanTextBackdrop.hxx>
+#include <anchoredobject.hxx>
+#include <dflyobj.hxx>
+#include <flyfrm.hxx>
+#include <grfatr.hxx>
+#include <ndgrf.hxx>
+#include <notxtfrm.hxx>
+#include <sortedobjs.hxx>
+#include <hintids.hxx>
+#include <textboxhelper.hxx>
+#include <viewimp.hxx>
+#include <cpo/uno/Any.hxx>
+#include <sal/log.hxx>
+#include <svx/sdasitm.hxx>
+#include <svx/svdoashp.hxx>
+#include <svx/svdoattr.hxx>
+#include <svx/svdograf.hxx>
+#include <svx/svdogrp.hxx>
+#include <svx/svdobj.hxx>
+#include <svx/svdouno.hxx>
+#include <svx/svdovirt.hxx>
+#include <svx/xfillit0.hxx>
+#include <vcl/BitmapReadAccess.hxx>
+#include <vcl/GraphicObject.hxx>
 
 using namespace ::com::sun::star;
 
@@ -2340,6 +2368,514 @@ TextFrameIndex SwFont::GetTextBreak(SwDrawTextInfo const & rInf, tools::Long nTe
     return nTextBreak2;
 }
 
+namespace
+{
+namespace tb = sw::textbackdrop;
+
+tb::Layer lcl_Layer(const IDocumentDrawModelAccess& rIDDMA, SdrLayerID nLayer)
+{
+    if (nLayer == rIDDMA.GetHellId())
+        return tb::Layer::Hell;
+    if (nLayer == rIDDMA.GetHeaderFooterHellId())
+        return tb::Layer::HeaderFooterHell;
+    if (nLayer == rIDDMA.GetHeavenId())
+        return tb::Layer::Heaven;
+    return tb::Layer::Other;
+}
+
+tb::BrushOwner lcl_BrushOwner(const SwFrame* pFrame)
+{
+    if (!pFrame)
+        return tb::BrushOwner::None;
+    if (pFrame->IsTextFrame())
+        return tb::BrushOwner::Paragraph;
+    if (pFrame->IsCellFrame())
+        return tb::BrushOwner::Cell;
+    return tb::BrushOwner::Other;
+}
+
+tb::Rect lcl_Rect(const SwRect& rRect)
+{
+    return { rRect.Left(), rRect.Top(), rRect.Width(), rRect.Height() };
+}
+
+tb::Rgb lcl_Rgb(const Color& rColor) { return { rColor.GetRed(), rColor.GetGreen(), rColor.GetBlue() }; }
+
+Color lcl_Color(const tb::Rgb& rRgb) { return Color(rRgb.nR, rRgb.nG, rRgb.nB); }
+
+/// The box the run covers in document coordinates, switched the way DrawText
+/// switches its position.
+SwRect lcl_TextRect(const SwDrawTextInfo& rInf, const vcl::Font& rFnt)
+{
+    const tb::Rect aText = tb::TextRect(rInf.GetPos().X(), rInf.GetPos().Y(), rInf.GetWidth(),
+                                        rFnt.GetFontSize().Height());
+    SwRect aRect(Point(aText.nLeft, aText.nTop), Size(aText.nWidth, aText.nHeight));
+    const SwTextFrame* pFrame = rInf.GetFrame();
+    if (pFrame->IsRightToLeft() && !rInf.IsIgnoreFrameRTL())
+        pFrame->SwitchLTRtoRTL(aRect);
+    if (pFrame->IsVertical())
+        pFrame->SwitchHorizontalToVertical(aRect);
+    return aRect;
+}
+
+/// An unrotated, unsheared rectangle, or a custom shape drawn as one.
+bool lcl_IsPlainRectangle(const SdrObject& rObj)
+{
+    if (rObj.GetRotateAngle() || rObj.GetShearAngle())
+        return false;
+    if (rObj.GetObjIdentifier() == SdrObjKind::Rectangle)
+        return true;
+    const SdrObjCustomShape* pShape = dynamic_cast<const SdrObjCustomShape*>(&rObj);
+    if (!pShape)
+        return false;
+    const SdrCustomShapeGeometryItem& rGeometry = pShape->GetMergedItem(SDRATTR_CUSTOMSHAPE_GEOMETRY);
+    const cpo::uno::Any* pType = rGeometry.GetPropertyValueByName(u"Type"_ustr);
+    OUString aType;
+    return pType && (*pType >>= aType) && tb::IsRectangleShape(aType);
+}
+
+/// The picture's pixels with its draw mode and colour adjustments applied, as a
+/// grid. Crop, mirroring, rotation and transparency come from the layout instead.
+tb::Grid lcl_MakeGrid(const Graphic& rGraphic, const GraphicAttr& rAttr)
+{
+    Bitmap aBitmap;
+    if (const std::shared_ptr<VectorGraphicData>& pVector = rGraphic.getVectorGraphicData())
+    {
+        // Render on our own: Graphic::GetBitmap() would replace the bitmap the
+        // graphic caches for painting.
+        const basegfx::B2DRange& rRange = pVector->getRange();
+        const auto [nWidth, nHeight] = tb::SourceSize(rRange.getWidth(), rRange.getHeight());
+        if (nWidth > 0 && nHeight > 0)
+            aBitmap = pVector->getBitmap(Size(nWidth, nHeight));
+    }
+    else if (rGraphic.GetType() == GraphicType::Bitmap && !rGraphic.IsAnimated())
+    {
+        aBitmap = rGraphic.GetBitmap();
+        const Size aSize(aBitmap.GetSizePixel());
+        const auto [nWidth, nHeight] = tb::SourceSize(aSize.Width(), aSize.Height());
+        // Default box-averages every source pixel when it shrinks a picture by more
+        // than 0.6, on the premultiplied bytes of a 32-bit bitmap, so thin rules and
+        // small type keep their share of the mean.
+        if (nWidth > 0 && (nWidth != aSize.Width() || nHeight != aSize.Height()))
+            aBitmap.Scale(Size(nWidth, nHeight), BmpScaleFlag::Default);
+    }
+    if (aBitmap.IsEmpty())
+        return tb::Grid();
+
+    GraphicAttr aColour;
+    aColour.SetDrawMode(rAttr.GetDrawMode());
+    aColour.SetLuminance(rAttr.GetLuminance());
+    aColour.SetContrast(rAttr.GetContrast());
+    aColour.SetChannelR(rAttr.GetChannelR());
+    aColour.SetChannelG(rAttr.GetChannelG());
+    aColour.SetChannelB(rAttr.GetChannelB());
+    aColour.SetGamma(rAttr.GetGamma());
+    aColour.SetInvert(rAttr.IsInvert());
+    if (aColour.IsSpecialDrawMode() || aColour.IsAdjusted())
+        aBitmap = GraphicObject(Graphic(aBitmap)).GetTransformedGraphic(&aColour).GetBitmap();
+
+    BitmapScopedReadAccess pAccess(aBitmap);
+    if (!pAccess)
+        return tb::Grid();
+    const tools::Long nWidth = pAccess->Width();
+    const tools::Long nHeight = pAccess->Height();
+    tb::Grid aGrid(nWidth, nHeight);
+    std::vector<sal_uInt8> aRow(4 * nWidth);
+    for (tools::Long nY = 0; nY < nHeight; ++nY)
+    {
+        for (tools::Long nX = 0; nX < nWidth; ++nX)
+        {
+            const BitmapColor aPixel(pAccess->GetColor(nY, nX));
+            aRow[4 * nX] = aPixel.GetRed();
+            aRow[4 * nX + 1] = aPixel.GetGreen();
+            aRow[4 * nX + 2] = aPixel.GetBlue();
+            aRow[4 * nX + 3] = aPixel.GetAlpha();
+        }
+        aGrid.AddRow(nY, aRow.data());
+    }
+    return aGrid;
+}
+
+/// The grid of a picture painted with rAttr's draw mode and colour adjustments,
+/// or null when it cannot be read. Cached by content and those attributes only,
+/// so a Writer picture and a drawing-layer picture of the same content share one
+/// entry, and nothing in the cache can go stale.
+const tb::Grid* lcl_GraphicGrid(const Graphic& rGraphic, const GraphicAttr& rAttr)
+{
+    static tb::ContentCache<tb::GridKey, tb::Grid> s_aGrids;
+    const tb::GridKey aKey{ rGraphic.GetChecksum(), static_cast<int>(rAttr.GetDrawMode()),
+                            rAttr.GetLuminance(),   rAttr.GetContrast(),
+                            rAttr.GetChannelR(),    rAttr.GetChannelG(),
+                            rAttr.GetChannelB(),    rAttr.GetGamma(),
+                            rAttr.IsInvert() };
+    if (!aKey.nChecksum)
+        return nullptr;
+    const tb::Grid* pGrid = s_aGrids.Find(aKey);
+    if (!pGrid)
+    {
+        SAL_INFO("sw.core", "text backdrop grid " << aKey.nChecksum);
+        pGrid = s_aGrids.Insert(aKey, lcl_MakeGrid(rGraphic, rAttr));
+    }
+    return pGrid && !pGrid->IsEmpty() ? pGrid : nullptr;
+}
+
+/// A Writer text frame paints its whole area before its text (SwFlyFrame::PaintSwFrame
+/// paints a text frame's complete background) as SwFrame::PaintSwFrameBackground
+/// does: the brush GetBackgroundBrush finds for it, its own fill first and then up
+/// from its anchor, or the document colour when there is none. A transparent fill
+/// of its own lets what is behind it through. Sets *pbHides when nothing behind the
+/// frame shows. Returns whether it put any ink under rText.
+bool lcl_PaintTextFly(const SwFlyFrame& rFly, const tb::Rect& rText, const tb::Rect& rObject,
+                      tb::Rgb& rColor, bool* pbHides = nullptr)
+{
+    drawinglayer::attribute::SdrAllFillAttributesHelperPtr pFill;
+    const SvxBrushItem* pItem = nullptr;
+    std::optional<Color> oColor;
+    SwRect aOrigRect;
+    Color aPainted(aGlobalRetoucheColor);
+    bool bHides = true;
+    if (rFly.GetBackgroundBrush(pFill, pItem, oColor, aOrigRect, /*bLowerMode=*/false,
+                                /*bConsiderTextBox=*/false))
+    {
+        if (oColor)
+            aPainted = *oColor;
+        else if (pFill && pFill->isUsed())
+        {
+            aPainted = Color(pFill->getAverageColor(lcl_Color(rColor).getBColor()));
+            bHides = !pFill->isTransparent();
+        }
+        else
+            aPainted = pItem->GetColor();
+        bHides = bHides && !aPainted.IsTransparent();
+    }
+    if (pbHides)
+        *pbHides = bHides;
+    return tb::Mix(rColor, lcl_Rgb(aPainted),
+                   tb::Coverage(rText, rObject) * aPainted.GetAlpha() / 255.0);
+}
+
+/// A picture on the drawing layer, unrotated and unsheared: a VML v:imagedata
+/// picture, or a DrawingML picture Writer keeps as a shape. It paints as
+/// SdrGrafPrimitive2D does: its fill only where the picture is transparent, then
+/// the picture, cropped as GraphicPrimitive2D crops. rObject is the rectangle the
+/// layout reports, which for a copy in a later page's header or footer already
+/// includes the copy's offset. Returns whether it put any ink under rText.
+bool lcl_PaintGrafObj(const SdrGrafObj& rGraf, const tb::Rect& rText, const tb::Rect& rObject,
+                      tb::Rgb& rColor)
+{
+    if (rGraf.GetRotateAngle() || rGraf.GetShearAngle())
+        return false;
+    // Empty, or a link not loaded yet: svx paints a draft placeholder instead.
+    const GraphicType eType = rGraf.GetGraphicType();
+    if (eType == GraphicType::NONE || eType == GraphicType::Default)
+        return false;
+    const GraphicObject& rGraphicObject = rGraf.GetGraphicObject(); // no swap-in, no link update
+    // The paint's colour attributes, alpha, crop (1/100 mm) and mirroring.
+    const GraphicAttr aAttr(rGraf.GetGraphicAttr());
+    bool bInk = false;
+    if ((aAttr.IsTransparent() || rGraphicObject.IsTransparent())
+        && rGraf.GetMergedItem(XATTR_FILLSTYLE).GetValue() != drawing::FillStyle_NONE)
+    {
+        const drawinglayer::attribute::SdrAllFillAttributesHelper aFill(rGraf.GetMergedItemSet());
+        if (aFill.isUsed()
+            && tb::Mix(rColor, lcl_Rgb(Color(aFill.getAverageColor(lcl_Color(rColor).getBColor()))),
+                       tb::Coverage(rText, rObject)))
+            bInk = true;
+    }
+    if (!aAttr.GetAlpha())
+        return bInk;
+    const tb::Grid* pGrid = lcl_GraphicGrid(rGraf.GetGraphic(), aAttr);
+    if (!pGrid)
+        return bInk;
+    // GraphicPrimitive2D's crop: each value is 1/100 mm of the picture's preferred
+    // size, scaled by the shown part's size (an object size of 1 gives shares).
+    basegfx::B2DVector aPerUnit(0, 0);
+    if (aAttr.IsCropped())
+    {
+        aPerUnit = rGraphicObject.calculateCropScaling(1.0, 1.0, aAttr.GetLeftCrop(), aAttr.GetTopCrop(),
+                                                       aAttr.GetRightCrop(), aAttr.GetBottomCrop());
+        if (!(aPerUnit.getX() > 0) || !(aPerUnit.getY() > 0))
+            return bInk;
+    }
+    const tb::Rect aWhole = tb::UncroppedPicture(
+        rObject, aAttr.GetLeftCrop() * aPerUnit.getX(), aAttr.GetTopCrop() * aPerUnit.getY(),
+        aAttr.GetRightCrop() * aPerUnit.getX(), aAttr.GetBottomCrop() * aPerUnit.getY(),
+        rGraf.IsMirrored());
+    if (tb::Over(rColor, tb::SampleUnder(*pGrid, rText, rObject, aWhole), aAttr.GetAlpha() / 255.0))
+        bInk = true;
+    return bInk;
+}
+
+/// Whether the view paints rObj, or a placeholder in its place
+/// (SwFlyFrame::IsPaint): Images off hides frames, Drawings off hides shapes
+/// and controls. Writer asks this of the object it paints, so a shape's virtual
+/// copy in a header still paints with Drawings off. A screen never paints an
+/// object that is not visible (ViewObjectContactOfSdrObj::isPrimitiveVisible),
+/// such as a DOCX shape or group member marked hidden.
+bool lcl_ViewShows(const SdrObject& rObj, const SwViewOption& rOpt)
+{
+    if (!rObj.IsVisible())
+        return false;
+    if (DynCastSwVirtFlyDrawObj(&rObj))
+        return rOpt.IsGraphic();
+    return rOpt.IsDraw()
+           || !(dynamic_cast<const SdrUnoObj*>(&rObj) || dynamic_cast<const SdrAttrObj*>(&rObj)
+                || dynamic_cast<const SwFlyDrawObj*>(&rObj));
+}
+
+/// Paints a drawing-layer object over rColor as far as it covers rText: a
+/// picture, a plain filled rectangle, or a group, whose members the view shows
+/// paint in their order. rObject is where the layout puts rObj. bCopy is set
+/// for a virtual copy's object, whose groups inside groups Writer paints
+/// without asking whether they are visible (impAddPrimitivesFromGroup asks only
+/// the leaves). Returns whether it put any ink there.
+bool lcl_PaintDrawObj(const SdrObject& rObj, const tb::Rect& rText, const tb::Rect& rObject,
+                      const SwViewOption& rOpt, bool bCopy, tb::Rgb& rColor)
+{
+    if (const SdrObjGroup* pGroup = dynamic_cast<const SdrObjGroup*>(&rObj))
+    {
+        // rObject is moved off the group's own rectangle when it places a virtual copy.
+        const tb::Rect aGroup = lcl_Rect(SwRect(rObj.GetSnapRect()));
+        bool bInk = false;
+        for (const rtl::Reference<SdrObject>& pMember : *pGroup)
+        {
+            if (!(bCopy && dynamic_cast<const SdrObjGroup*>(pMember.get()))
+                && !lcl_ViewShows(*pMember, rOpt))
+                continue;
+            tb::Rect aMember = lcl_Rect(SwRect(pMember->GetSnapRect()));
+            aMember.nLeft += rObject.nLeft - aGroup.nLeft;
+            aMember.nTop += rObject.nTop - aGroup.nTop;
+            if (lcl_PaintDrawObj(*pMember, rText, aMember, rOpt, bCopy, rColor))
+                bInk = true;
+        }
+        return bInk;
+    }
+    if (const SdrGrafObj* pGraf = dynamic_cast<const SdrGrafObj*>(&rObj))
+        return lcl_PaintGrafObj(*pGraf, rText, rObject, rColor);
+    if (!lcl_IsPlainRectangle(rObj)
+        || rObj.GetMergedItem(XATTR_FILLSTYLE).GetValue() == drawing::FillStyle_NONE)
+        return false;
+    const drawinglayer::attribute::SdrAllFillAttributesHelper aFill(rObj.GetMergedItemSet());
+    return aFill.isUsed()
+           && tb::Mix(rColor, lcl_Rgb(Color(aFill.getAverageColor(lcl_Color(rColor).getBColor()))),
+                      tb::Coverage(rText, rObject));
+}
+
+/// Paints one object behind the text over rColor, as far as it covers rText.
+/// Returns whether it put any ink there.
+bool lcl_PaintOver(const SwAnchoredObject& rAnchored, const SwRect& rText, const SwViewOption& rOpt,
+                   tb::Rgb& rColor)
+{
+    const tb::Rect aText = lcl_Rect(rText);
+    const tb::Rect aObject = lcl_Rect(rAnchored.GetObjRect());
+    if (const SwFlyFrame* pFly = rAnchored.DynCastFlyFrame())
+    {
+        const SwFrame* pLower = pFly->Lower();
+        if (!pLower || !pLower->IsNoTextFrame())
+            return lcl_PaintTextFly(*pFly, aText, aObject, rColor);
+        bool bInk = false;
+        const drawinglayer::attribute::SdrAllFillAttributesHelperPtr pFill
+            = pFly->getSdrAllFillAttributesHelper();
+        if (pFill && pFill->isUsed()
+            && tb::Mix(rColor,
+                       lcl_Rgb(Color(pFill->getAverageColor(lcl_Color(rColor).getBColor()))),
+                       tb::Coverage(aText, aObject)))
+            bInk = true;
+        const SwNoTextFrame& rNoText = static_cast<const SwNoTextFrame&>(*pLower);
+        const SwGrfNode* pNode = rNoText.GetNode()->GetGrfNode();
+        if (!pNode || rNoText.isTransformableSwFrame())
+            return bInk;
+        GraphicAttr aAttr;
+        pNode->GetGraphicAttr(aAttr, &rNoText);
+        const tb::Grid* pGrid = lcl_GraphicGrid(pNode->GetGrf(), aAttr);
+        if (!pGrid)
+            return bInk;
+        SwRect aVisible, aWhole;
+        rNoText.GetGrfArea(aVisible, &aWhole);
+        const double fOpacity = 1.0 - pNode->GetSwAttrSet().GetTransparencyGrf().GetValue() / 100.0;
+        if (tb::Over(rColor, tb::SampleUnder(*pGrid, aText, lcl_Rect(aVisible), lcl_Rect(aWhole)),
+                     fOpacity))
+            bInk = true;
+        return bInk;
+    }
+
+    // A draw object repeated in a header or footer is a virtual copy of the real one.
+    const SdrObject* pObj = rAnchored.GetDrawObj();
+    const SdrVirtObj* pVirt = dynamic_cast<const SdrVirtObj*>(pObj);
+    if (pVirt)
+        pObj = &pVirt->GetReferencedObj();
+    return pObj && lcl_PaintDrawObj(*pObj, aText, aObject, rOpt, pVirt != nullptr, rColor);
+}
+
+/// The innermost frame of rLay's lowers that holds rPoint: a paragraph or a
+/// cell of the body, a header or a footer. Text frames floating over them are
+/// not lowers of the page, so they are never found.
+const SwFrame* lcl_FrameAt(const SwLayoutFrame& rLay, const Point& rPoint)
+{
+    for (const SwFrame* pLower = rLay.Lower(); pLower; pLower = pLower->GetNext())
+    {
+        if (!pLower->getFrameArea().Contains(rPoint))
+            continue;
+        if (pLower->IsLayoutFrame())
+            if (const SwFrame* pInner = lcl_FrameAt(*static_cast<const SwLayoutFrame*>(pLower), rPoint))
+                return pInner;
+        return pLower;
+    }
+    return nullptr;
+}
+
+/// What a page's picture fill paints under rText (getAverageColor gives the
+/// document colour for any picture fill): the picture as DrawFillAttributes lays
+/// it out over rArea, the rectangle GetBackgroundBrush found with it, over the
+/// document colour where it is transparent. Nothing when rFoundAt is not a page,
+/// its fill is not a picture, or the picture is tiled.
+std::optional<Color> lcl_PagePicture(const SwFrame& rFoundAt,
+                                     const drawinglayer::attribute::SdrAllFillAttributesHelper& rFill,
+                                     const SwRect& rArea, const tb::Rect& rText)
+{
+    if (!rFoundAt.IsPageFrame() || !rFill.isUsed() || !rFill.getFillGradientAttribute().isDefault())
+        return std::nullopt;
+    const drawinglayer::attribute::SdrFillGraphicAttribute& rPicture
+        = rFill.getFillAttribute().getFillGraphic();
+    if (rPicture.isDefault() || rPicture.getTiling())
+        return std::nullopt;
+    const tb::Grid* pGrid = lcl_GraphicGrid(rPicture.getFillGraphic(), GraphicAttr());
+    if (!pGrid || !rArea.HasArea())
+        return std::nullopt;
+    const basegfx::B2DRange aDefine(rArea.Left(), rArea.Top(), rArea.Right(), rArea.Bottom());
+    // The picture's place, in shares of the area.
+    const basegfx::B2DRange aShare = rPicture.createFillGraphicAttribute(aDefine).getGraphicRange();
+    const tb::Rect aWhole{ std::lround(aDefine.getMinX() + aShare.getMinX() * aDefine.getWidth()),
+                           std::lround(aDefine.getMinY() + aShare.getMinY() * aDefine.getHeight()),
+                           std::lround(aShare.getWidth() * aDefine.getWidth()),
+                           std::lround(aShare.getHeight() * aDefine.getHeight()) };
+    if (aWhole.nWidth <= 0 || aWhole.nHeight <= 0)
+        return std::nullopt;
+    tb::Rgb aColor = lcl_Rgb(aGlobalRetoucheColor);
+    tb::Over(aColor, tb::SampleUnder(*pGrid, rText, tb::Intersect(aWhole, lcl_Rect(rArea)), aWhole),
+             1.0 - rFill.getFillAttribute().getTransparence());
+    return lcl_Color(aColor);
+}
+
+/// The colour ApplyAutoColor takes from the brush GetBackgroundBrush finds for
+/// rFrame, and the frame it found it at, a page's picture as it lies under
+/// rText. Nothing when there is no visible one.
+std::optional<Color> lcl_FrameBrush(const SwFrame& rFrame, const tb::Rect& rText, const SwFrame*& rpFound)
+{
+    drawinglayer::attribute::SdrAllFillAttributesHelperPtr pFill;
+    const SvxBrushItem* pItem = nullptr;
+    std::optional<Color> oColor;
+    SwRect aOrigRect;
+    rpFound = nullptr;
+    if (!rFrame.GetBackgroundBrush(pFill, pItem, oColor, aOrigRect, /*bLowerMode=*/false,
+                                   /*bConsiderTextBox=*/false, &rpFound))
+        return std::nullopt;
+    if (pFill && pFill->isUsed())
+        oColor = lcl_PagePicture(*rpFound, *pFill, aOrigRect, rText)
+                     .value_or(Color(pFill->getAverageColor(aGlobalRetoucheColor.getBColor())));
+    if (!oColor)
+        oColor = pItem->GetColor();
+    if (oColor->IsFullyTransparent())
+        return std::nullopt;
+    return oColor;
+}
+
+/// The colour under the text once the drawings painted before it are painted
+/// over the brush (or over the document colour when there is no visible brush).
+/// The brush is oBrush, found at pBrushFrame with pBrushFill and rBrushArea, or
+/// the part of a page's picture under the text. That brush itself when none of
+/// the drawings puts ink under the text.
+std::optional<Color> lcl_ComposeDrawingsBehind(const SwDrawTextInfo& rInf, const vcl::Font& rFnt,
+                                               std::optional<Color> oBrush, const SwFrame* pBrushFrame,
+                                               const drawinglayer::attribute::SdrAllFillAttributesHelperPtr& pBrushFill,
+                                               const SwRect& rBrushArea)
+{
+    const SwTextFrame* pFrame = rInf.GetFrame();
+    const IDocumentSettingAccess& rIDSA = pFrame->GetDoc().getIDocumentSettingAccess();
+    const bool bParaOverDrawings = rIDSA.get(DocumentSettingId::BACKGROUND_PARA_OVER_DRAWINGS);
+    const SwRect aRect(lcl_TextRect(rInf, rFnt));
+    const tb::Rect aText = lcl_Rect(aRect);
+    if (pBrushFrame && pBrushFill)
+        if (const std::optional<Color> oPicture = lcl_PagePicture(*pBrushFrame, *pBrushFill, rBrushArea, aText))
+            oBrush = oPicture;
+    const bool bBrush = oBrush && !oBrush->IsFullyTransparent();
+    const SwPageFrame* pPage = pFrame->FindPageFrame();
+    const SwFlyFrame* pFly = pFrame->FindFlyFrame();
+    // What lies under the drawings behind the text, and a brush painted over them.
+    tb::Rgb aColor = lcl_Rgb(bBrush ? *oBrush : aGlobalRetoucheColor);
+    std::optional<Color> oOverDrawings;
+    if (pFly)
+    {
+        // Text in a text frame lies on what the frame paints over everything
+        // behind it, unless the frame's own fill is transparent.
+        if (tb::FlyBrushCovers(bBrush, pBrushFrame && pBrushFrame != pFly && pFly->IsAnLower(pBrushFrame),
+                               pBrushFrame == pFly
+                                   && SwTextBoxHelper::getOtherTextBoxFormat(pFly->GetFormat(),
+                                                                             RES_FLYFRMFMT)))
+            return oBrush;
+        tb::Rgb aGround = lcl_Rgb(aGlobalRetoucheColor);
+        bool bHides = true;
+        lcl_PaintTextFly(*pFly, aText, aText, aGround, &bHides);
+        if (bHides)
+            return lcl_Color(aGround);
+        // A see-through frame shows the page under it: the paragraph or cell that
+        // lies under the run, not the one the frame is anchored in.
+        aColor = lcl_Rgb(aGlobalRetoucheColor);
+        const SwFrame* pUnder = pPage ? lcl_FrameAt(*pPage, aRect.Center()) : nullptr;
+        const SwFrame* pUnderBrush = nullptr;
+        if (const std::optional<Color> oUnder = pUnder ? lcl_FrameBrush(*pUnder, aText, pUnderBrush) : std::nullopt)
+        {
+            if (tb::BrushCoversDrawings(lcl_BrushOwner(pUnderBrush), bParaOverDrawings))
+                oOverDrawings = oUnder;
+            else
+                aColor = lcl_Rgb(*oUnder);
+        }
+    }
+    else if (bBrush && tb::BrushCoversDrawings(lcl_BrushOwner(pBrushFrame), bParaOverDrawings))
+        return oBrush;
+    // Without a draw view no drawing layer is painted.
+    const SwSortedObjs* pObjs = pPage ? pPage->GetSortedObjs() : nullptr;
+    if (!pObjs || !rInf.GetShell()->Imp()->HasDrawView())
+        return oBrush;
+
+    const SwViewOption& rViewOpt = *rInf.GetShell()->GetViewOptions();
+    const IDocumentDrawModelAccess& rIDDMA = pFrame->GetDoc().getIDocumentDrawModelAccess();
+    const bool bHellOverHF = rIDSA.get(DocumentSettingId::PAINT_HELL_OVER_HEADER_FOOTER);
+    const tb::Slot aTextSlot
+        = pFly ? tb::FlySlot(lcl_Layer(rIDDMA, pFly->GetDrawObj()->GetLayer()),
+                             pFly->GetDrawObj()->GetOrdNum(), bHellOverHF)
+               : tb::TextSlot(pFrame->FindFooterOrHeader() != nullptr, bHellOverHF);
+    tb::BehindList aBehind;
+    for (size_t i = 0; i < pObjs->size(); ++i)
+    {
+        const SwAnchoredObject* pAnchored = (*pObjs)[i];
+        if (!pAnchored->GetObjRect().Overlaps(aRect))
+            continue;
+        const SdrObject* pObj = pAnchored->GetDrawObj();
+        if (!lcl_ViewShows(*pObj, rViewOpt))
+            continue;
+        const std::optional<int> oStage = tb::StageOf(lcl_Layer(rIDDMA, pObj->GetLayer()), bHellOverHF);
+        if (!oStage || *oStage > aTextSlot.nStage)
+            continue;
+        const tb::Slot aSlot{ *oStage, pObj->GetOrdNum() };
+        if (tb::PaintedBefore(aSlot, aTextSlot))
+            aBehind.Push(aSlot, i);
+    }
+
+    bool bInk = false;
+    for (const tb::Behind& rBehind : aBehind)
+        if (lcl_PaintOver(*(*pObjs)[rBehind.nIndex], aRect, rViewOpt, aColor))
+            bInk = true;
+    // Then a paragraph or cell brush that paints over the drawings, and a
+    // see-through frame's own transparent fill.
+    if (oOverDrawings && tb::Mix(aColor, lcl_Rgb(*oOverDrawings), 1.0))
+        bInk = true;
+    if (pFly && lcl_PaintTextFly(*pFly, aText, aText, aColor))
+        bInk = true;
+    return bInk ? std::optional<Color>(lcl_Color(aColor)) : oBrush;
+}
+}
+
 bool SwDrawTextInfo::ApplyAutoColor( vcl::Font* pFont )
 {
     const vcl::Font& rFnt = pFont ? *pFont : GetOut().GetFont();
@@ -2349,6 +2885,13 @@ bool SwDrawTextInfo::ApplyAutoColor( vcl::Font* pFont )
 
     const SwViewShell *pVSh = GetShell();
     const bool bOutputToWindow(pVSh && (pVSh->GetWin() || pVSh->isOutputToWindow()));
+    // A dark document painted to a screen: judge the text against what is painted under it.
+    const bool bDarkScreen = tb::IsDarkScreen({ .bWindow = pVSh && pVSh->GetWin(),
+                                                .bDarkDocument = aGlobalRetoucheColor.IsDark(),
+                                                .bPDFExport = pVSh && pVSh->GetViewOptions()->IsPDFExport(),
+                                                .bPrinter = GetOut().GetOutDevType() == OUTDEV_PRINTER });
+    // The highlight is painted over the character background (SwTextPaintInfo::DrawBackBrush).
+    const Color aHighlight(bDarkScreen && GetFont() ? GetFont()->GetHighlightColor() : COL_TRANSPARENT);
 
     if (pVSh && !bOutputToWindow && pVSh->GetViewOptions()->IsBlackFont())
     {
@@ -2377,11 +2920,14 @@ bool SwDrawTextInfo::ApplyAutoColor( vcl::Font* pFont )
             std::optional<Color> pCol;
             if (GetFont())
                 pCol = GetFont()->GetBackColor();
+            if (aHighlight != COL_TRANSPARENT)
+                pCol = aHighlight;
             if( ! pCol || COL_TRANSPARENT == *pCol )
             {
                 const SvxBrushItem* pItem;
                 SwRect aOrigBackRect;
                 drawinglayer::attribute::SdrAllFillAttributesHelperPtr aFillAttributes;
+                const SwFrame* pBrushFrame = nullptr;
 
                 /// OD 21.08.2002
                 ///     consider, that [GetBackgroundBrush(...)] can set <pCol>
@@ -2389,7 +2935,7 @@ bool SwDrawTextInfo::ApplyAutoColor( vcl::Font* pFont )
                 /// OD 21.08.2002 #99657#
                 ///     There is a user defined setting for the background, if there
                 ///     is a background brush and its color is *not* "no fill"/"auto fill".
-                if( GetFrame()->GetBackgroundBrush( aFillAttributes, pItem, pCol, aOrigBackRect, false, /*bConsiderTextBox=*/true ) )
+                if( GetFrame()->GetBackgroundBrush( aFillAttributes, pItem, pCol, aOrigBackRect, false, /*bConsiderTextBox=*/true, &pBrushFrame ) )
                 {
                     if (aFillAttributes && aFillAttributes->isUsed())
                     {
@@ -2410,6 +2956,11 @@ bool SwDrawTextInfo::ApplyAutoColor( vcl::Font* pFont )
                 }
                 else
                     pCol.reset();
+
+                // Pictures and shapes painted over that brush, or over the document colour.
+                if (bDarkScreen)
+                    pCol = lcl_ComposeDrawingsBehind(*this, rFnt, pCol, pBrushFrame, aFillAttributes,
+                                                     aOrigBackRect);
             }
 
             // no user defined color at paragraph or font background
@@ -2438,21 +2989,27 @@ bool SwDrawTextInfo::ApplyAutoColor( vcl::Font* pFont )
                     nNewColor = COL_BLACK;
             }
         }
-        else if (svtools::ColorConfig::IsDarkMode())
+        // Explicit colours are lightened on a dark screen only. The dark scheme is
+        // process-wide (IsDarkMode()), so it also holds while a dark-mode kit prints
+        // or saves a PDF, which must keep the document's colours.
+        else if (bDarkScreen)
         {
             std::optional<Color> oColor;
             if (GetFont())
                 oColor = GetFont()->GetBackColor();
 
-            // If there is no explicit character background/highlight
-            if (!oColor || *oColor == COL_TRANSPARENT)
+            // If there is no explicit character background, or a highlight painted over it
+            if (aHighlight != COL_TRANSPARENT || !oColor || *oColor == COL_TRANSPARENT)
             {
                 const SvxBrushItem* pItem;
                 SwRect aOrigBackRect;
                 drawinglayer::attribute::SdrAllFillAttributesHelperPtr aFillAttributes;
+                const SwFrame* pBrushFrame = nullptr;
 
-                if (GetFrame()->GetBackgroundBrush(aFillAttributes, pItem, oColor, aOrigBackRect,
-                                                   false, /*bConsiderTextBox=*/true))
+                if (aHighlight != COL_TRANSPARENT)
+                    oColor = aHighlight;
+                else if (GetFrame()->GetBackgroundBrush(aFillAttributes, pItem, oColor, aOrigBackRect,
+                                                        false, /*bConsiderTextBox=*/true, &pBrushFrame))
                 {
                     if (aFillAttributes && aFillAttributes->isUsed())
                     {
@@ -2468,6 +3025,11 @@ bool SwDrawTextInfo::ApplyAutoColor( vcl::Font* pFont )
                 }
                 else
                     oColor.reset();
+
+                // Pictures and shapes painted over that brush, or over the document colour.
+                if (bDarkScreen && aHighlight == COL_TRANSPARENT)
+                    oColor = lcl_ComposeDrawingsBehind(*this, rFnt, oColor, pBrushFrame, aFillAttributes,
+                                                       aOrigBackRect);
 
                 if (!oColor)
                     oColor = aGlobalRetoucheColor;

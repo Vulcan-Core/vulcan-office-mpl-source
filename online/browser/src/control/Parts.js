@@ -12,7 +12,7 @@
  * Document parts switching and selecting handler
  */
 
-/* global _ app cool JSDialog OtherViewCellCursorSection RenderManager TextCursorSection OtherViewGraphicSelectionSection */
+/* global _ app cool JSDialog OtherViewCellCursorSection RenderManager TextCursorSection OtherViewGraphicSelectionSection VulcanImpressPartCommit */
 
 window.L.Map.include({
 	/*
@@ -38,9 +38,53 @@ window.L.Map.include({
 
 		// check hashes, when we add/delete/move parts they can have the same part number as before
 		if (docType === 'spreadsheet') {
+			/*
+				C2 — the guard below asks "is `part` the sheet already on
+				screen?", so both halves of it must describe the CURRENT
+				selection. `_prevSelectedPart` is the part that was selected
+				before the last switch: this line is the only place either is
+				read here, and :64 does not move `_prevSelectedPart` forward
+				until after the guard has run. Reading it made the answer
+				depend on where the user had been, not on where they are.
+
+				What that cost, in Calc specifically: setPart(currentPart)
+				failed to short-circuit, so :57 armed
+				_sheetSwitch.save(toPart) with setPartRecvd = false. Nothing
+				disarms it but a `setpart:` from coolwsd, and coolwsd sends
+				none for a part that did not change -- so the arm survived,
+				and CanvasTileLayer's tryRestore ran SheetSwitch.restoreView ->
+				map._resetView on every cell-cursor message from then on.
+				Measured after one such call: tapping a cell threw the view to
+				y = -113 with the selection off screen, and kept doing it.
+
+				`_selectedPart` is authoritative and moves in lockstep with
+				partHashes -- CalcTileLayer's status handler assigns
+				`this._selectedPart = statusJSON.selectedpart` and calls
+				_refreshPartHashes from the same message -- so after any
+				add/delete/move the index and the hash table agree. With this
+				comparison the expression is true exactly when
+				`_selectedPart === part`, i.e. the guard means what it reads
+				as, and any genuine switch (a different index) still fails the
+				`===` on the next line and proceeds.
+			*/
 			isTheSamePart =
-				app.calc.partHashes[docLayer._prevSelectedPart] === app.calc.partHashes[part];
+				app.calc.partHashes[docLayer._selectedPart] === app.calc.partHashes[part];
 		} else if ((docType === 'presentation' || docType === 'drawing')) {
+			/*
+				The same `_prevSelectedPart` shape, and the same wrong
+				question -- but deliberately NOT changed here. Impress and
+				Draw reach this in fileBasedView, where
+				CommentListSection/CommentMarkerSubSection call
+				`setPart(_selectedPart, false)` as a no-op ON PURPOSE, to
+				re-assert the part to core before an .uno:InsertAnnotation /
+				DeleteAnnotation / EditAnnotation and `setPart(0, false)`
+				afterwards. Those calls need the notifyServer side effect that
+				a working short-circuit would remove. Correcting the
+				comparison here without first giving those call sites another
+				way to send `setclientpart` would silently send annotation
+				commands against the wrong part. Calc has no fileBasedView and
+				no such caller.
+			*/
 			if (docLayer._prevSelectedPart !== undefined && part < app.impress.partList.length && app.impress.partList[docLayer._prevSelectedPart])
 				isTheSamePart = app.impress.partList[docLayer._prevSelectedPart].hash === app.impress.partList[part].hash;
 		} else if (docType === 'text') {
@@ -100,6 +144,32 @@ window.L.Map.include({
 			docLayer._preview._scrollToPart(docLayer._selectedPart);
 			docLayer.highlightCurrentPart(docLayer._selectedPart);
 			notifyServer(part);
+			// THE CONVERSE OF THE THREE LINES ABOVE, and the reason this call
+			// is here rather than folded into them.
+			//
+			// The comment above says a free-scroll guess must not race an
+			// explicit turn AT THE MOMENT of the turn, and it enforces that by
+			// not calling _checkSelectedPart. That is only half of the
+			// invariant. The other half is time: nothing stopped a LATER
+			// most-visible guess from quietly overwriting the part this turn
+			// just chose, without the user having scrolled at all in between.
+			//
+			// On the phone read posture that "later guess" is the one commit
+			// MouseControl now makes at gesture end (deviation D1). It compares
+			// the deck's scroll offset against the offset of the last commit
+			// and stands down when they are equal, so recording the offset THIS
+			// turn settled at -- after _scrollViewToPartPosition has scrolled,
+			// which it does synchronously -- is what makes an explicit turn win
+			// its own silence. A stray touchend, or a fling that has already
+			// been stopped, then commits nothing.
+			//
+			// Unconditional rather than phone-gated on purpose: this writes two
+			// numbers into a ledger whose only reader is the phone Impress
+			// gesture-end path, so on every other surface it is inert and
+			// `gate === false` still reproduces HEAD exactly. Gating the WRITE
+			// would put the phone predicate in a file that has no other reason
+			// to know about phone chrome.
+			VulcanImpressPartCommit.noteCommitFromLayout();
 			return;
 		}
 
@@ -199,9 +269,13 @@ window.L.Map.include({
 			if (!tile)
 				break;
 			var isVisible = this._docLayer._preview._isPreviewVisible(tile[0]);
-			if (isVisible != true && tile[1].indexOf('slideshow') < 0)
+			if (isVisible != true && tile[1].indexOf('slideshow') < 0) {
+				var previewTile = this._docLayer._preview._previewTiles[tile[0]];
+				if (previewTile)
+					previewTile.fetched = false;
 				// skip this! we can't see it
 				continue;
+			}
 			this._previewRequestsOnFly++;
 			this.fire('beforerequestpreview', { part: tile[0] });
 			app.socket.sendMessage(tile[1]);
@@ -321,11 +395,16 @@ window.L.Map.include({
 		return currentPage;
 	},
 
-	goToPage: function (page) {
+	// Vulcan Office: `options.quiet` jumps without touching the idle clock. The
+	// host's restore after a reload (Vulcan_GoToPage, VulcanViewAnchor.ts) is
+	// not something the person did, and the host reads that clock
+	// (Get_User_State Elapsed) to decide whether they are busy.
+	goToPage: function (page, options) {
 		const docLayer = this._docLayer;
 		const pageRects = app.file && app.file.writer && app.file.writer.pageRectangleList;
 		const sourcePage = this._resolveCurrentPage(page, docLayer._currentPage, pageRects);
-		app.idleHandler.notifyActive();
+		if (!(options && options.quiet))
+			app.idleHandler.notifyActive();
 
 		if (page === 'prev') {
 			if (sourcePage > 0) {
@@ -342,7 +421,12 @@ window.L.Map.include({
 		}
 
 		if (!this.isEditMode() && pageRects && pageRects.length > docLayer._currentPage) {
-			const posY = Math.round(pageRects[docLayer._currentPage][1] / app.dpiScale);
+			// Vulcan Office: pageRectangleList is in twips and onScrollTo takes
+			// core pixels (ViewLayout.scrollTo subtracts viewedRectangle.pY1).
+			// Upstream divided the twips by dpiScale, which is no conversion at
+			// all: at dpr 1 and 100% page 2 (16000 twips) scrolled to y=16000 px
+			// instead of ~1067, near the end of the document.
+			const posY = Math.round(pageRects[docLayer._currentPage][1] * app.twipsToPixels);
 
 			const section = app.sectionContainer.getSectionWithName(app.CSections.Scroll.name);
 			if (section)

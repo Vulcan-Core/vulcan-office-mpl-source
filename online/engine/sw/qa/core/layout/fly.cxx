@@ -9,13 +9,19 @@
 
 #include <swmodeltestbase.hxx>
 
+#include <comphelper/kit.hxx>
+
 #include <IDocumentLayoutAccess.hxx>
 #include <anchoredobject.hxx>
 #include <flyfrms.hxx>
+#include <fmtfsize.hxx>
+#include <frameformats.hxx>
+#include <frmmgr.hxx>
 #include <pagefrm.hxx>
 #include <rootfrm.hxx>
 #include <sortedobjs.hxx>
 #include <docsh.hxx>
+#include <viewopt.hxx>
 #include <wrtsh.hxx>
 #include <bodyfrm.hxx>
 #include <txtfrm.hxx>
@@ -168,6 +174,66 @@ CPPUNIT_TEST_FIXTURE(Test, testShapeLeftPaddingWrapThroughOffPage)
     // - Actual  : 3031
     // i.e. there was a large left margin, the text was clipped on the right.
     CPPUNIT_ASSERT_EQUAL(static_cast<SwTwips>(144), nFlyLeftMargin);
+}
+
+CPPUNIT_TEST_FIXTURE(Test, testKitBrowseWidthFixedTextFlyGrows)
+{
+    // Set up COKit. Left active on purpose: UnoApiTest::tearDown() closes the document first
+    // and only then deactivates COKit — deactivating before teardown disposes a kit-mode view
+    // tree in non-kit mode and crashes in SfxBindings' window teardown.
+    comphelper::COKit::setActive(true);
+
+    // Given a browse-mode document whose client stated a 4700 twip reflow width:
+    createSwDoc();
+    SwDoc* pDoc = getSwDoc();
+    SwWrtShell* pWrtShell = getSwDocShell()->GetWrtShell();
+    SwViewOption aViewOptions(*pWrtShell->GetViewOptions());
+    aViewOptions.setBrowseMode(true);
+    pWrtShell->ApplyViewOptions(aViewOptions);
+    pWrtShell->setKitBrowseWidth(4700);
+
+    // And given a fixed-size text frame that is wider than that width, with enough text that the
+    // rewrap at the fitted width needs more than the attribute height:
+    for (int i = 0; i < 10; ++i)
+    {
+        pWrtShell->Insert(u"A quick brown fox jumps over the lazy dog and keeps running on. "_ustr);
+    }
+    pWrtShell->SelAll();
+    SwFlyFrameAttrMgr aMgr(true, pWrtShell, Frmmgr_Type::TEXT, nullptr);
+    RndStdIds eAnchor = RndStdIds::FLY_AT_PARA;
+    aMgr.InsertFlyFrame(eAnchor, aMgr.GetPos(), aMgr.GetSize());
+    pWrtShell->StartAllAction();
+    sw::FrameFormats<sw::SpzFrameFormat*>& rFlys = *pDoc->GetSpzFrameFormats();
+    sw::SpzFrameFormat* pFly = rFlys[0];
+    SwAttrSet aSet(pFly->GetAttrSet());
+    // 432pt x 100pt, i.e. wider than the stated 4700 twips:
+    aSet.Put(SwFormatFrameSize(SwFrameSize::Fixed, /*nWidth=*/8640, /*nHeight=*/2000));
+    pDoc->SetAttr(aSet, *pFly);
+    pWrtShell->EndAllAction();
+    pWrtShell->UnSelectFrame();
+    pWrtShell->LeaveSelFrameMode();
+
+    // When laying out that document:
+    pWrtShell->Reformat();
+
+    // Then make sure the fly is fitted to the stated width and grows to its rewrapped content:
+    SwRootFrame* pLayout = pDoc->getIDocumentLayoutAccess().GetCurrentLayout();
+    auto pPage = pLayout->GetLower()->DynCastPageFrame();
+    CPPUNIT_ASSERT(pPage);
+    CPPUNIT_ASSERT(pPage->GetSortedObjs());
+    SwSortedObjs& rPageObjs = *pPage->GetSortedObjs();
+    CPPUNIT_ASSERT_EQUAL(static_cast<size_t>(1), rPageObjs.size());
+    auto pFlyFrame = rPageObjs[0]->DynCastFlyFrame();
+    CPPUNIT_ASSERT(pFlyFrame);
+    // The fit itself: the fly no longer keeps its 8640 twip attribute width. If this fails, the
+    // reflow plumbing did not bind and the height assertion below would be meaningless.
+    CPPUNIT_ASSERT_LESS(static_cast<tools::Long>(8640), pFlyFrame->getFrameArea().Width());
+    // Without the accompanying fix in place, this test would have failed with:
+    // - Expected greater than: 2000
+    // - Actual  : 2000
+    // i.e. the fly kept its fixed attribute height while its text rewrapped at the narrower
+    // width, so the tail of the text was never painted (PaintSwFrame clips at the frame area).
+    CPPUNIT_ASSERT_GREATER(static_cast<tools::Long>(2000), pFlyFrame->getFrameArea().Height());
 }
 }
 

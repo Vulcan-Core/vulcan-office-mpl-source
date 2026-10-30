@@ -45,7 +45,7 @@
   },
   "repository": {
     "type": "git",
-    "url": "https://gerrit.collaboraoffice.com/online"
+    "url": "https://github.com/Vulcan-Core/vulcan-office-mpl-source"
   },
   "keywords": [
     "office",
@@ -60,7 +60,10 @@
   "scripts": {
     "test": "mocha mocha_tests/workdir/main.js",
     "test-single": "mocha mocha_tests/workdir/main.js -g",
-    "duplication": "jscpd --ignore src/app/TaskWorker.js ./src/ --exitCode 1 --min-lines 17"
+    "duplication": "jscpd --ignore src/app/TaskWorker.js ./src/ --exitCode 1 --min-lines 17",
+    "phone-ergonomics-lint": "node scripts/phone-ergonomics-lint.mjs",
+    "display-state-export-guard": "node scripts/display-state-export-guard.mjs",
+    "display-state-export-guard-selftest": "node scripts/display-state-export-guard.mjs --selftest"
   },
   "browserslist": [
     "Chrome >= 120",

@@ -40,7 +40,10 @@
 #include <com/sun/star/sdb/CommandType.hpp>
 #include <com/sun/star/text/XTextFieldsSupplier.hpp>
 #include <com/sun/star/util/XModifiable.hpp>
-#include <com/sun/star/xml/xslt/XSLTTransformer.hpp>
+#include <com/sun/star/xml/dom/XNode.hpp>
+#include <com/sun/star/xml/dom/XNodeList.hpp>
+#include <com/sun/star/xml/xpath/XPathAPI.hpp>
+#include <com/sun/star/xml/xpath/XXPathObject.hpp>
 
 #include <oox/token/namespaces.hxx>
 #include <oox/token/tokens.hxx>
@@ -96,8 +99,10 @@
 #include <comphelper/memorystream.hxx>
 #include <comphelper/processfactory.hxx>
 #include <comphelper/sequence.hxx>
+#include <comphelper/string.hxx>
 #include <comphelper/storagehelper.hxx>
 #include <comphelper/sequenceashashmap.hxx>
+#include <comphelper/kit.hxx>
 #include <o3tl/any.hxx>
 #include <sal/log.hxx>
 #include <unotools/ucbstreamhelper.hxx>
@@ -1225,7 +1230,30 @@ WriteCompat(SwDoc const& rDoc, ::sax_fastparser::FSHelperPtr const& rpFS) -> voi
 void DocxExport::WriteSettings()
 {
     SwViewShell *pViewShell(m_rDoc.getIDocumentLayoutAccess().GetCurrentViewShell());
-    if( !pViewShell && !m_aSettings.hasData() && !m_pAttrOutput->HasFootnotes() && !m_pAttrOutput->HasEndnotes())
+    const bool bCOKit = comphelper::COKit::isActive();
+
+    uno::Reference<beans::XPropertySetInfo> xPropSetInfo = m_xTextDoc->getPropertySetInfo();
+    comphelper::SequenceAsHashMap aGrabBagPropMap;
+    if (xPropSetInfo->hasPropertyByName(UNO_NAME_MISC_OBJ_INTEROPGRABBAG))
+    {
+        cpo::uno::Sequence<beans::PropertyValue> aPropList;
+        m_xTextDoc->getPropertyValue(UNO_NAME_MISC_OBJ_INTEROPGRABBAG) >>= aPropList;
+        aGrabBagPropMap = comphelper::SequenceAsHashMap(aPropList);
+    }
+
+    cpo::uno::Sequence<beans::PropertyValue> aOOXMLViewSettingsList;
+    const bool bHasOOXMLViewSettings
+        = aGrabBagPropMap.contains(u"OOXMLViewSettings"_ustr)
+          && (aGrabBagPropMap.getValue(u"OOXMLViewSettings"_ustr)
+              >>= aOOXMLViewSettingsList);
+    const comphelper::SequenceAsHashMap aOOXMLViewSettings(aOOXMLViewSettingsList);
+    const bool bHasPreservedViewOrZoom
+        = bHasOOXMLViewSettings
+          && (aOOXMLViewSettings.contains(u"view"_ustr)
+              || aOOXMLViewSettings.contains(u"zoom"_ustr));
+
+    if( !pViewShell && !m_aSettings.hasData() && !m_pAttrOutput->HasFootnotes() && !m_pAttrOutput->HasEndnotes()
+        && !(bCOKit && bHasPreservedViewOrZoom))
         return;
 
     SwDocShell* pDocShell = m_rDoc.GetDocShell();
@@ -1296,14 +1324,49 @@ void DocxExport::WriteSettings()
         }
     }
 
-    // View
-    if (pViewShell && pViewShell->GetViewOptions()->getBrowseMode())
+    // View. COKit preserves the source document setting instead of one collaborator's view.
+    if (bCOKit)
+    {
+        auto aViewIt = aOOXMLViewSettings.find(u"view"_ustr);
+        if (bHasOOXMLViewSettings && aViewIt != aOOXMLViewSettings.end())
+        {
+            cpo::uno::Sequence<beans::PropertyValue> aViewList;
+            aViewIt->second >>= aViewList;
+            const comphelper::SequenceAsHashMap aView(aViewList);
+            rtl::Reference<sax_fastparser::FastAttributeList> pAttributeList(
+                sax_fastparser::FastSerializerHelper::createAttrList());
+            OUString aValue;
+            if (aView.getValue(u"val"_ustr) >>= aValue)
+                pAttributeList->add(FSNS(XML_w, XML_val), aValue);
+            pFS->singleElementNS(XML_w, XML_view, pAttributeList);
+        }
+    }
+    else if (pViewShell && pViewShell->GetViewOptions()->getBrowseMode())
     {
         pFS->singleElementNS(XML_w, XML_view, FSNS(XML_w, XML_val), "web");
     }
 
-    // Zoom
-    if (pViewShell)
+    // Zoom. As above, COKit must not persist a collaborator's zoom level.
+    if (bCOKit)
+    {
+        auto aZoomIt = aOOXMLViewSettings.find(u"zoom"_ustr);
+        if (bHasOOXMLViewSettings && aZoomIt != aOOXMLViewSettings.end())
+        {
+            cpo::uno::Sequence<beans::PropertyValue> aZoomList;
+            aZoomIt->second >>= aZoomList;
+            const comphelper::SequenceAsHashMap aZoom(aZoomList);
+            rtl::Reference<sax_fastparser::FastAttributeList> pAttributeList(
+                sax_fastparser::FastSerializerHelper::createAttrList());
+            OUString aValue;
+            if (aZoom.getValue(u"val"_ustr) >>= aValue)
+                pAttributeList->add(FSNS(XML_w, XML_val), aValue);
+            sal_Int32 nPercent = 0;
+            if (aZoom.getValue(u"percent"_ustr) >>= nPercent)
+                pAttributeList->add(FSNS(XML_w, XML_percent), OString::number(nPercent));
+            pFS->singleElementNS(XML_w, XML_zoom, pAttributeList);
+        }
+    }
+    else if (pViewShell)
     {
         rtl::Reference<sax_fastparser::FastAttributeList> pAttributeList(
             sax_fastparser::FastSerializerHelper::createAttrList());
@@ -1350,19 +1413,6 @@ void DocxExport::WriteSettings()
     if (m_rDoc.getIDocumentSettingAccess().get(DocumentSettingId::GUTTER_AT_TOP))
     {
         pFS->singleElementNS(XML_w, XML_gutterAtTop);
-    }
-
-    uno::Reference< beans::XPropertySetInfo > xPropSetInfo = m_xTextDoc->getPropertySetInfo();
-
-    comphelper::SequenceAsHashMap aGrabBagPropMap;
-    {
-        const OUString aGrabBagName = UNO_NAME_MISC_OBJ_INTEROPGRABBAG;
-        if ( xPropSetInfo->hasPropertyByName( aGrabBagName ) )
-        {
-            cpo::uno::Sequence< beans::PropertyValue > propList;
-            m_xTextDoc->getPropertyValue( aGrabBagName ) >>= propList;
-            aGrabBagPropMap = comphelper::SequenceAsHashMap(propList);
-        }
     }
 
     // write w:stylePaneFormatFilter
@@ -1845,76 +1895,51 @@ void DocxExport::WriteGlossary()
     }
 }
 
-namespace {
-    class XsltTransformListener : public ::cppu::WeakImplHelper<io::XStreamListener>
+// Register the prefixes a data binding declares, given as
+// "xmlns:ns0='http://a' xmlns:ns1='http://b'" (w:prefixMappings).
+static void lcl_RegisterDataBindingNamespaces(std::u16string_view sNamespaces,
+                                              const uno::Reference<xml::xpath::XXPathAPI>& xXPathAPI)
+{
+    for (const auto& sNamespace : comphelper::string::split(sNamespaces, ' '))
     {
-    public:
-        XsltTransformListener() : m_bDone(false) {}
-
-        void wait() {
-            std::unique_lock<std::mutex> g(m_mutex);
-            m_cond.wait(g, [this]() { return m_bDone; });
-        }
-
-    private:
-        std::mutex m_mutex;
-        std::condition_variable m_cond;
-        bool m_bDone;
-
-        virtual void SAL_CALL disposing(const lang::EventObject&) noexcept override {}
-        virtual void SAL_CALL started() noexcept override {}
-        virtual void SAL_CALL closed() noexcept override { notifyDone(); }
-        virtual void SAL_CALL terminated() noexcept override { notifyDone(); }
-        virtual void SAL_CALL error(const cpo::uno::Any& e) override
-        {
-            notifyDone(); // set on error too, otherwise main thread waits forever
-            SAL_WARN("sw.ww8", e);
-        }
-
-        void notifyDone() {
-            std::scoped_lock<std::mutex> g(m_mutex);
-            m_bDone = true;
-            m_cond.notify_all();
-        }
-    };
+        auto aNamespace = comphelper::string::split(sNamespace, '=');
+        if (aNamespace.size() < 2)
+            continue;
+        auto aNamespaceId = comphelper::string::split(aNamespace[0], ':');
+        if (aNamespaceId.size() < 2)
+            continue;
+        OUString sNamespaceURL = comphelper::string::strip(aNamespace[1], ' ');
+        sNamespaceURL = comphelper::string::strip(sNamespaceURL, '\'');
+        xXPathAPI->registerNS(aNamespaceId[1], sNamespaceURL);
+    }
 }
 
-static void lcl_UpdateXmlValues(const SdtData& sdtData, const uno::Reference<css::io::XInputStream>& xInputStream, const uno::Reference<css::io::XOutputStream>& xOutputStream)
+// Backport of upstream 5033a915c33b ("set custom xml values through XPathAPI instead of XSLT").
+// The value used to be pasted into an XSLT <xsl:text> unescaped, so a bound value holding "&",
+// "<" or ">" broke the stylesheet and the custom xml item was written out empty.
+static void lcl_UpdateXmlValues(const SdtData& rSdtData,
+                                const uno::Reference<xml::dom::XDocument>& xDocument)
 {
-    cpo::uno::Sequence<cpo::uno::Any> aArgs{
-    // XSLT transformation stylesheet:
-    //  - write all elements as is
-    //  - but if element matches sdtData.xpath, replace its text content by sdtData.xpath
-    cpo::uno::Any(beans::NamedValue(u"StylesheetText"_ustr, cpo::uno::Any(OUString("<?xml version=\"1.0\" encoding=\"UTF-8\"?> \
-<xsl:stylesheet\
-    xmlns:xsl=\"http://www.w3.org/1999/XSL/Transform\"\
-    " + sdtData.namespaces + "\
-    version=\"1.0\">\
-  <xsl:template match=\"@* | node()\">\
-    <xsl:copy>\
-      <xsl:apply-templates select=\"@* | node()\"/>\
-    </xsl:copy>\
-  </xsl:template>\
-  <xsl:template match = \"" + sdtData.xpath + "\">\
-    <xsl:copy>\
-      <xsl:text>" + sdtData.data + "</xsl:text>\
-    </xsl:copy>\
-  </xsl:template>\
-</xsl:stylesheet>\
-"))))
-    };
+    uno::Reference<xml::xpath::XXPathAPI> xXPathAPI
+        = xml::xpath::XPathAPI::create(comphelper::getProcessComponentContext());
+    lcl_RegisterDataBindingNamespaces(rSdtData.namespaces, xXPathAPI);
 
-    css::uno::Reference<css::xml::xslt::XXSLTTransformer> xTransformer =
-        css::xml::xslt::XSLTTransformer::create(comphelper::getProcessComponentContext(), aArgs);
-    xTransformer->setInputStream(xInputStream);
-    xTransformer->setOutputStream(xOutputStream);
-
-    rtl::Reference<XsltTransformListener> xListener = new XsltTransformListener();
-    xTransformer->addListener(xListener);
-
-    xTransformer->start();
-    xListener->wait();
-    xTransformer->terminate();
+    try
+    {
+        uno::Reference<xml::dom::XNodeList> xNodes
+            = xXPathAPI->eval(xDocument, rSdtData.xpath)->getNodeList();
+        for (sal_Int32 nNode = 0; nNode < xNodes->getLength(); ++nNode)
+        {
+            uno::Reference<xml::dom::XNode> xNode = xNodes->item(nNode);
+            while (uno::Reference<xml::dom::XNode> xChild = xNode->getFirstChild())
+                xNode->removeChild(xChild);
+            xNode->appendChild(xDocument->createTextNode(rSdtData.data));
+        }
+    }
+    catch (uno::Exception const&)
+    {
+        TOOLS_WARN_EXCEPTION("sw.ww8", "custom xml value at " << rSdtData.xpath);
+    }
 }
 
 void DocxExport::WriteCustomXml()
@@ -1948,49 +1973,27 @@ void DocxExport::WriteCustomXml()
                     oox::getRelationship(Relationship::CUSTOMXML),
                     Concat2View("../customXml/item"+OUString::number(j+1)+".xml" ));
 
-            uno::Reference< xml::sax::XSAXSerializable > serializer( customXmlDom, uno::UNO_QUERY );
-            uno::Reference< xml::sax::XWriter > writer = xml::sax::Writer::create( comphelper::getProcessComponentContext() );
-
             xCustomXmlItemOutStream = GetFilter().openFragmentStream(
                 "customXml/item" + OUString::number(j + 1) + ".xml", u"application/xml"_ustr);
+
+            uno::Reference<xml::dom::XDocument> xItemDom = customXmlDom;
             if (m_SdtData.size())
             {
-                // There are some SDT blocks data with data bindings which can update some custom xml values
-                rtl::Reference< comphelper::UNOMemoryStream > xMemStream = new comphelper::UNOMemoryStream();
-
-                writer->setOutputStream(xMemStream->getOutputStream());
-
-                serializer->serialize(writer, cpo::uno::Sequence< beans::StringPair >());
-
-                uno::Reference< io::XStream > xXSLTInStream = xMemStream;
-                rtl::Reference< comphelper::UNOMemoryStream > xXSLTOutStream;
-                // Apply XSLT transformations for each SDT data binding
-                // Seems it is not possible to do this as one transformation: each data binding
-                // can have different namespaces, but with conflicting names (ns0, ns1, etc..)
-                for (size_t i = 0; i < m_SdtData.size(); i++)
-                {
-                    if (i == m_SdtData.size() - 1)
-                    {
-                        // last transformation
-                        lcl_UpdateXmlValues(
-                            m_SdtData[i], xXSLTInStream->getInputStream(), xCustomXmlItemOutStream);
-                    }
-                    else
-                    {
-                        xXSLTOutStream = new comphelper::UNOMemoryStream();
-                        lcl_UpdateXmlValues(m_SdtData[i], xXSLTInStream->getInputStream(), xXSLTOutStream->getOutputStream());
-                        // Use previous output as an input for next run
-                        xXSLTInStream.set( xXSLTOutStream );
-                    }
-                }
-
+                // A data-bound content control can hold a value the user has edited since the
+                // document was loaded, so write the current values into the stored XML. The edit
+                // goes to a copy, which leaves the document model as it is.
+                uno::Reference<xml::dom::XDocument> xCopy(customXmlDom->cloneNode(true),
+                                                          uno::UNO_QUERY_THROW);
+                for (const SdtData& rSdtData : m_SdtData)
+                    lcl_UpdateXmlValues(rSdtData, xCopy);
+                xItemDom = xCopy;
             }
-            else
-            {
-                writer->setOutputStream(xCustomXmlItemOutStream);
 
-                serializer->serialize(writer, cpo::uno::Sequence< beans::StringPair >());
-            }
+            uno::Reference<xml::sax::XSAXSerializable> xSerializer(xItemDom, uno::UNO_QUERY_THROW);
+            uno::Reference<xml::sax::XWriter> xWriter
+                = xml::sax::Writer::create(comphelper::getProcessComponentContext());
+            xWriter->setOutputStream(xCustomXmlItemOutStream);
+            xSerializer->serialize(xWriter, cpo::uno::Sequence<beans::StringPair>());
         }
 
         if (customXmlDomProps.is())

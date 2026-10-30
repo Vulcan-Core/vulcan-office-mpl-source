@@ -3064,7 +3064,7 @@
           <desc>Specifies the root URL to the Office help pages. Blank disables
           Help buttons on dialogs in LibreOffice Online.</desc>
         </info>
-        <value>https://help.collaboraoffice.com/help.html?</value>
+        <value></value>
       </prop>
       <group oor:name="StartCenter">
         <info>

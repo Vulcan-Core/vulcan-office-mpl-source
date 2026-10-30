@@ -36,14 +36,18 @@ public:
     STATE_ENUM(State, None, Active, Timedout, Unauthorized, Fail, Pass);
 
     /// Create an instance with a SocketPoll and a RequestDetails instance.
+    /// serverToServer is the trust of the request that named url
+    /// (ClientRequestDispatcher::isServerToServer()); a redirect is followed only to
+    /// a URL that StorageBase::validate() accepts as WOPI with that same trust.
     CheckFileInfo(const std::shared_ptr<TerminatingPoll>& poll, const Poco::URI& url,
-                  std::function<void(CheckFileInfo&)> onFinishCallback)
+                  bool serverToServer, std::function<void(CheckFileInfo&)> onFinishCallback)
         : _url(url)
         , _profileZone("WopiStorage::getWOPIFileInfo", { { "url", url.toString() } })
         , _poll(poll)
         , _docKey(RequestDetails::getDocKey(url))
         , _onFinishCallback(std::move(onFinishCallback))
         , _state(State::None)
+        , _serverToServer(serverToServer)
     {
         assert(_url == RequestDetails::sanitizeURI(url.toString()) && "Expected sanitized URL");
 
@@ -101,6 +105,8 @@ private:
     std::function<void(CheckFileInfo&)> _onFinishCallback;
     Poco::JSON::Object::Ptr _wopiInfo;
     std::atomic<State> _state;
+    /// The trust redirect targets are vetted with. See the constructor.
+    const bool _serverToServer;
 };
 
 /* vim:set shiftwidth=4 softtabstop=4 expandtab: */

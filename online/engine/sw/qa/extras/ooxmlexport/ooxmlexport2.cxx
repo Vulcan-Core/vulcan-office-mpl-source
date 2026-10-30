@@ -17,6 +17,7 @@
 #include <com/sun/star/awt/Gradient2.hpp>
 #include <com/sun/star/style/TabStop.hpp>
 #include <com/sun/star/view/XViewSettingsSupplier.hpp>
+#include <com/sun/star/view/DocumentZoomType.hpp>
 #include <com/sun/star/text/RelOrientation.hpp>
 #include <com/sun/star/text/XTextTable.hpp>
 #include <com/sun/star/text/XTextFramesSupplier.hpp>
@@ -34,6 +35,11 @@
 #include <oox/drawingml/drawingmltypes.hxx>
 #include <basegfx/utils/gradienttools.hxx>
 #include <docmodel/uno/UnoGradientTools.hxx>
+#include <comphelper/kit.hxx>
+#include <comphelper/scopeguard.hxx>
+#include <doc.hxx>
+#include <docstat.hxx>
+#include <IDocumentStatistics.hxx>
 
 using namespace css;
 using namespace css::uno;
@@ -42,6 +48,29 @@ class Test : public SwModelTestBase
 {
 public:
     Test() : SwModelTestBase(u"/sw/qa/extras/ooxmlexport/data/"_ustr) {}
+
+    void setViewSettings(bool bOnlineLayout, sal_Int16 nZoom)
+    {
+        uno::Reference<frame::XModel> xModel(mxComponent, uno::UNO_QUERY);
+        uno::Reference<view::XViewSettingsSupplier> xController(xModel->getCurrentController(),
+                                                                 uno::UNO_QUERY);
+        uno::Reference<beans::XPropertySet> xViewSettings(xController->getViewSettings());
+        xViewSettings->setPropertyValue(u"ShowOnlineLayout"_ustr,
+                                        cpo::uno::Any(bOnlineLayout));
+        xViewSettings->setPropertyValue(
+            u"ZoomType"_ustr,
+            cpo::uno::Any(sal_Int16(view::DocumentZoomType::BY_VALUE)));
+        xViewSettings->setPropertyValue(u"ZoomValue"_ustr, cpo::uno::Any(nZoom));
+    }
+
+    void saveWithCOKitState(bool bActive)
+    {
+        const bool bWasActive = comphelper::COKit::isActive();
+        comphelper::COKit::setActive(bActive);
+        comphelper::ScopeGuard aGuard(
+            [bWasActive] { comphelper::COKit::setActive(bWasActive); });
+        save(TestFilter::DOCX);
+    }
 };
 
 CPPUNIT_TEST_FIXTURE(Test, testPageGraphicBackground)
@@ -196,6 +225,101 @@ CPPUNIT_TEST_FIXTURE(Test, testZoom)
     // One paragraph in the document.
     assertXPathContent(pXmlDoc, "/extended-properties:Properties/extended-properties:Paragraphs", u"1");
     assertXPathContent(pXmlDoc, "/extended-properties:Properties/extended-properties:Company", u"Example Ltd");
+}
+
+CPPUNIT_TEST_FIXTURE(Test, testCOKitPreservesImportedZoom)
+{
+    createSwDoc("fdo76101.docx");
+    setViewSettings(true, 67);
+
+    saveWithCOKitState(true);
+
+    xmlDocUniquePtr pXmlSettings = parseExport(u"word/settings.xml"_ustr);
+    assertXPath(pXmlSettings, "/w:settings/w:view", 0);
+    assertXPath(pXmlSettings, "/w:settings/w:zoom", "val", u"fullPage");
+    assertXPath(pXmlSettings, "/w:settings/w:zoom", "percent", u"74");
+}
+
+CPPUNIT_TEST_FIXTURE(Test, testDesktopExportsLiveViewSettings)
+{
+    createSwDoc("zoom.docx");
+    setViewSettings(true, 67);
+    saveWithCOKitState(false);
+
+    xmlDocUniquePtr pXmlSettings = parseExport(u"word/settings.xml"_ustr);
+    assertXPath(pXmlSettings, "/w:settings/w:view", "val", u"web");
+    assertXPath(pXmlSettings, "/w:settings/w:zoom", "percent", u"67");
+}
+
+CPPUNIT_TEST_FIXTURE(Test, testCOKitPreservesImportedView)
+{
+    createSwDoc("FDO77715.docx");
+    setViewSettings(false, 67);
+
+    saveWithCOKitState(true);
+
+    xmlDocUniquePtr pXmlSettings = parseExport(u"word/settings.xml"_ustr);
+    assertXPath(pXmlSettings, "/w:settings/w:view", "val", u"web");
+    assertXPath(pXmlSettings, "/w:settings/w:zoom", "percent", u"100");
+    assertXPathNoAttribute(pXmlSettings, "/w:settings/w:zoom", "val");
+}
+
+CPPUNIT_TEST_FIXTURE(Test, testCOKitDoesNotSynthesizeViewSettings)
+{
+    createSwDoc("cell-sdt-redline.docx");
+    setViewSettings(true, 67);
+
+    saveWithCOKitState(true);
+
+    xmlDocUniquePtr pXmlSettings = parseExport(u"word/settings.xml"_ustr);
+    assertXPath(pXmlSettings, "/w:settings/w:view", 0);
+    assertXPath(pXmlSettings, "/w:settings/w:zoom", 0);
+}
+
+// an edited save made in web or phone layout wrote the
+// viewer's page count into docProps/app.xml <Pages> and into the footer's
+// cached NUMPAGES. IncrementalDocStatCalculate keeps the stored count in a
+// COKit browse layout, but SwDocStatFieldType::Expand, which every NUMPAGES
+// field runs, wrote the browse layout's count into the statistic behind it,
+// and the next calculation kept that. eng1846-numpages.docx is three pages
+// (two explicit page breaks, so fonts cannot change the count) with a
+// "Page PAGE of NUMPAGES" footer and app.xml Pages 3.
+CPPUNIT_TEST_FIXTURE(Test, testCOKitBrowseLayoutNumPagesKeepsPageCount)
+{
+    createSwDoc("eng1846-numpages.docx");
+    const bool bWasActive = comphelper::COKit::isActive();
+    comphelper::COKit::setActive(true);
+    comphelper::ScopeGuard aGuard([bWasActive] { comphelper::COKit::setActive(bWasActive); });
+
+    uno::Reference<text::XTextDocument> xTextDocument(mxComponent, uno::UNO_QUERY_THROW);
+    uno::Reference<text::XText> xText = xTextDocument->getText();
+    IDocumentStatistics& rStats = getSwDoc()->getIDocumentStatistics();
+
+    // Page layout first, as every session opens: its count is the document's.
+    xText->insertString(xText->getEnd(), u" a"_ustr, false);
+    calcLayout();
+    CPPUNIT_ASSERT_EQUAL(sal_uInt32(3),
+                         rStats.GetUpdatedDocStat(/*bCompleteAsync=*/false, /*bFields=*/true).nPage);
+
+    // Web layout, then two edits with a refresh of the statistic and its fields
+    // between them, as the editor's idle update does.
+    setViewSettings(/*bOnlineLayout=*/true, 100);
+    calcLayout();
+    xText->insertString(xText->getEnd(), u" b"_ustr, false);
+    rStats.UpdateDocStat(/*bCompleteAsync=*/false, /*bFields=*/true);
+    xText->insertString(xText->getEnd(), u" c"_ustr, false);
+    save(TestFilter::DOCX);
+
+    // Without the fix, both held the web layout's page count (1 in the editor).
+    xmlDocUniquePtr pAppDoc = parseExport(u"docProps/app.xml"_ustr);
+    assertXPathContent(pAppDoc, "/extended-properties:Properties/extended-properties:Pages",
+                       u"3");
+    xmlDocUniquePtr pFooter = parseExport(u"word/footer2.xml"_ustr);
+    assertXPath(pFooter, "/w:ftr/w:p/w:r/w:instrText[contains(., 'NUMPAGES')]", 1);
+    assertXPathContent(
+        pFooter,
+        "/w:ftr/w:p/w:r[w:instrText[contains(., 'NUMPAGES')]]/following-sibling::w:r[w:t][1]/w:t",
+        u"3");
 }
 
 CPPUNIT_TEST_FIXTURE(Test, defaultTabStopNotInStyles)

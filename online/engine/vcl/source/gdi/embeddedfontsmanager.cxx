@@ -248,6 +248,19 @@ bool sufficientTTFRights(const void* data, tools::Long size,
     return true; // no known restriction
 }
 
+// True when the data is a bare TrueType (0x00010000 or 'true') or OpenType ('OTTO') font, not an
+// Embedded OpenType one. EOT data starts with its own total size, little-endian, which none of
+// these tags can be for a font.
+bool isSfntFontData(const std::vector<char>& rData)
+{
+    if (rData.size() < 4)
+        return false;
+    const auto* p = reinterpret_cast<const unsigned char*>(rData.data());
+    const sal_uInt32 nTag = (sal_uInt32(p[0]) << 24) | (sal_uInt32(p[1]) << 16)
+                            | (sal_uInt32(p[2]) << 8) | sal_uInt32(p[3]);
+    return nTag == 0x00010000 || nTag == 0x74727565 || nTag == 0x4F54544F;
+}
+
 }
 
 EmbeddedFontsManager::EmbeddedFontsManager(const uno::Reference<frame::XModel>& xModel)
@@ -311,6 +324,10 @@ bool EmbeddedFontsManager::addEmbeddedFont( const uno::Reference< io::XInputStre
         if( read <= 0 )
             break;
     }
+    // PPTX font parts should hold EOT, but decks other tools write often hold the bare font. The
+    // EOT decode rejects it, and the font was neither drawn nor saved again.
+    if (eot && isSfntFontData(fontData))
+        eot = false;
     bool sufficientFontRights(false);
 #if ENABLE_EOT
     if( eot )

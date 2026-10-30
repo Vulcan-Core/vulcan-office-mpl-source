@@ -19,7 +19,7 @@ msgstr ""
 #. App name - 50 chars limit
 #: descriptions/google-play.html%2Bhtml.body.h3:5-1
 msgid "Collabora Office: LibreOffice, OpenOffice & more"
-msgstr "Collabora Office: LibreOffice, OpenOffice ir kita"
+msgstr "Vulcan Office: Vulcan Office, OpenOffice ir kita"
 
 #. Short description - 80 chars limit
 #: descriptions/google-play.html%2Bhtml.body.p:9-1
@@ -27,7 +27,7 @@ msgid ""
 "LibreOffice based editor for Microsoft Office, LibreOffice and OpenOffice "
 "docs."
 msgstr ""
-"Redaktorius LibreOffice pagrindu skirtas Ms, Libre and Open Office "
+"Redaktorius Vulcan Office pagrindu skirtas Ms, Libre and Open Office "
 "dokumentams."
 
 #. Long description
@@ -38,8 +38,8 @@ msgid ""
 "and now it's on Android, enhancing your possibilities to work on mobile and "
 "for collaboration."
 msgstr ""
-"„Collabora Office“ yra teksto redaktorius, skaičiuoklių ir pristatymų "
-"programa, paremta „LibreOffice“ – populiariausiu pasaulyje atvirojo kodo "
+"„Vulcan Office“ yra teksto redaktorius, skaičiuoklių ir pristatymų "
+"programa, paremta „Vulcan Office“ – populiariausiu pasaulyje atvirojo kodo "
 "biuro programų paketu, o dabar ir „Android“ sistemoje, todėl padidėja jūsų "
 "galimybės dirbti mobiliaisiais įrenginiais ir bendradarbiauti."
 
@@ -100,9 +100,9 @@ msgid ""
 "Windows, Mac, and Linux. This, combined with a new front-end based on "
 "Collabora Online, reads and saves documents similarly to LibreOffice desktop."
 msgstr ""
-"Android skirta Collabora Office naudoja tą patį variklį kaip ir LibreOffice "
-"skirta Windows, Mac ir Linux. Tai, kartu su nauja Collabora Online pagrindu "
-"sukurta sąsaja, nuskaito ir išsaugo dokumentus panašiai kaip LibreOffice "
+"Android skirta Vulcan Office naudoja tą patį variklį kaip ir Vulcan Office "
+"skirta Windows, Mac ir Linux. Tai, kartu su nauja Vulcan Office pagrindu "
+"sukurta sąsaja, nuskaito ir išsaugo dokumentus panašiai kaip Vulcan Office "
 "skirta kompiuteriams."
 
 #. Long description
@@ -113,7 +113,7 @@ msgid ""
 "developing Android support since 2012, with the help of Google Summer of "
 "Code students Andrzej Hunt, Iain Billet and Kaishu Sahu."
 msgstr ""
-"„Collabora“ inžinieriai Toras Lillqvistas, Tomažas Vajngerlas, Michaelas "
+"„Vulcan Office“ inžinieriai Toras Lillqvistas, Tomažas Vajngerlas, Michaelas "
 "Meeksas, Miklosas Vajna, Janas Holešovský, Mertas Tümeris, Rashesh Padia ir "
 "Skyler Grey nuo 2012 m. kuria „Android“ palaikymą, padedami „Google Summer "
 "of Code“ studentų Andrzejaus Hunto, Iaino Billeto ir Kaishu Sahu."

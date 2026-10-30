@@ -63,6 +63,8 @@
 #include <DrawDocShell.hxx>
 #include <strings.hrc>
 #include <pres.hxx>
+#include <VulcanHiddenInk.hxx>
+#include <comphelper/kit.hxx>
 
 using namespace ::com::sun::star;
 using namespace ::com::sun::star::uno;
@@ -289,11 +291,29 @@ bool FuText::MouseButtonDown(const MouseEvent& rMEvt)
 
     if (rMEvt.GetClicks() == 1)
     {
+        // Vulcan (phone Impress exit boundaries, M-0018 "S3 | tap a different
+        // object (the table) | S2t | down"): decide, BEFORE SdrEndTextEdit
+        // below clears the answer, whether this tap leaves one object's text
+        // for a DIFFERENT object. It is the discriminator the phone gate at
+        // the SdrHitKind::TextEditObj arm needs, and it can only be read here.
+        // Decided as a bool on purpose: SdrEndTextEdit may DELETE the edited
+        // object (the empty-placeholder case just below), so a pointer to it
+        // must not survive that call, even for a compare.
+        bool bKitTapLeavesTextObject = false;
+        if (mpView->IsTextEdit())
+        {
+            const SdrObject* pKitTextEditObj = mpView->GetTextEditObject();
+            bKitTapLeavesTextObject = pKitTextEditObj && pKitTextEditObj != aVEvt.mpRootObj;
+        }
+
         if (mpView->IsTextEdit() && eHit != SdrHitKind::MarkedObject && eHit != SdrHitKind::Handle)
         {
             // finish text input
             if(mpView->SdrEndTextEdit() == SdrEndTextEditKind::Deleted)
             {
+                // Vulcan: the edited object is gone, so whatever the re-pick
+                // below lands on is a different object by construction.
+                bKitTapLeavesTextObject = true;
                 /* Bugfix from MBA: during a double click onto the unused? area
                    in text mode, we get with the second click eHit =
                    SdrHitKind::TextEditObj since it goes to the TextObject which was
@@ -359,12 +379,68 @@ bool FuText::MouseButtonDown(const MouseEvent& rMEvt)
                         if (bMarkChanges)
                             mpView->MarkObj(aVEvt.mpRootObj, pPV);
 
-                        if (auto pSdrTextObj = DynCastSdrTextObj(aVEvt.mpObj))
-                        {
-                            mxTextObj = pSdrTextObj;
-                        }
+                        /*
+                          Vulcan (phone Impress exit boundaries, M-0018): a
+                          single tap that LEAVES one object's text for a
+                          DIFFERENT object lands on that object SELECTED, with
+                          the keyboard DOWN — `S3 | tap a different object (the
+                          table) | S2t | down`. It does not hop caret-to-caret.
 
-                        SetInEditMode(rMEvt, true);
+                          The sibling gate in fusel.cxx (bKitPhoneSingleTap,
+                          :213-217) already makes a single tap SELECT rather
+                          than open text when the tap starts from S1/S2/S2t, so
+                          those rows were parity. FuText is the arm that runs
+                          when text is ALREADY open, and it had no such gate:
+                          the tap fell into MarkObj + SetInEditMode and opened
+                          the new object's text with the keyboard up. For a
+                          table the promotion to TextEditObj is COKit-
+                          unconditional (svdview.cxx:387), so the exact leg
+                          M-0018 measured was the one that diverged.
+
+                          SCOPED TO THE MEASURED LEG, three ways, so nothing
+                          else moves: phone Kit only (desktop and tablet keep
+                          stock, same shape as the fusel gate); a single click
+                          only, which the enclosing `GetClicks() == 1` block
+                          already guarantees, so the count-2 double tap — the
+                          deliberate entry door — never reaches here; and only
+                          when the tap moved to a DIFFERENT object than the one
+                          being edited. That last clause is what keeps
+                          table-cell navigation intact: tapping another CELL
+                          reports the same root object, so it still moves the
+                          caret.
+
+                          MarkObj above has already run, so the object is
+                          selected either way; declining the edit-mode entry is
+                          the whole change, and core sends the graphic
+                          selection with no text cursor, which is what the
+                          client reads as keyboard-down.
+
+                          mxTextObj is left alone for the same reason. Adopting
+                          the newly-tapped object as FuText's current text
+                          object while it is merely SELECTED would arm
+                          MouseButtonUp's empty-text-object arm against it
+                          (bEmptyTextObj, which exists to clean up a
+                          placeholder the user opened and left empty). Nothing
+                          was opened here, so nothing should be cleaned up; the
+                          stale pointer to the object we just LEFT is reset by
+                          that same arm on the next mouse-up, because the mark
+                          list no longer matches it.
+                        */
+                        SfxViewShell* pKitViewShell = mrViewShell.GetViewShell();
+                        const bool bKitPhoneLeavesTextForAnotherObject
+                            = comphelper::COKit::isActive()
+                              && pKitViewShell && pKitViewShell->isKitMobilePhone()
+                              && bKitTapLeavesTextObject;
+
+                        if (!bKitPhoneLeavesTextForAnotherObject)
+                        {
+                            if (auto pSdrTextObj = DynCastSdrTextObj(aVEvt.mpObj))
+                            {
+                                mxTextObj = pSdrTextObj;
+                            }
+
+                            SetInEditMode(rMEvt, true);
+                        }
                     }
                     else if (aVEvt.meEvent == SdrEventKind::ExecuteUrl && !rMEvt.IsMod2())
                     {
@@ -522,6 +598,10 @@ void FuText::ImpSetAttributesForNewTextObject(SdrTextObj* pTxtObj)
         SfxItemSet aSet(mrViewShell.GetPool());
         aSet.Put(makeSdrTextAutoGrowWidthItem(false));
         aSet.Put(makeSdrTextAutoGrowHeightItem(true));
+        // No min-size floor: keeping the dragged rectangle as the minimum is
+        // what leaves the selection frame bigger than its content.
+        aSet.Put(makeSdrTextMinFrameHeightItem(0));
+        aSet.Put(makeSdrTextMinFrameWidthItem(0));
         pTxtObj->SetMergedItemSet(aSet);
         pTxtObj->AdjustTextFrameWidthAndHeight();
         const SfxViewShell* pCurrentViewShell = SfxViewShell::Current();
@@ -535,6 +615,10 @@ void FuText::ImpSetAttributesForNewTextObject(SdrTextObj* pTxtObj)
 
         aSet.Put(makeSdrTextAutoGrowWidthItem(true));
         aSet.Put(makeSdrTextAutoGrowHeightItem(false));
+        // No min-size floor: keeping the dragged rectangle as the minimum is
+        // what leaves the selection frame bigger than its content.
+        aSet.Put(makeSdrTextMinFrameHeightItem(0));
+        aSet.Put(makeSdrTextMinFrameWidthItem(0));
 
         // Set defaults for vertical click-n'drag text object, pool defaults are:
         // SdrTextVertAdjustItem: SDRTEXTVERTADJUST_TOP
@@ -936,6 +1020,12 @@ bool FuText::KeyInput(const KeyEvent& rKEvt)
     {
         bOK = false;   // default handling in base class
     }
+
+    // Editable scanned PDFs: the first key that changes a hidden-ink OCR
+    // line's text makes the line visible and covers the scan under it,
+    // before the key lands (so the key is typed in visible ink).
+    if (bOK && mpView->IsTextEdit() && EditEngine::DoesKeyChangeText(aKEvt))
+        sd::hiddenink::BeforeTextChange(*mpView);
 
     if (bOK && mpView->KeyInput(aKEvt, mpWindow) )
     {

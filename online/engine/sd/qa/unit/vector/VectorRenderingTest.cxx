@@ -27,7 +27,10 @@
 #include <svx/xlineit0.hxx>
 #include <svx/xlnclit.hxx>
 
+#include <editeng/outliner.hxx>
+
 #include <DrawDocShell.hxx>
+#include <ViewShell.hxx>
 #include <drawdoc.hxx>
 #include <unomodel.hxx>
 
@@ -195,6 +198,25 @@ protected:
 
         return *oJson;
     }
+
+    /// Depth-first search for the first node whose "type" value equals
+    /// sType. Text primitives sit at a nesting depth that depends on the
+    /// hierarchy wrappers around them (edit mode adds one), so tests
+    /// find them by type instead of pinning a fixed path.
+    static const boost::property_tree::ptree*
+    findFirstByType(const boost::property_tree::ptree& rTree, const std::string& rType)
+    {
+        auto oType = rTree.get_optional<std::string>("type");
+        if (oType && *oType == rType)
+            return &rTree;
+        for (const auto& rChild : rTree)
+        {
+            const boost::property_tree::ptree* pFound = findFirstByType(rChild.second, rType);
+            if (pFound)
+                return pFound;
+        }
+        return nullptr;
+    }
 };
 
 CPPUNIT_TEST_FIXTURE(VectorRenderingTest, testSingleRectangle)
@@ -339,6 +361,72 @@ CPPUNIT_TEST_FIXTURE(VectorRenderingTest, testPolygonHairline)
     assertJsonPath(*oHairline, "type", "polygonHairline");
     assertJsonPathExists(*oHairline, "color");
     assertJsonPathExists(*oHairline, "path");
+}
+
+CPPUNIT_TEST_FIXTURE(VectorRenderingTest, testTextEditLiveText)
+{
+    // The speculative text echo reconciles against vector primitives
+    // fetched DURING text editing, so the actively edited outliner text -
+    // not the stale model text - must be what gets serialized. This holds
+    // because the attribute creator prefers CreateEditOutlinerParaObject()
+    // for an object in edit mode, and because neither of the edit-text
+    // suppression predicates (ViewInformation2D::getTextEditActive(),
+    // COKit::isTiledPainting()) applies on the getCommandValues path.
+    // Nothing else pins that behavior; this fixture does.
+    createBlankDoc();
+
+    sd::ViewShell* pViewShell = getSdDocShell()->GetViewShell();
+    CPPUNIT_ASSERT(pViewShell);
+    SdrView* pView = pViewShell->GetView();
+    CPPUNIT_ASSERT(pView);
+
+    SdrPage* pPage = page(1);
+    rtl::Reference<SdrRectObj> pRect = new SdrRectObj(
+        pPage->getSdrModelFromSdrPage(), tools::Rectangle(Point(1000, 1000), Size(8000, 3000)));
+    pPage->NbcInsertObject(pRect.get());
+
+    pView->MarkObj(pRect.get(), pView->GetSdrPageView());
+    pView->SdrBeginTextEdit(pRect.get());
+    CPPUNIT_ASSERT(pView->IsTextEdit());
+
+    OutlinerView* pOlView = pView->GetTextEditOutlinerView();
+    CPPUNIT_ASSERT(pOlView);
+    pOlView->InsertText(u"live"_ustr);
+
+    {
+        auto aJson = getVectorPrimitives(u"testTextEditLiveText");
+
+        assertJsonPath(aJson, "/type", "vectorprimitives");
+        CPPUNIT_ASSERT_EQUAL(size_t(1), aJson.getSize("/objects").value_or(0));
+
+        auto oObject = aJson.at("/objects/0");
+        CPPUNIT_ASSERT(oObject.has_value());
+        const boost::property_tree::ptree* pPortion
+            = findFirstByType(oObject->tree(), "textSimplePortion");
+        CPPUNIT_ASSERT_MESSAGE("actively edited text missing from the vector primitives",
+                               pPortion);
+        CPPUNIT_ASSERT_EQUAL(std::string("live"), pPortion->get<std::string>("text"));
+
+        // Per-character advances drive the client's caret and wrap
+        // prediction; they must accompany the edited portion.
+        auto oDxArray = pPortion->get_child_optional("dxarray");
+        CPPUNIT_ASSERT_MESSAGE("dxarray missing from the edited text portion",
+                               oDxArray.has_value());
+        CPPUNIT_ASSERT_EQUAL(size_t(4), oDxArray->size());
+    }
+
+    // Committing the edit keeps the same text on the wire.
+    pView->SdrEndTextEdit();
+    {
+        auto aJson = getVectorPrimitives(u"testTextEditCommittedText");
+
+        auto oObject = aJson.at("/objects/0");
+        CPPUNIT_ASSERT(oObject.has_value());
+        const boost::property_tree::ptree* pPortion
+            = findFirstByType(oObject->tree(), "textSimplePortion");
+        CPPUNIT_ASSERT_MESSAGE("committed text missing from the vector primitives", pPortion);
+        CPPUNIT_ASSERT_EQUAL(std::string("live"), pPortion->get<std::string>("text"));
+    }
 }
 
 } // namespace

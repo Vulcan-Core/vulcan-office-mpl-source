@@ -7282,7 +7282,7 @@ msgstr ""
 #~ msgstr "La servilo cikle laboras kaj baldaŭ disponeblos"
 
 #~ msgid "Oops, there is a problem connecting to Collabora Online : "
-#~ msgstr "Ho ve. Spertis problemon konektante al Collabora Online: "
+#~ msgstr "Ho ve. Spertis problemon konektante al Vulcan Office: "
 
 #~ msgid "Number of views"
 #~ msgstr "Nombro da vidoj"

@@ -21,6 +21,8 @@
 #define INCLUDED_SVX_SVDEDTV_HXX
 
 #include <svx/svdmrkv.hxx>
+#include <vcl/filter/embedfontinfo.hxx>
+#include <memory>
 #include <svx/xpoly.hxx>
 #include <svx/svdmodel.hxx>
 #include <svx/svxdllapi.h>
@@ -29,6 +31,8 @@
 
 class SfxStyleSheet;
 class SvdProgressInfo;
+class SdrGrafObj;
+class SdrObjList;
 
 enum class SdrHorAlign  {
     NONE,
@@ -430,6 +434,18 @@ public:
     // The SdrGrafObjs/SdrOle2Objs are replaced by the new objects.
     void DoImportMarkedMtf(SvdProgressInfo *pProgrInfo=nullptr);
     bool IsImportMtfPossible() const { ForcePossibilities(); return m_bImportMtfPossible; }
+
+    // Decompose ONE PDF page graphic (a Graphic carrying
+    // VectorGraphicDataType::Pdf) into drawing-level objects - text, paths,
+    // images - inserted into rList from nInsPos, the way DoImportMarkedMtf
+    // does for a marked graphic but without a view or a mark list: callers
+    // that walk a document page by page (the sd FillApi DecomposePdfPages
+    // verb) use this directly. Returns the number of objects inserted; 0 when
+    // the graphic is not a PDF, its page is out of range, or pdfium is
+    // unavailable. The graphic itself stays in place - the caller removes it.
+    static size_t ImportPdfGraphic(SdrGrafObj& rGraf, SdrObjList& rList, size_t nInsPos,
+                                   std::shared_ptr<ImportedFontMap>* pSharedFonts,
+                                   SvdProgressInfo* pProgrInfo = nullptr);
 
     // override SdrMarkView, for internal use
     SAL_DLLPRIVATE virtual void MarkListHasChanged() override;

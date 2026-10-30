@@ -1090,6 +1090,47 @@ void DesktopKitTest::testCommandResult()
 
     CPPUNIT_ASSERT_EQUAL(std::string(".uno:Bold"), aTree.get_child("commandName").get_value<std::string>());
     CPPUNIT_ASSERT_EQUAL(true, aTree.get_child("success").get_value<bool>());
+
+    // A typed transport token is metadata for the callback, not a command
+    // argument. A normal notified completion echoes its exact token.
+    m_aCommandResult.clear();
+    m_aCommandResultCondition.reset();
+    pDocument->pClass->postUnoCommand(
+        pDocument, ".uno:Bold",
+        R"({"ResponseChannel":{"type":"string","value":"normal-channel"}})", true);
+    Scheduler::ProcessEventsToIdle();
+    m_aCommandResultCondition.wait(aTimeValue);
+    CPPUNIT_ASSERT(!m_aCommandResult.isEmpty());
+
+    aTree.clear();
+    aStream = std::stringstream(std::string(m_aCommandResult));
+    boost::property_tree::read_json(aStream, aTree);
+    CPPUNIT_ASSERT_EQUAL(std::string(".uno:Bold"),
+                         aTree.get<std::string>("commandName"));
+    CPPUNIT_ASSERT(aTree.get<bool>("success"));
+    CPPUNIT_ASSERT_EQUAL(std::string("normal-channel"),
+                         aTree.get<std::string>("responseChannel"));
+
+    // If queryDispatch() cannot find a slot, no DispatchResultListener runs.
+    // postUnoCommand must still produce a correlated terminal failure.
+    m_aCommandResult.clear();
+    m_aCommandResultCondition.reset();
+    pDocument->pClass->postUnoCommand(
+        pDocument, ".uno:DefinitelyUnsupportedCommand",
+        R"({"ResponseChannel":{"type":"string","value":"unsupported-channel"}})",
+        true);
+    Scheduler::ProcessEventsToIdle();
+    m_aCommandResultCondition.wait(aTimeValue);
+    CPPUNIT_ASSERT(!m_aCommandResult.isEmpty());
+
+    aTree.clear();
+    aStream = std::stringstream(std::string(m_aCommandResult));
+    boost::property_tree::read_json(aStream, aTree);
+    CPPUNIT_ASSERT_EQUAL(std::string(".uno:DefinitelyUnsupportedCommand"),
+                         aTree.get<std::string>("commandName"));
+    CPPUNIT_ASSERT(!aTree.get<bool>("success"));
+    CPPUNIT_ASSERT_EQUAL(std::string("unsupported-channel"),
+                         aTree.get<std::string>("responseChannel"));
 }
 
 void DesktopKitTest::testWriterComments()
@@ -2265,6 +2306,42 @@ std::vector<RedlineInfo> getRedlineInfo(LibLODocument_Impl* pDocument)
     return getRedlineInfo(tree.get_child("redlines"));
 }
 
+static bool hasVisibleJsonControl(const boost::property_tree::ptree& rTree,
+                                  std::string_view aControlId)
+{
+    if (rTree.get<std::string>("id", "") == aControlId)
+    {
+        const std::string aVisible = rTree.get<std::string>("visible", "true");
+        if (aVisible != "false" && aVisible != "0")
+            return true;
+    }
+
+    for (const auto& rChild : rTree)
+    {
+        if (hasVisibleJsonControl(rChild.second, aControlId))
+            return true;
+    }
+    return false;
+}
+
+static bool hasDisabledJsonControl(const boost::property_tree::ptree& rTree,
+                                   std::string_view aControlId)
+{
+    if (rTree.get<std::string>("id", "") == aControlId)
+    {
+        const std::string aEnabled = rTree.get<std::string>("enabled", "true");
+        if (aEnabled == "false" || aEnabled == "0")
+            return true;
+    }
+
+    for (const auto& rChild : rTree)
+    {
+        if (hasDisabledJsonControl(rChild.second, aControlId))
+            return true;
+    }
+    return false;
+}
+
 class ViewCallback
 {
     LibLODocument_Impl* mpDocument;
@@ -2287,6 +2364,10 @@ public:
     RedlineInfo m_aLastRedlineInfo;
     std::string m_searchTerm;
     int m_findReplaceDialogId;
+    bool m_bFindReplaceReplacementControls;
+    bool m_bFindReplaceSearchInitiallyDisabled;
+    bool m_bTrackFindReplaceSearchEnabled;
+    bool m_bFindReplaceSearchEnabled;
     unsigned long long m_posSizeDialogId = 0;
 
     ViewCallback(LibLODocument_Impl* pDocument)
@@ -2295,7 +2376,12 @@ public:
           m_bEmptyTableSelection(false),
           m_bTilesInvalidated(false),
           m_bZeroCursor(false),
-          m_stateBold(false)
+          m_stateBold(false),
+          m_findReplaceDialogId(0),
+          m_bFindReplaceReplacementControls(false),
+          m_bFindReplaceSearchInitiallyDisabled(false),
+          m_bTrackFindReplaceSearchEnabled(false),
+          m_bFindReplaceSearchEnabled(false)
     {
         mnView = KitHelper::getCurrentView();
         mpDocument->m_pDocumentClass->registerCallback(pDocument, &ViewCallback::callback, this);
@@ -2381,7 +2467,7 @@ public:
             std::stringstream aStream(pPayload);
             boost::property_tree::read_json(aStream, m_JSONDialog);
 
-            if (m_JSONDialog.find("title") != m_JSONDialog.not_found() && m_JSONDialog.get_child("title").get_value<std::string>() == "Find and Replace")
+            if (m_JSONDialog.get<std::string>("unique_id", "") == "FindReplaceDialog")
             {
                 m_findReplaceDialogId = std::atoi(m_JSONDialog.get_child("id").get_value<std::string>().c_str());
                 // Set search term to something random and make sure it is read from incoming JSON (KIT_CALLBACK_JSDIALOG).
@@ -2394,6 +2480,33 @@ public:
             m_JSONDialog.clear();
             std::stringstream aStream(pPayload);
             boost::property_tree::read_json(aStream, m_JSONDialog);
+
+            if (m_JSONDialog.get<std::string>("dialogid", "") == "FindReplaceDialog")
+            {
+                m_bFindReplaceReplacementControls
+                    = m_bFindReplaceReplacementControls
+                      || (hasVisibleJsonControl(m_JSONDialog, "replaceframe")
+                          && hasVisibleJsonControl(m_JSONDialog, "replaceterm")
+                          && hasVisibleJsonControl(m_JSONDialog, "replace")
+                          && hasVisibleJsonControl(m_JSONDialog, "replaceall"));
+                m_bFindReplaceSearchInitiallyDisabled
+                    = m_bFindReplaceSearchInitiallyDisabled
+                      || hasDisabledJsonControl(m_JSONDialog, "search");
+            }
+
+            if (m_bTrackFindReplaceSearchEnabled
+                && m_JSONDialog.get<std::string>("jsontype", "") == "dialog"
+                && m_JSONDialog.get<std::string>("action", "") == "action"
+                && std::atoi(m_JSONDialog.get<std::string>("id", "0").c_str())
+                       == m_findReplaceDialogId)
+            {
+                const auto aData = m_JSONDialog.get_child_optional("data");
+                if (aData && aData->get<std::string>("control_id", "") == "search"
+                    && aData->get<std::string>("action_type", "") == "enable")
+                {
+                    m_bFindReplaceSearchEnabled = true;
+                }
+            }
 
             if (m_JSONDialog.find("jsontype") != m_JSONDialog.not_found() && m_JSONDialog.get_child("jsontype").get_value<std::string>() == "dialog")
             {
@@ -3390,6 +3503,13 @@ void DesktopKitTest::testPropertySettingOnFormulaBar()
 
 void DesktopKitTest::testSearchTermReset()
 {
+    // Exercise the phone-specific UI file. It deliberately omits the desktop
+    // Find/Replace tab buttons, so opening the dialog must not assume those
+    // widgets exist.
+    KitHelper::setDeviceFormFactor(u"mobile");
+    comphelper::ScopeGuard aResetDeviceFormFactor(
+        []() { KitHelper::setDeviceFormFactor(u""); });
+
     LibCO_Impl aOffice;
     LibLODocument_Impl* pDocument = loadDoc("empty.ods");
     Scheduler::ProcessEventsToIdle();
@@ -3402,10 +3522,15 @@ void DesktopKitTest::testSearchTermReset()
 
     pDocument->pClass->postUnoCommand(pDocument, ".uno:SearchDialog", nullptr, false);
     Scheduler::ProcessEventsToIdle();
+    CPPUNIT_ASSERT_GREATER(0, aView.m_findReplaceDialogId);
+    CPPUNIT_ASSERT(aView.m_bFindReplaceReplacementControls);
+    CPPUNIT_ASSERT(aView.m_bFindReplaceSearchInitiallyDisabled);
 
     // Send "something" as current search string (searchterm).
+    aView.m_bTrackFindReplaceSearchEnabled = true;
     pDocument->pClass->sendDialogEvent(pDocument, aView.m_findReplaceDialogId, "{\"id\":\"searchterm\", \"cmd\": \"change\", \"data\": \"something\", \"type\": \"combobox\"}");
     Scheduler::ProcessEventsToIdle();
+    CPPUNIT_ASSERT(aView.m_bFindReplaceSearchEnabled);
 
     // Press search button.
     pDocument->pClass->sendDialogEvent(pDocument, aView.m_findReplaceDialogId, "{\"id\":\"search\", \"cmd\": \"click\", \"data\": \"undefined\", \"type\": \"pushbutton\"}");

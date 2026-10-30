@@ -15,11 +15,13 @@ namespace cool {
 	/// modifier names the kind of transformation. Known values
 	/// include "gray", "luminance_to_alpha", "invert" and "replace".
 	/// color is only set for the "replace" transformation, which
-	/// carries the substitute colour.
+	/// carries the substitute colour. range is [minX, minY, maxX, maxY]
+	/// of the children, left out when they paint nothing.
 	export interface ModifiedColorPrimitive extends Primitive {
 		type: typeof ModifiedColorPrimitive.type;
 		modifier?: string;
 		color?: string;
+		range?: number[];
 	}
 
 	export namespace ModifiedColorPrimitive {

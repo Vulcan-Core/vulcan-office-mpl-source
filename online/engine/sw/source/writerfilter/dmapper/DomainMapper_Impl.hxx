@@ -652,9 +652,9 @@ private:
     /// preload footnotes and endnotes
     sal_Int32                       m_nFootnotes; // footnote count
     sal_Int32                       m_nEndnotes;  // endnote count
-    // these are the real first notes, use their content in the first notes
-    sal_Int32                       m_nFirstFootnoteIndex;
-    sal_Int32                       m_nFirstEndnoteIndex;
+    // the w:id the first reference cites: the real first notes get the content of that note
+    std::optional<sal_Int32>        m_oFirstFootnoteRefId;
+    std::optional<sal_Int32>        m_oFirstEndnoteRefId;
 
     bool                            m_bLineNumberingSet;
 
@@ -972,7 +972,8 @@ public:
     void IncrementEndnoteCount() { ++m_nEndnotes; }
     bool CopyTemporaryNotes(
         const rtl::Reference< SwXFootnote > & xNoteSrc,
-        const rtl::Reference< SwXFootnote > & xNoteDest );
+        const rtl::Reference< SwXFootnote > & xNoteDest,
+        bool bIsFootnote );
     void RemoveTemporaryFootOrEndnotes();
 
     void PushAnnotation();
@@ -1082,6 +1083,12 @@ public:
 
     void SetLineNumbering( sal_Int32 nLnnMod, sal_uInt32 nLnc, sal_Int32 ndxaLnn );
     bool IsLineNumberingSet() const {return m_bLineNumberingSet;}
+    /// Word numbers the lines of a section only when its sectPr has lnNumType, Writer the lines
+    /// of the whole document: stop the body paragraphs from the one holding xFrom (the start of
+    /// the body when empty) up to, not including, the one holding xTo (the paragraph being
+    /// appended when empty) from counting lines.
+    void SuppressLineNumbers(css::uno::Reference<css::text::XTextRange> const& xFrom,
+                             css::uno::Reference<css::text::XTextRange> const& xTo);
 
     DeletableTabStop                m_aCurrentTabStop;
 

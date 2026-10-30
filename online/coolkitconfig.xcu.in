@@ -26,6 +26,15 @@
      File > Settings entry) instead of only being toggleable via this
      static override / Expert Configuration. -->
 <item oor:path="/org.openoffice.Office.Calc/Input"><prop oor:name="WarnOnDeleteCellReferences" oor:op="fuse"><value>true</value></prop></item>
+<item oor:path="/org.openoffice.Office.Calc/Input"><prop oor:name="WarnActiveSheet" oor:op="fuse"><value>false</value></prop></item>
+
+<!-- Off, an .xls or .xlsm save writes back the VBA project the import kept,
+     byte for byte (the .xls _VBA_PROJECT_CUR storage; the .xlsm
+     xl/vbaProject.bin with its signature parts), instead of rebuilding it from
+     the loaded Basic modules, which drops UserForms, references and compiled
+     code, and an .xlsm project's signatures. Both the .xls (BIFF8)
+     and the .xlsm export read this key; an .xlsx save writes no project. -->
+<item oor:path="/org.openoffice.Office.Calc/Filter/Import/VBA"><prop oor:name="UseExport" oor:op="fuse"><value>false</value></prop></item>
 
 <!-- Set a work path which is valid in chroot -->
 <item oor:path="/org.openoffice.Office.Paths/Variables"><prop oor:name="Work" oor:op="fuse"><value>file:///tmp</value></prop></item>

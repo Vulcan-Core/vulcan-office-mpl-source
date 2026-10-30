@@ -47,6 +47,22 @@ typedef struct _xmlTextWriter* xmlTextWriterPtr;
 namespace sw {
     class UndoRedoContext;
     class RepeatContext;
+
+    /** Vulcan fork: which document nodes an undo action touches, for per-view
+        (out-of-order) undo when several views co-edit (sw::UndoManager::LookupViewUndo).
+
+        Positions are the document node indexes the action stores. An action that
+        reports no footprint (the default) is never undone out of order, and never
+        lets another view's action be undone past it: unknown means "refuse".
+    */
+    struct UndoFootprint
+    {
+        SwNodeOffset nStart; ///< first node the action touches
+        SwNodeOffset nEnd;   ///< last node the action touches (inclusive)
+        /// True when doing or undoing the action never inserts or removes a node, so
+        /// no other action's stored node index can move because of it.
+        bool bNodeNeutral;
+    };
 }
 
 class UNLESS_MERGELIBS(SW_DLLPUBLIC) SwUndo
@@ -128,6 +144,18 @@ public:
     static void SetSaveData( SwDoc& rDoc, SwRedlineSaveDatas& rSData );
     static bool HasHiddenRedlines( const SwRedlineSaveDatas& rSData );
     void IgnoreRepeat() { m_isRepeatIgnored = true; }
+
+    /// Vulcan fork: see sw::UndoFootprint. The default is "unknown".
+    virtual std::optional<sw::UndoFootprint> GetFootprint() const;
+
+    /** Vulcan fork: the footprint of any action on the Writer undo stack: an SwUndo's
+        own, or the union of a list action's children (unknown if any child is). */
+    static std::optional<sw::UndoFootprint> GetActionFootprint(const SfxUndoAction& rAction);
+
+    /** Vulcan fork: false when the history records anything that owns nodes elsewhere in
+        the nodes array (flys, footnotes, fieldmarks): restoring it can move every body
+        node index, so the action cannot be node-neutral. */
+    static bool IsHistoryNodeNeutral(const SwHistory* pHistory);
 };
 
 enum class DelContentType : sal_uInt16

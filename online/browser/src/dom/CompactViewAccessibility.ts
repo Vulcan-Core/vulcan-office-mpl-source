@@ -175,7 +175,7 @@ class CompactViewAccessibility {
 
 	private addFixedElements(): void {
 		this.fixedContentList = [];
-		const containerList = ['viewModeDropdownButton', 'userListHeader'];
+		const containerList = ['userListHeader'];
 		for (const containerId of containerList) {
 			const container = document.getElementById(containerId);
 			if (!container) continue;

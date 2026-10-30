@@ -13,6 +13,7 @@
 
 #pragma once
 
+#include <common/Anonymizer.hpp>
 #include <common/Authorization.hpp>
 #include <common/Common.hpp>
 #include <common/ConfigUtil.hpp>
@@ -25,6 +26,7 @@
 
 #include <chrono>
 #include <memory>
+#include <set>
 #include <string>
 #include <string_view>
 
@@ -63,6 +65,7 @@ public:
                 _filename = rhs._filename;
                 _ownerId = rhs._ownerId;
                 _modifiedTime = rhs._modifiedTime;
+                _vulcanContentHead = rhs._vulcanContentHead;
             }
 
             return *this;
@@ -95,12 +98,26 @@ public:
         /// Set last modified time as unsafe
         void setLastModifiedTimeUnSafe() { _modifiedTime.clear(); }
 
+        /// Vulcan handshake: the storage head's content timestamp,
+        /// advertised by the WOPI host beside LastModifiedTime (which may be
+        /// pinned to the live session's content while an editing session is
+        /// open). Non-empty means the host also parks conflicted saves as
+        /// recoverable copies, so conflicts may resolve by reload instead of
+        /// a user dialog. Empty on hosts that predate the handshake.
+        void setVulcanContentHead(const std::string& contentHead)
+        {
+            _vulcanContentHead = contentHead;
+        }
+
+        const std::string& getVulcanContentHead() const { return _vulcanContentHead; }
+
         virtual void dumpState(std::ostream& os, const std::string& indent = "\n  ") const
         {
             os << indent << "filename: [" << _filename << ']';
             os << indent << "size: " << _size;
             os << indent << "ownerId: [" << _ownerId << ']';
             os << indent << "modifiedTime: [" << _modifiedTime << ']';
+            os << indent << "vulcanContentHead: [" << _vulcanContentHead << ']';
         }
 
     private:
@@ -108,6 +125,7 @@ public:
         std::string _filename;
         std::string _ownerId;
         std::string _modifiedTime; ///< Opaque modified timestamp as received from the server.
+        std::string _vulcanContentHead; ///< Vulcan: storage-head content timestamp (see setter).
     };
 
     /// Represents attributes of interest to the storage.
@@ -126,6 +144,7 @@ public:
             , _isUserModified(false)
             , _isAutosave(false)
             , _isExitSave(false)
+            , _isDeletingInput(false)
         {}
 
         /// Reset the attributes to clear them after using them.
@@ -135,7 +154,19 @@ public:
             _isUserModified = false;
             _isAutosave = false;
             _isExitSave = false;
+            _isDeletingInput = false;
             _extendedData.clear();
+            _editors.clear();
+        }
+
+        /// Vulcan: reset(), but keep the editor attribution. An editor id belongs
+        /// to whichever upload covers the interval they were editing in, so it
+        /// must survive the clearing of the per-upload flags.
+        void resetKeepingEditors()
+        {
+            std::set<std::string> editors = std::move(_editors);
+            reset();
+            _editors = std::move(editors);
         }
 
         void merge(const Attributes& lhs)
@@ -145,10 +176,16 @@ public:
             _isUserModified = lhs._isUserModified ? true : _isUserModified;
             _isAutosave = lhs._isAutosave ? true : _isAutosave;
             _isExitSave = lhs._isExitSave ? true : _isExitSave;
+            _isDeletingInput = lhs._isDeletingInput ? true : _isDeletingInput;
 
             // Clobber with the lhs, assuming it's newer.
             if (!lhs._extendedData.empty())
                 _extendedData = lhs._extendedData;
+
+            // Vulcan: attribution accumulates. Everyone who was editing during
+            // the interval we are about to upload must be reported, whichever
+            // save/upload attempt first noticed them.
+            _editors.insert(lhs._editors.begin(), lhs._editors.end());
         }
 
         /// Asks the storage object to force overwrite
@@ -169,9 +206,32 @@ public:
         void setIsExitSave(bool exitSave) { _isExitSave = exitSave; }
         bool isExitSave() const { return _isExitSave; }
 
+        /// Vulcan: X-Vulcan-Deleting-Input, see
+        /// DocumentBroker::recordDeletingInput().
+        void setDeletingInput(bool deletingInput) { _isDeletingInput = deletingInput; }
+        bool isDeletingInput() const { return _isDeletingInput; }
+
         /// Misc extended data.
         void setExtendedData(const std::string& extendedData) { _extendedData = extendedData; }
         const std::string& getExtendedData() const { return _extendedData; }
+
+        /// Vulcan: record a WOPI UserId whose session sent input that wsd counts
+        /// as modifying since the last upload - deliberately over-inclusive, see
+        /// ClientSession::_handleInput. Empty ids are ignored. The set is reported
+        /// to the host in X-Vulcan-Editors and cleared with the rest of the
+        /// attributes once the upload that carried it succeeded.
+        void addEditor(const std::string& wopiUserId)
+        {
+            if (!wopiUserId.empty())
+                _editors.insert(wopiUserId);
+        }
+
+        /// The WOPI UserIds of the sessions that sent input wsd counts as
+        /// modifying since the last upload. Note: this is *not* "who typed the
+        /// bytes in this file" - it is who was editing during the interval this
+        /// upload covers, and an edit-permitted session that only navigated is
+        /// included (see addEditor()).
+        const std::set<std::string>& editors() const { return _editors; }
 
         /// Dump the internals of this instance.
         void dumpState(std::ostream& os, const std::string& indent = "\n  ") const
@@ -181,12 +241,19 @@ public:
             os << indent << "user-modified: " << isUserModified();
             os << indent << "auto-save: " << isAutosave();
             os << indent << "exit-save: " << isExitSave();
+            os << indent << "deleting-input: " << isDeletingInput();
             os << indent << "extended-data: " << getExtendedData();
+            os << indent << "editors: " << _editors.size();
+            for (const std::string& editor : _editors)
+                os << indent << "  editor: [" << Anonymizer::anonymize(editor) << ']';
         }
 
     private:
         /// The client-provided saving extended data to send to the WOPI host.
         std::string _extendedData;
+        /// Vulcan: WOPI UserIds of the sessions that were editing since the last
+        /// upload (see addEditor()).
+        std::set<std::string> _editors;
         /// Whether or not we want to force uploading.
         bool _forced;
         /// The document has been modified by the user.
@@ -195,6 +262,8 @@ public:
         bool _isAutosave;
         /// Saving on exit (when the document is cleaned up from memory)
         bool _isExitSave;
+        /// Vulcan: a person sent input that can delete text.
+        bool _isDeletingInput;
     };
 
     /// Represents the upload request result, with a Result code
@@ -241,11 +310,34 @@ public:
 
         const std::string& getReason() const { return _reason; }
 
+        /// Vulcan handshake: how the WOPI host disposed of a
+        /// conflicted upload's bytes — "parked" (rescued as a conflicted-copy
+        /// file), "duplicate" (identical bytes already in revision history),
+        /// or "failed"/empty (not rescued, or a pre-handshake host). Conflict
+        /// handling resolves by reload only when the bytes are safe.
+        void setVulcanConflictResolution(const std::string& resolution)
+        {
+            _vulcanConflictResolution = resolution;
+        }
+
+        const std::string& getVulcanConflictResolution() const
+        {
+            return _vulcanConflictResolution;
+        }
+
+        /// Vulcan: FAILED with no HTTP response at all (a timeout
+        /// or a dropped connection), so the host may have stored the upload.
+        void setVulcanNoResponse(bool noResponse) { _vulcanNoResponse = noResponse; }
+
+        bool isVulcanNoResponse() const { return _vulcanNoResponse; }
+
     private:
         std::string _saveAsName;
         std::string _saveAsUrl;
         std::string _reason;
+        std::string _vulcanConflictResolution;
         Result _result;
+        bool _vulcanNoResponse = false;
     };
 
     /// The state of an asynchronous request.
@@ -312,6 +404,22 @@ public:
         {
         }
 
+        /// Construct a LockUpdateResult carrying the HTTP status that produced it.
+        ///
+        /// UNAUTHORIZED covers 401, 403 AND 404 (http::isUnauthorizedStatusCode), and
+        /// those mean opposite things: a 401 is an aged-out token the host will
+        /// replace on request, while a 403/404 is the host saying this caller may not
+        /// hold the lock right now. Only the caller that has to tell them apart reads
+        /// this.
+        LockUpdateResult(Status status, LockState requestedLockState, std::string reason,
+                         unsigned httpStatus)
+            : _reason(std::move(reason))
+            , _status(status)
+            , _requestedLockState(requestedLockState)
+            , _httpStatus(httpStatus)
+        {
+        }
+
         void setState(Status status) { _status = status; }
 
         Status getStatus() const { return _status; }
@@ -322,10 +430,18 @@ public:
 
         LockState requestedLockState() const { return _requestedLockState; }
 
+        /// The HTTP status behind this result, or 0 when the host never answered (a
+        /// timeout, a dropped connection, an internal error) and in the success
+        /// cases. Both WOPI lock paths record it on failure. A plain unsigned rather
+        /// than http::StatusCode on purpose: this header is included almost everywhere
+        /// and has never needed the HTTP stack.
+        unsigned httpStatus() const { return _httpStatus; }
+
     private:
         std::string _reason;
         Status _status;
         LockState _requestedLockState;
+        unsigned _httpStatus = 0;
     };
 
     /// The state of an asynchronous lock request.
@@ -474,14 +590,20 @@ public:
     );
 
     /// Validates the given URI.
-    static StorageType validate(const Poco::URI& uri, bool takeOwnership);
+    /// @serverToServer is the trust of the request that named the URI
+    /// (ClientRequestDispatcher::isServerToServer()). Only a server-to-server
+    /// request may use a WOPI host that an internal alias group alone admits;
+    /// see HostUtil::allowedWopiHost().
+    static StorageType validate(const Poco::URI& uri, bool takeOwnership, bool serverToServer);
 
     /// Storage object creation factory.
     /// @takeOwnership is for local files that are temporary,
     /// such as convert-to requests.
+    /// @serverToServer is passed to validate().
     static std::unique_ptr<StorageBase> create(const Poco::URI& uri, const std::string& jailRoot,
                                                const std::string& jailPath, bool takeOwnership,
-                                               const AdditionalFilePocoUris& additionalFileUrisPublic);
+                                               const AdditionalFilePocoUris& additionalFileUrisPublic,
+                                               bool serverToServer);
 
     virtual void dumpState(std::ostream& os, const std::string& indent = "\n  ") const
     {

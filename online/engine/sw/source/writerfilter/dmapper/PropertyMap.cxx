@@ -1690,9 +1690,15 @@ void SectionPropertyMap::CloseSectionGroup( DomainMapper_Impl& rDM_Impl )
         DBG_UNHANDLED_EXCEPTION("writerfilter", "HandleIncreasedAnchoredObjectSpacing() failed");
     }
 
+    // Word numbers the lines of a section only when its sectPr has lnNumType; Writer numbers the
+    // lines of the whole document once any section switches numbering on. So the sections without
+    // lnNumType stop counting their lines (a cover and contents numbered 1-32: ).
     if ( m_nLnnMod )
     {
         bool bFirst = rDM_Impl.IsLineNumberingSet();
+        if ( !bFirst && !m_bIsFirstSection && m_xStartingRange.is() )
+            // This section switches numbering on; the sections before it had no lnNumType.
+            rDM_Impl.SuppressLineNumbers( uno::Reference< text::XTextRange >(), m_xStartingRange );
         rDM_Impl.SetLineNumbering( m_nLnnMod, m_nLnc, m_ndxaLnn );
         if ( m_nLnnMin > 0 || (bFirst && m_nLnc == NS_ooxml::LN_Value_ST_LineNumberRestart_newSection) )
         {
@@ -1720,6 +1726,9 @@ void SectionPropertyMap::CloseSectionGroup( DomainMapper_Impl& rDM_Impl )
             }
         }
     }
+    else if ( rDM_Impl.IsLineNumberingSet() && m_xStartingRange.is() )
+        // An earlier section switched numbering on; this one has no lnNumType.
+        rDM_Impl.SuppressLineNumbers( m_xStartingRange, uno::Reference< text::XTextRange >() );
 
     if (m_nBreakType == NS_ooxml::LN_Value_ST_SectionMark_continuous
         && !rDM_Impl.IsInComments())

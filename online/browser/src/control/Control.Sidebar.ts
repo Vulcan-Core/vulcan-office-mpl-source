@@ -48,6 +48,7 @@ class Sidebar extends SidebarBase {
 			'SdCustomAnimationDeck',
 			'SdMasterPagesDeck',
 			'StyleListDeck',
+			'InspectorDeck',
 			'A11yCheckDeck',
 		];
 
@@ -109,6 +110,8 @@ class Sidebar extends SidebarBase {
 		else if (deckId === 'SdMasterPagesDeck') return '.uno:MasterSlidesPanel';
 		else if (deckId === 'StyleListDeck')
 			return '.uno:SidebarDeck.StyleListDeck';
+		else if (deckId === 'InspectorDeck')
+			return '.uno:SidebarDeck.InspectorDeck';
 		else if (deckId === 'A11yCheckDeck')
 			return '.uno:SidebarDeck.A11yCheckDeck';
 		return '';
@@ -128,8 +131,71 @@ class Sidebar extends SidebarBase {
 		this.setupTargetDeck(unoCommand);
 	}
 
+	// The Impress Slide panel arrives from core carrying page-setup rows
+	// (paper format, orientation, margins), a Master View button pair and
+	// the autolayout grid. Per design review: trim to the useful controls - the
+	// background fill and the master-slide picker with its two display
+	// checkboxes. The autolayout grid additionally rendered as clipped
+	// text fallbacks (its preview icons are not shipped), and the toolbar
+	// layout dropdown already covers that job.
+	private static readonly IMPRESS_SLIDE_PANEL_PRUNE = new Set([
+		'label2',
+		'paperformat',
+		'label4',
+		'orientation',
+		'labelmargin',
+		'marginLB',
+		'box1',
+		'customlabel',
+	]);
+
+	private _subtreeHasLayoutIcons(node: any): boolean {
+		if (!node) return false;
+		if (node.id === 'layoutpanel_icons') return true;
+		if (!Array.isArray(node.children)) return false;
+		for (const child of node.children)
+			if (this._subtreeHasLayoutIcons(child)) return true;
+		return false;
+	}
+
+	// The deny-list ids are generic (label2, box1...), so they are only
+	// pruned INSIDE SlideBackgroundPanel - other decks reuse such ids.
+	private _pruneSlideBackgroundPanel(node: any): void {
+		if (!node || !Array.isArray(node.children)) return;
+		node.children = node.children.filter(
+			(child: any) =>
+				!Sidebar.IMPRESS_SLIDE_PANEL_PRUNE.has(child && child.id),
+		);
+		for (const child of node.children)
+			this._pruneSlideBackgroundPanel(child);
+	}
+
+	private _pruneImpressSlidePanel(node: any): void {
+		if (!node || !Array.isArray(node.children)) return;
+		// Drop ONLY the autolayout PANEL wrapper. Filtering every node
+		// whose subtree contains the grid also matched the DECK ROOT and
+		// silently discarded the whole Slide panel - the deck arrived,
+		// pruned to nothing, and never showed (design review: "couldn't open the
+		// slide layout tab again").
+		node.children = node.children.filter((child: any) => {
+			if (!child) return true;
+			const isPanelWrapper =
+				child.type === 'panel' ||
+				child.type === 'expander' ||
+				/^Panel/.test(String(child.id ?? ''));
+			return !(isPanelWrapper && this._subtreeHasLayoutIcons(child));
+		});
+		for (const child of node.children) {
+			if (child && child.id === 'SlideBackgroundPanel')
+				this._pruneSlideBackgroundPanel(child);
+			else this._pruneImpressSlidePanel(child);
+		}
+	}
+
 	onSidebar(data: FireEvent) {
 		var sidebarData = data.data;
+		if (this.map.getDocType() === 'presentation')
+			this._pruneImpressSlidePanel(sidebarData);
 
 		if (
 			sidebarData.action === 'close' ||

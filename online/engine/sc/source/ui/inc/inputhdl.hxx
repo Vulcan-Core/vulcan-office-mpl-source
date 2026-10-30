@@ -126,6 +126,9 @@ private:
     std::unique_ptr<ScInputHdlState>
                             pLastState;
     std::unique_ptr<Timer>  pDelayTimer;
+    /// Vulcan fork: builds the column's AutoInput list just AFTER an edit's first key (see StartTable).
+    std::unique_ptr<Timer>  mpColDataTimer;
+    bool                    mbColDataPending = false;
 
     std::unique_ptr<ScRangeFindList>
                             pRangeFindList;
@@ -153,6 +156,7 @@ private:
     static void     InvalidateAttribs();
     void            ImplCreateEditEngine();
     DECL_LINK( DelayTimer, Timer*, void );
+    DECL_LINK( ColDataTimer, Timer*, void );
     void            GetColData();
     void            UseColData();
     void            NextAutoEntry( bool bBack );

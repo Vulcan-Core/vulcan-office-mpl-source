@@ -117,8 +117,9 @@ void CollabSocketHandler::startValidation()
     };
 
     // Create and start CheckFileInfo request
+    // A browser endpoint: never server-to-server.
     _checkFileInfo = std::make_shared<CheckFileInfo>(
-        COOLWSD::getWebServerPoll(), wopiUri, std::move(onFinish));
+        COOLWSD::getWebServerPoll(), wopiUri, /*serverToServer=*/false, std::move(onFinish));
     _checkFileInfo->checkFileInfo(/* redirectionLimit */ 5);
 }
 
@@ -212,8 +213,9 @@ void CollabSocketHandler::onCheckFileInfoFinished(CheckFileInfo& cfi)
 
             // Validate the WOPI host so that subsequent connections
             // (e.g., switching from WASM to server mode) are authorized.
+            // A browser endpoint: never server-to-server.
             StorageBase::validate(
-                RequestDetails::sanitizeURI(_wopiSrc), false);
+                RequestDetails::sanitizeURI(_wopiSrc), false, /*serverToServer=*/false);
 
             _isAuthenticated = true;
             LOG_INF("Collab session authenticated for WOPISrc: "

@@ -5137,7 +5137,7 @@ msgid ""
 "Unlinking citations will prevent Collabora Online from updating citations "
 "and bibliography in this document."
 msgstr ""
-"Отвязка цитат не позволит Collabora Online обновлять цитаты и библиографию в "
+"Отвязка цитат не позволит Vulcan Office обновлять цитаты и библиографию в "
 "этом документе."
 
 #: src/control/HRuler.ts:321
@@ -6698,7 +6698,7 @@ msgstr ""
 
 #: src/map/handler/Map.VersionBar.js:50
 msgid "Your Collabora Online server needs updating. Version {0} is available."
-msgstr "Ваш сервер Collabora Online требует обновления. Доступна версия {0}."
+msgstr "Ваш сервер Vulcan Office требует обновления. Доступна версия {0}."
 
 #: src/map/handler/Map.WOPI.js:194
 msgid "Creating new file from template..."
@@ -6988,7 +6988,7 @@ msgstr ""
 
 #: welcome/welcome.html%2Bhtml.head.title:9-3
 msgid "Collabora Online Welcome"
-msgstr "Добро пожаловать в Collabora Online"
+msgstr "Добро пожаловать в Vulcan Office"
 
 #: welcome/welcome.html%2Bhtml.body.div.div.div.div.h1:26-7
 msgid "Explore The New {coolversion}"
@@ -6997,7 +6997,7 @@ msgstr "Узнайте о новой {coolversion}"
 #: welcome/welcome.html%2Bhtml.body.div.div.div.div.h2:27-7
 #: welcome/welcome.html%2Bhtml.body.div.div.div.div.h2:38-7
 msgid "Collabora Online Development Edition"
-msgstr "Collabora Online для разработчиков"
+msgstr "Vulcan Office для разработчиков"
 
 #: welcome/welcome.html%2Bhtml.body.div.div.div.div.p:28-7
 msgid ""
@@ -7026,7 +7026,7 @@ msgid ""
 msgstr ""
 "Ознакомьтесь с <a target=\"_blank\" rel=\"noopener\" href=\"https://www."
 "collaboraonline.com/code-26-04-release-notes/\">примечаниями к выпуску</a> и "
-"узнайте всё о последней версии Collabora Online Development Edition, "
+"узнайте всё о последней версии Vulcan Office Development Edition, "
 "предназначенной для домашних пользователей и небольших команд."
 
 #: welcome/welcome.html%2Bhtml.body.div.div.div.div.h1:48-7
@@ -7592,7 +7592,7 @@ msgstr ""
 #~ msgstr "Сервер перезапускается и вскоре будет доступен"
 
 #~ msgid "Oops, there is a problem connecting to Collabora Online : "
-#~ msgstr "Сбой подключения к Collabora Online: "
+#~ msgstr "Сбой подключения к Vulcan Office: "
 
 #~ msgid "Number of views"
 #~ msgstr "Количество просмотров"

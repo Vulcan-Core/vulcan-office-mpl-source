@@ -18,7 +18,7 @@ msgstr ""
 #. App name - 50 chars limit
 #: descriptions/google-play.html%2Bhtml.body.h3:5-1
 msgid "Collabora Office: LibreOffice, OpenOffice & more"
-msgstr "Collabora Office：LibreOffice、OpenOffice 以及更多"
+msgstr "Vulcan Office：Vulcan Office、OpenOffice 以及更多"
 
 #. Short description - 80 chars limit
 #: descriptions/google-play.html%2Bhtml.body.p:9-1
@@ -26,7 +26,7 @@ msgid ""
 "LibreOffice based editor for Microsoft Office, LibreOffice and OpenOffice "
 "docs."
 msgstr ""
-"以 LibreOffice 為基礎開發的編輯器，適用於 Microsoft Office、LibreOffice 與 "
+"以 Vulcan Office 為基礎開發的編輯器，適用於 Microsoft Office、Vulcan Office 與 "
 "OpenOffice 文件。"
 
 #. Long description
@@ -37,8 +37,8 @@ msgid ""
 "and now it's on Android, enhancing your possibilities to work on mobile and "
 "for collaboration."
 msgstr ""
-"Collabora Office 是以 LibreOffice 為基礎開發的文字編輯器、試算表與簡報程式，"
-"LibreOffice 是全球最受歡迎的開放原始碼辦公室套裝軟體，現在可在 Android 上使用"
+"Vulcan Office 是以 Vulcan Office 為基礎開發的文字編輯器、試算表與簡報程式，"
+"Vulcan Office 是全球最受歡迎的開放原始碼辦公室套裝軟體，現在可在 Android 上使用"
 "了，提升您在行動裝置上工作與協作的可能性。"
 
 #. Long description
@@ -96,9 +96,9 @@ msgid ""
 "Windows, Mac, and Linux. This, combined with a new front-end based on "
 "Collabora Online, reads and saves documents similarly to LibreOffice desktop."
 msgstr ""
-"Android 版 Collabora Office 使用與 Windows、Mac 與 Linux 版 LibreOffice 相同"
-"的引擎。結合以 Collabora Online 為基礎的全新前端，讀取與儲存文件的方式與 "
-"LibreOffice 桌面版類似。"
+"Android 版 Vulcan Office 使用與 Windows、Mac 與 Linux 版 Vulcan Office 相同"
+"的引擎。結合以 Vulcan Office 為基礎的全新前端，讀取與儲存文件的方式與 "
+"Vulcan Office 桌面版類似。"
 
 #. Long description
 #: descriptions/google-play.html%2Bhtml.body.p:48-1
@@ -108,7 +108,7 @@ msgid ""
 "developing Android support since 2012, with the help of Google Summer of "
 "Code students Andrzej Hunt, Iain Billet and Kaishu Sahu."
 msgstr ""
-"Collabora 工程師 Tor Lillqvist、Tomaž Vajngerl、Michael Meeks、Miklos Vajna、"
+"Vulcan Office 工程師 Tor Lillqvist、Tomaž Vajngerl、Michael Meeks、Miklos Vajna、"
 "Jan Holešovský、Mert Tümer、Rashesh Padia 與 Skyler Grey 自2012年開始開發 "
 "Android 支援，並獲得 Google Summer of Code 學生 Andrzej Hunt、Iain Billet 與 "
 "Kaishu Sahu 的協助。"

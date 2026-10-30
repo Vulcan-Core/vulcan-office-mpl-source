@@ -18,7 +18,7 @@
             * There shouldn't be something like "rectangle.testSomething(otherRectangle)", instead "rectangle.testSometghing(otherRectangle.toArray())"
             * We need this approach to keep things maintainable. These classes are not base for others for now. We shouldn't force types.
             * Function inputs are primitives, like number, array of numbers, array of arrays of numbers, ..
-        * We have 3 types of coordinate units in Collabora Online.
+        * We have 3 types of coordinate units in Vulcan Office.
             * CSS pixels.
             * Core pixels.
             * twips.

@@ -39,7 +39,19 @@ class AutoFillBaseSection extends CanvasSectionObject {
 
 	public onInitialize() {
 		if ((<any>window).mode.isDesktop()) {
-			this.size = [Math.round(6 * app.dpiScale), Math.round(6 * app.dpiScale)];
+			// Excel's fill handle is noticeably chunkier than the stock engine's
+			// 6px square. Under the Vulcan desktop chrome (global.js stamps the
+			// marker at boot; desktop-only by definition) grow it to 8px —
+			// stock chrome and mobile keep their existing sizes. Hit-testing
+			// and centering both read `this.size`, so no other offsets change.
+			const desktopChrome = document.documentElement.classList.contains(
+				'vulcan-desktop-chrome',
+			);
+			const sizePx = desktopChrome ? 8 : 6;
+			this.size = [
+				Math.round(sizePx * app.dpiScale),
+				Math.round(sizePx * app.dpiScale),
+			];
 		} else {
 			this.size = [
 				Math.round(16 * app.dpiScale),

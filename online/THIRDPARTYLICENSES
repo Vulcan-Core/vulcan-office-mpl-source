@@ -297,6 +297,12 @@ DOMPurify - XSS sanitizer for HTML, MathML and SVG
 Copyright (C) 2024 by Dr.-Ing. Mario Heiderich, Cure53
 MPL-2.0 or Apache-2.0
 
+Material Symbols – icon glyphs, inlined as SVG path data
+(browser/src/control/VulcanRailIcons.ts; from google/material-design-icons,
+commit 84ccef280841abfac506afc4ad4a2782f6d0a1d0)
+Copyright Google LLC
+Apache License, Version 2.0 (the licence text appears above)
+
 l10n.js
 By Eli Grey, http://eligrey.com
 Copyright (c) 2016 OFTN Inc.

@@ -197,6 +197,10 @@ public:
 
     virtual OUString GetComment() const override;
 
+    /// Vulcan fork: the pasted block, for per-view undo; unknown when the paste also
+    /// changed references or drawing objects (those are document-wide snapshots).
+    virtual std::optional<ScRange> getAffectedRange() const override;
+
 private:
     ScMarkData      aMarkData;
     ScDocumentUniquePtr pUndoDoc;
@@ -270,6 +274,9 @@ public:
     /// Undo restores their cells but the tracking has to be re-added
     /// explicitly.
     void SetRestoreExpandedMatrices(std::vector<ScAddress> const& rPositions);
+
+    /// Vulcan fork: the cleared block, for per-view undo; unknown when drawing objects went too.
+    virtual std::optional<ScRange> getAffectedRange() const override;
 
 private:
     std::shared_ptr<DataSpansType> mpDataSpans; // Spans of non-empty cells.
@@ -346,6 +353,9 @@ public:
     virtual OUString GetComment() const override;
 
     ScEditDataArray*    GetDataArray();
+
+    /// Vulcan fork: the formatted block (including the border cover), for per-view undo.
+    virtual std::optional<ScRange> getAffectedRange() const override;
 private:
     ScMarkData      aMarkData;
     ScRange         aRange;

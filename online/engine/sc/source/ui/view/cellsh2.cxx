@@ -43,6 +43,7 @@
 #include <globstr.hrc>
 #include <scresid.hxx>
 #include <global.hxx>
+#include <globalnames.hxx>
 #include <scmod.hxx>
 #include <docsh.hxx>
 #include <document.hxx>
@@ -70,6 +71,7 @@
 #include <officecfg/Office/Common.hxx>
 
 #include <o3tl/make_shared.hxx>
+#include <cmath>
 #include <memory>
 
 using namespace com::sun::star;
@@ -209,6 +211,109 @@ static bool lcl_GetSortParam( const ScViewData& rData, const ScSortParam& rSortP
 
 namespace
 {
+    /* Vulcan Sort Ascending/Descending sorts the table around the cursor. It is the
+       sheet's unnamed range, which ScDocShell::GetDBData sets to the data area around the cursor
+       (GetDataArea) and then marks. A second sort finds that mark, so a Descending right after an
+       Ascending is a one-click sort too. A selection of some of the rows keeps HasColHeader; a
+       named range and an AutoFilter range keep the header they declare, else HasColHeader. */
+    bool lcl_IsOneClickSort( const ScViewData& rData, const ScDBData& rDBData, const ScSortParam& rParam )
+    {
+        if ( rDBData.GetName() != STR_DB_LOCAL_NONAME || rDBData.HasAutoFilter() )
+            return false;
+        SCCOL nCol1 = rData.GetCurX(), nCol2 = nCol1;
+        SCROW nRow1 = rData.GetCurY(), nRow2 = nRow1;
+        rData.GetDocument().GetDataArea( rData.CurrentTabForData(), nCol1, nRow1, nCol2, nRow2, false, false );
+        return nCol1 == rParam.nCol1 && nRow1 == rParam.nRow1 && nCol2 == rParam.nCol2 && nRow2 == rParam.nRow2;
+    }
+
+    /* Vulcan the sheet's AutoFilter range, when the one-click sort's table is that
+       range under rows of its own, such as a title. ScDocShell::GetDBData keeps the AutoFilter
+       range only when the data area around the cursor starts on its header row, so with a title
+       directly above, the one-click sort got the whole data area, title included. The range has
+       the data area's columns and last row, its header row is below the data area's first row,
+       and the cursor is on or under that header row. */
+    const ScDBData* lcl_OneClickSortFilterRange( const ScViewData& rData, const ScSortParam& rParam )
+    {
+        const ScDBData* pFilter = rData.GetDocument().GetAnonymousDBData( rData.CurrentTabForData() );
+        if ( !pFilter || !pFilter->HasAutoFilter() || !pFilter->HasHeader() )
+            return nullptr;
+        ScRange aArea;
+        pFilter->GetArea( aArea );
+        if ( aArea.aStart.Col() != rParam.nCol1 || aArea.aEnd.Col() != rParam.nCol2
+             || aArea.aEnd.Row() != rParam.nRow2 || aArea.aStart.Row() <= rParam.nRow1
+             || aArea.aStart.Row() > rData.GetCurY() )
+            return nullptr;
+        return pFilter;
+    }
+
+    /* Vulcan whether a row of a one-click sort's table labels its columns.
+       ScTable::HasColHeader (table3.cxx) calls the first row a header only when every cell is
+       text and the next row holds a non-text cell, so the header of an all-text table, a header
+       with a blank cell and a header of years were sorted in among the records. Here a row is a
+       record when every cell is a number or a date, or when any cell is a plain number: a header
+       labels its columns with text, years or dates, never 3 or $5.00. Otherwise it labels them,
+       and a blank cell does not count. This is the iOS column sort's rule
+       (VOSheetsHeaderPill.swift sortTable), and so is its limit: a list with no header, whose
+       first record holds only text, keeps that record in place. */
+    bool lcl_IsOneClickSortLabelRow( const ScDocument& rDoc, SCTAB nTab, const ScSortParam& rParam, SCROW nRow )
+    {
+        SvNumberFormatter* pFormatter = rDoc.GetFormatTable();
+        bool bAllNumbers = true;
+        for ( SCCOL nCol = rParam.nCol1; nCol <= rParam.nCol2; ++nCol )
+        {
+            if ( !rDoc.HasValueData( nCol, nRow, nTab ) )
+            {
+                bAllNumbers = false;            // a blank or a text cell
+                continue;
+            }
+            const SvNumFormatType nType = pFormatter->GetType( rDoc.GetNumberFormat( nCol, nRow, nTab ) );
+            if ( nType & SvNumFormatType::DATETIME )
+                continue;                       // a date or a time labels a column
+            const double fValue = rDoc.GetValue( nCol, nRow, nTab );
+            if ( !( nType & SvNumFormatType::CURRENCY ) && fValue >= 1900.0 && fValue <= 2099.0
+                 && fValue == std::floor( fValue ) )
+                continue;                       // so does a year
+            return false;                       // a plain number: a record
+        }
+        return !bAllNumbers;
+    }
+
+    enum class OneClickFirstRow { Record, Header, Title };
+
+    /* Vulcan what the first row of a one-click sort's table is: a record unless it
+       labels its columns. Over two or more columns it is a title on the header (GetDataArea
+       joins the two) when its only filled cell is the first one, or when it is blank over a
+       filled cell of a second row that labels its columns too: a title in B1, or a title with a
+       date beside it, over the header. Taking that row for the header sorts the real one in. A
+       header with a blank cell over an all-text first record has the same shape and is refused
+       too. Otherwise it is the header. */
+    OneClickFirstRow lcl_OneClickSortFirstRow( const ScDocument& rDoc, SCTAB nTab, const ScSortParam& rParam )
+    {
+        if ( rParam.nRow1 == rParam.nRow2 )
+            return OneClickFirstRow::Record;    // one row is data, as in HasColHeader
+        if ( !lcl_IsOneClickSortLabelRow( rDoc, nTab, rParam, rParam.nRow1 ) )
+            return OneClickFirstRow::Record;
+        if ( rParam.nCol2 > rParam.nCol1 )
+        {
+            bool bFilledAfterFirst = false;
+            bool bBlankOverFilled = false;
+            for ( SCCOL nCol = rParam.nCol1; nCol <= rParam.nCol2; ++nCol )
+            {
+                if ( rDoc.GetCellType( nCol, rParam.nRow1, nTab ) != CELLTYPE_NONE )
+                {
+                    if ( nCol > rParam.nCol1 )
+                        bFilledAfterFirst = true;
+                }
+                else if ( rDoc.GetCellType( nCol, rParam.nRow1 + 1, nTab ) != CELLTYPE_NONE )
+                    bBlankOverFilled = true;
+            }
+            if ( !bFilledAfterFirst
+                 || ( bBlankOverFilled && lcl_IsOneClickSortLabelRow( rDoc, nTab, rParam, rParam.nRow1 + 1 ) ) )
+                return OneClickFirstRow::Title;
+        }
+        return OneClickFirstRow::Header;
+    }
+
     // this registers the dialog which Find1RefWindow search for
     class ScValidationRegisteredDlg
     {
@@ -402,7 +507,46 @@ void ScCellShell::ExecuteDB( SfxRequest& rReq )
                         ScDocument& rDoc = GetViewData().GetDocument();
 
                         pDBData->GetSortParam( aSortParam );
-                        bool bHasHeader = rDoc.HasColHeader( aSortParam.nCol1, aSortParam.nRow1, aSortParam.nCol2, aSortParam.nRow2, nTab );
+                        // Vulcan a range that declares its header row, with filter buttons
+                        // (an AutoFilter range) or a name (an xlsx table imports as one), keeps it:
+                        // HasColHeader rejects an all-text header. Other ranges, such as the
+                        // temporary one a selection of only the records makes, still ask HasColHeader.
+                        ScDBCollection::NamedDBs& rNamedDBs = rDoc.GetDBCollection()->getNamedDBs();
+                        const bool bDeclaresHeader = pDBData->HasHeader()
+                            && ( pDBData->HasAutoFilter() || rNamedDBs.findByPointer( pDBData ) != rNamedDBs.end() );
+                        bool bHasHeader = bDeclaresHeader
+                            || rDoc.HasColHeader( aSortParam.nCol1, aSortParam.nRow1, aSortParam.nCol2, aSortParam.nRow2, nTab );
+
+                        // Vulcan the table around the cursor keeps its header row.
+                        const bool bOneClick = lcl_IsOneClickSort( rData, *pDBData, aSortParam );
+                        if ( const ScDBData* pFilterData = bOneClick ? lcl_OneClickSortFilterRange( rData, aSortParam ) : nullptr )
+                        {
+                            // Filter buttons under a title: their range sorts with the header
+                            // they declare, as their own sort does (UISort finds the range by
+                            // its area). It is marked, as GetDBData marks it with no title on
+                            // top, so a second sort finds it.
+                            ScRange aFilterArea;
+                            pFilterData->GetArea( aFilterArea );
+                            aSortParam.nRow1 = aFilterArea.aStart.Row();
+                            pTabViewShell->MarkRange( aFilterArea, false );
+                            bHasHeader = true;
+                        }
+                        else if ( bOneClick )
+                        {
+                            const OneClickFirstRow eFirstRow = lcl_OneClickSortFirstRow( rDoc, nTab, aSortParam );
+                            if ( eFirstRow == OneClickFirstRow::Title )
+                            {
+                                // A title on the header. Taking the title for the header sorts
+                                // the real header in; skipping it would leave a first record
+                                // with one filled cell, and the record under it, unsorted.
+                                // Refused, and the unnamed range restored, as the cancelled
+                                // range dialog in lcl_GetSortParam does.
+                                rData.GetDocShell()->CancelAutoDBRange();
+                                pTabViewShell->ErrorMessage( STR_VULCAN_SORT_TITLE );
+                                break;
+                            }
+                            bHasHeader = eFirstRow == OneClickFirstRow::Header;
+                        }
 
                         if( nCol < aSortParam.nCol1 )
                             nCol = aSortParam.nCol1;

@@ -164,6 +164,14 @@ class CanvasSectionContainer {
 	private width: number;
 	private height: number;
 	private needsResize: boolean = false;
+	// The scale the PENDING backing-store size was computed against. The two
+	// halves of the canvas size pair are written in different turns -- onResize
+	// stamps app.dpiScale and multiplies by it, resizeCanvas divides again a
+	// frame later -- so a devicePixelRatio move between them scaled the CSS
+	// width by that ratio and left the remainder of #document-container bare.
+	// Divide by what the backing store was actually built from, never a live
+	// re-read.
+	private resizeDpiScale: number = 1;
 	private positionOnMouseDown: Array<number> = null;
 	private positionOnMouseUp: Array<number> = null;
 	private positionOnClick: Array<number> = null;
@@ -171,9 +179,16 @@ class CanvasSectionContainer {
 	private mousePosition: Array<number> = null;
 	private dragDistance: Array<number> = null;
 	private draggingSomething: boolean = false; // This will be managed by container, used by sections.
+	// VULCAN: whether the press since the last mousedown drifted into a
+	// drag. Unlike draggingSomething (reset on mouseup) this survives to
+	// the trailing dblclick, so a double-click whose second press moved
+	// the object does not ALSO enter text edit (one gesture = one action).
+	private draggedSinceDown: boolean = false;
+	private mousePressClient: Array<number> = null; // The client point of a left mouse press, until its release (never set for touch).
 	private sectionOnMouseDown: string = null; // (Will contain section name) When dragging, user can leave section borders, dragging will continue. Target section will be informed.
 	private sectionUnderMouse: string = null; // For mouse enter & leave events.
 	private draggingTolerance: number = 5; // This is for only desktop, mobile browsers seem to distinguish dragging and clicking nicely.
+	private touchDraggingToleranceCSS: number = 8; // Phone chrome only, CSS px. See getTouchDragLatchSquared().
 	private multiTouch: boolean = false;
 	private touchCenter: Array<number> = null;
 	private longPressTimer: any = null;
@@ -196,6 +211,12 @@ class CanvasSectionContainer {
 	private documentAnchor: Array<number> = null; // This is the point where document starts inside canvas element. Initial value shouldn't be [0, 0].
 	// Above 2 properties can be used with documentBounds.
 	private drawRequest: number = null;
+	private boundRedrawCallback: FrameRequestCallback = null; // bound once; a fresh .bind per frame is garbage
+	private canvasVisibilityLatched: boolean = false; // the canvas starts hidden (CanvasTileLayer.js) and only ever becomes visible once
+	private sectionFontString: string = null; // rebuilt only when app.dpiScale changes
+	private cachedCanvasRect: DOMRect = null; // valid only during a gesture; never lazily refilled outside one
+	private lastOpaqueCheckColor: string = null;
+	private lastOpaqueCheckResult: boolean = false;
 	private drawingPaused: number = 0;
 	private drawingEnabled: boolean = true;
 	private deferredDrawCallback: () => void = null;
@@ -215,7 +236,15 @@ class CanvasSectionContainer {
 	private elapsedTime: number = null; // Time that passed since the animation started.
 
 	private dpiListener: DPIChangeListener = new DPIChangeListener(() => {
-		if (window.devicePixelRatio !== app.dpiScale) this.onResize(0, 0);
+		// Compare against the CLAMPED value or a dpr-3 phone resizes forever:
+		// raw devicePixelRatio (3) never equals the capped app.dpiScale (2).
+		if (
+			VulcanTilePerf.clampTileDpi(
+				window.devicePixelRatio,
+				VulcanTilePerf.isVulcanPhoneChrome(),
+			) !== app.dpiScale
+		)
+			this.onResize(0, 0);
 	});
 
 	// True between a middle-button press on the canvas and its release.
@@ -226,8 +255,27 @@ class CanvasSectionContainer {
 	private middleClickOnHyperlink: boolean = false;
 
 	constructor (canvasDOMElement: HTMLCanvasElement, disableDrawing?: boolean) {
+		// docstate.ts seeds app.dpiScale with the RAW devicePixelRatio at
+		// bundle eval; the tiles section is added right after this
+		// constructor, so this is the last stamp before tile geometry can
+		// exist. onResize re-applies the same rule for the session's life.
+		app.dpiScale = VulcanTilePerf.clampTileDpi(
+			window.devicePixelRatio,
+			VulcanTilePerf.isVulcanPhoneChrome(),
+		);
+		app.roundedDpiScale = Math.round(app.dpiScale);
+		this.sectionFontString = String(20 * app.dpiScale) + 'px Verdana';
+		this.boundRedrawCallback = this.redrawCallback.bind(this);
 		this.canvas = canvasDOMElement;
-		this.context = canvasDOMElement.getContext('2d', { alpha: false });
+		// Vulcan Office: alpha is enabled on DESKTOP ONLY, where the workspace
+		// *around* the page is transparent so the host application background can
+		// show through (css/vulcan-theme.css §2/§3 scope the transparent
+		// --color-canvas to html.vulcan-desktop-chrome, stamped pre-paint in
+		// js/global.js). Everywhere else --color-canvas is opaque, so an opaque
+		// canvas is pixel-identical and lets the compositor skip blending.
+		this.context = canvasDOMElement.getContext('2d', {
+			alpha: document.documentElement.classList.contains('vulcan-desktop-chrome'),
+		});
 		this.context.setTransform(1,0,0,1,0,0);
 		document.addEventListener('mousemove', this.onMouseMove.bind(this));
 		this.canvas.onmousedown = this.onMouseDown.bind(this);
@@ -240,10 +288,11 @@ class CanvasSectionContainer {
 		this.canvas.onmouseleave = this.onMouseLeave.bind(this);
 		this.canvas.onmouseenter = this.onMouseEnter.bind(this);
 		this.canvas.addEventListener('pointerdown', (e: PointerEvent) => {
+			this.cachedCanvasRect = this.canvas.getBoundingClientRect();
 			if (e.button === 0 && e.isPrimary) this.activePointerId = e.pointerId;
 		});
-		this.canvas.addEventListener('pointerup', () => { this.activePointerId = null; });
-		this.canvas.addEventListener('pointercancel', () => { this.activePointerId = null; });
+		this.canvas.addEventListener('pointerup', () => { this.activePointerId = null; this.cachedCanvasRect = null; });
+		this.canvas.addEventListener('pointercancel', () => { this.activePointerId = null; this.cachedCanvasRect = null; });
 		this.canvas.ontouchstart = this.onTouchStart.bind(this);
 		this.canvas.ontouchmove = this.onTouchMove.bind(this);
 		this.canvas.ontouchend = this.onTouchEnd.bind(this);
@@ -281,9 +330,24 @@ class CanvasSectionContainer {
 		this.dpiListener.start();
 	}
 
+	// Conservative: only colour forms that cannot carry alpha count as opaque.
+	// Memoized on the string because this runs per frame.
+	private isOpaqueColor(color: string): boolean {
+		if (color === this.lastOpaqueCheckColor) return this.lastOpaqueCheckResult;
+		const c = color.trim();
+		const opaque = /^#([0-9a-fA-F]{3}|[0-9a-fA-F]{6})$/.test(c) || /^rgb\(/.test(c);
+		this.lastOpaqueCheckColor = color;
+		this.lastOpaqueCheckResult = opaque;
+		return opaque;
+	}
+
 	private clearCanvas() {
 		this.context.fillStyle = this.clearColor;
-		this.context.clearRect(0, 0, this.canvas.width, this.canvas.height);
+		// An opaque fillRect overwrites every pixel, so the clearRect below it
+		// would be pure overdraw. A maybe-transparent clear colour (the desktop
+		// transparent --color-canvas) still needs the real clear.
+		if (!this.isOpaqueColor(this.clearColor))
+			this.context.clearRect(0, 0, this.canvas.width, this.canvas.height);
 		this.context.fillRect(0, 0, this.canvas.width, this.canvas.height);
 	}
 
@@ -355,13 +419,22 @@ class CanvasSectionContainer {
 	}
 
 	public setZoomChanged (zoomChanged: boolean) {
+		const zoomSettled = this.zoomChanged && !zoomChanged;
 		this.zoomChanged = zoomChanged;
-		if (!zoomChanged)
+		if (!zoomChanged) {
 			this.scrollingBeforeZoomSettled = false;
+			// Document sections are suppressed while zoom changes; settling must schedule their first eligible frame.
+			if (zoomSettled)
+				this.requestReDraw();
+		}
 	}
 
 	public setScrollingBeforeZoomSettled (on: boolean) {
 		this.scrollingBeforeZoomSettled = on;
+	}
+
+	public isScrollingBeforeZoomSettled (): boolean {
+		return this.scrollingBeforeZoomSettled;
 	}
 
 	public isZoomChanged (): boolean {
@@ -446,11 +519,21 @@ class CanvasSectionContainer {
 
 	private clearMousePositions () {
 		this.positionOnClick = this.positionOnDoubleClick = this.positionOnMouseDown = this.positionOnMouseUp = this.dragDistance = this.sectionOnMouseDown = null;
+		this.cachedCanvasRect = null;
 		this.touchCenter = null;
 		this.draggingSomething = false;
+		this.mousePressClient = null;
 		this.touchEventInProgress = false;
 		this.lowestPropagatedBoundSection = null;
 		this.targetSection = null;
+	}
+
+	// positionOnMouseDown is in canvas pixels, and a resize can move the canvas
+	// or change app.dpiScale under a held button. Re-measuring the press's client
+	// point keeps it naming the point that was pressed, in the current frame.
+	private remeasureMousePress(): void {
+		if (this.mousePressClient !== null && !this.draggingSomething)
+			this.positionOnMouseDown = this.convertPointToCanvasLocale(this.mousePressClient);
 	}
 
 	private convertPositionToSectionLocale (section: CanvasSectionObject, point: Array<number>): Array<number> {
@@ -458,7 +541,7 @@ class CanvasSectionContainer {
 	}
 
 	private convertPositionToCanvasLocale (e: any): Array<number> {
-		var rect: any = this.canvas.getBoundingClientRect();
+		var rect: any = this.cachedCanvasRect !== null ? this.cachedCanvasRect : this.canvas.getBoundingClientRect();
 		var x: number, y: number;
 
 		if (e.touches !== undefined && e.touches.length > 0) {
@@ -477,7 +560,7 @@ class CanvasSectionContainer {
 	}
 
 	private convertPointToCanvasLocale (point: Array<number>): Array<number> {
-		var rect: any = this.canvas.getBoundingClientRect();
+		var rect: any = this.cachedCanvasRect !== null ? this.cachedCanvasRect : this.canvas.getBoundingClientRect();
 		var x: number, y: number;
 
 		x = point[0] - rect.left;
@@ -535,6 +618,29 @@ class CanvasSectionContainer {
 
 	public getDragDistance(): number[] {
 		return [...this.dragDistance];
+	}
+
+	// The finger's whole-gesture travel at RELEASE, in the same canvas-local
+	// frame dragDistance is measured in: positionOnMouseUp minus
+	// positionOnMouseDown, both written by convertPositionToCanvasLocale
+	// against the rect cached for this gesture. onTouchEnd assigns
+	// positionOnMouseUp BEFORE it propagates onMouseUp and clears positions
+	// only after, so this answers during that propagation — which is the one
+	// moment the phone fling needs it (MouseControl.vulcanFling). Null
+	// outside it.
+	//
+	// Exists because the per-section `point` a section's onMouseUp receives
+	// is in the sectionOnMouseDown's frame, and on a document-anchored
+	// section that frame moves 1:1 opposite the scroll (see the two-worlds
+	// note on MouseControl.pushVulcanTouchSample). This is the stable-frame
+	// alternative.
+	public getReleaseDragDistance(): number[] | null {
+		if (this.positionOnMouseUp === null || this.positionOnMouseDown === null)
+			return null;
+		return [
+			this.positionOnMouseUp[0] - this.positionOnMouseDown[0],
+			this.positionOnMouseUp[1] - this.positionOnMouseDown[1],
+		];
 	}
 
 	public getPositionOnMouseUp(): number[] {
@@ -657,10 +763,49 @@ class CanvasSectionContainer {
 			resize event when the size is restored. As a work-around, if we have a zero-sized canvas,
 			double-check the document container size to see if we've missed a resize event
 		*/
-		if (this.width === 0 || this.height === 0) {
-			app.console.warn('Canvas width or height is zero.');
-			const documentContainer = document.getElementById('document-container');
-			if (documentContainer && documentContainer.clientWidth !== 0 || documentContainer.clientHeight !== 0) {
+		/*
+			The zero test is upstream's. A measurement that comes back NARROW
+			but non-zero has the same missing-follow-up-event premise and none
+			of the recovery: every section then draws inside the short canvas,
+			#map keeps the inline width computed from it (cool.css's right:0 is
+			discarded once left+width are both inline), and the rest of the
+			container stays bare until something else happens to resize it.
+			Widened on phone chrome only, so a stale narrow size is a one-frame
+			flicker instead of a latched band. Phone-gated because the arm costs
+			a redraw request per bad frame and desktop has never reported this.
+			onResize is fed the same getBoundingClientRect().width this reads
+			(CanvasTileLayer.js _getDocumentContainerSize), so one re-sync
+			settles it; the 2 CSS px tolerance absorbs the floor applied to the
+			backing store.
+		*/
+		const documentContainer = document.getElementById('document-container');
+		let narrowerThanContainer = false;
+		if (
+			documentContainer &&
+			this.width > 0 &&
+			this.resizeDpiScale > 0 &&
+			VulcanTilePerf.isVulcanPhoneChrome()
+		) {
+			const containerCssWidth = documentContainer.getBoundingClientRect().width;
+			narrowerThanContainer =
+				containerCssWidth > 0 &&
+				this.width / this.resizeDpiScale < containerCssWidth - 2;
+		}
+
+		if (this.width === 0 || this.height === 0 || narrowerThanContainer) {
+			app.console.warn(
+				narrowerThanContainer
+					? 'Canvas is narrower than its document container.'
+					: 'Canvas width or height is zero.',
+			);
+			// Parenthesised deliberately. `&&` binds tighter than `||`, so the
+			// original read as (dc && dc.clientWidth !== 0) || (dc.clientHeight !== 0)
+			// -- the null guard protected only the first operand, and a missing
+			// #document-container threw a TypeError from inside this rAF callback,
+			// where nothing catches it. That is a plausible way to lose the very
+			// first paint outright: this branch exists precisely to recover a
+			// zero-sized canvas, which is the state a hidden/animating embed boots in.
+			if (documentContainer && (documentContainer.clientWidth !== 0 || documentContainer.clientHeight !== 0)) {
 				if (app.map._docLayer) {
 					app.map._docLayer._syncTileContainerSize(true);
 					app.activeDocument.activeLayout.sendClientVisibleArea();
@@ -673,6 +818,62 @@ class CanvasSectionContainer {
 		return true;
 	}
 
+	/*
+		Tripwire for the intermittent right-hand band on phone Calc: the canvas
+		is about to be written NARROWER than the container it is supposed to
+		fill, which is the whole symptom. Nothing here changes what is drawn --
+		it exists to say WHICH mechanism produced it, since none is confirmed.
+
+		READ-BACK RULES (corrected against the fork as it actually is):
+		  - dpi_at_write !== dpi_of_size  => the size pair was computed against
+		    two different scales. This is the split the atomic resizeDpiScale
+		    closes, so a sample carrying it means something re-stamped the scale
+		    between onResize and here. NOTE: app.dpiScale is clamped to
+		    TILE_DPI_CAP (2) on phone chrome, so the divergence is an arbitrary
+		    fraction in (0,2] -- do NOT look for a clean 2/3 or 1/2 ratio.
+		  - canvas_css ~= container_css but tiles_w much less than backing_w
+		    => a zIndex-5 section clamped the Tiles expand (hitRight ignores
+		    showSection and a zero size[0]).
+		  - map_inline_w stale or 0px while container_css is right => the inline
+		    #map width outlived the geometry that produced it; cool.css's
+		    right:0 cannot recover an over-constrained abspos box.
+		  - every width right but scroll_x !== 0 => WebKit panned the layout
+		    viewport and the phone path skips the window.scroll(0,0) correction.
+		  - vv_scale !== 1 => the user (or an iOS focus auto-zoom) is zoomed;
+		    the served viewport meta permits it.
+		Once per session: a latched band would otherwise re-sample on every
+		resize, and one sample carries every discriminator.
+
+		The host drops any event name that is not on its allowlist, so this one
+		reaches nothing until 'phone_canvas_narrow' is added to
+		VULCAN_OFFICE_FORK_EVENT_ALLOWLIST in the embedding app
+		(in the host application).
+	*/
+	private reportNarrowCanvas(cssWidth: number): void {
+		if (!app.telemetry || !VulcanTilePerf.isVulcanPhoneChrome()) return;
+
+		const documentContainer = document.getElementById('document-container');
+		if (!documentContainer) return;
+		const containerCssWidth = documentContainer.getBoundingClientRect().width;
+		if (!(containerCssWidth > 0) || cssWidth >= containerCssWidth - 2) return;
+
+		const tiles = this.getSectionWithName(app.CSections.Tiles.name);
+		const mapElement = document.getElementById('map');
+		const visualViewport = (<any>window).visualViewport;
+
+		app.telemetry.recordOnce('phone_canvas_narrow', {
+			container_css: Math.round(containerCssWidth),
+			canvas_css: Math.round(cssWidth),
+			backing_w: this.width,
+			dpi_at_write: app.dpiScale,
+			dpi_of_size: this.resizeDpiScale,
+			tiles_w: tiles ? tiles.size[0] : -1,
+			map_inline_w: mapElement ? mapElement.style.width || 'none' : 'none',
+			scroll_x: Math.round(window.scrollX || 0),
+			vv_scale: visualViewport ? visualViewport.scale : -1,
+		});
+	}
+
 	private resizeCanvas() {
 		if (!this.needsResize)
 			return;
@@ -682,8 +883,11 @@ class CanvasSectionContainer {
 		this.canvas.height = this.height;
 
 		// CSS pixels can be fractional, but need to round to the same real pixels
-		var cssWidth: number = this.width / app.dpiScale; // NB. beware
-		var cssHeight: number = this.height / app.dpiScale;
+		// -- against the scale the backing store was BUILT from, not a live
+		// app.dpiScale, which onResize may have re-stamped since.
+		var cssWidth: number = this.width / this.resizeDpiScale; // NB. beware
+		var cssHeight: number = this.height / this.resizeDpiScale;
+		this.reportNarrowCanvas(cssWidth);
 		this.canvas.style.width = cssWidth.toFixed(4) + 'px';
 		this.canvas.style.height = cssHeight.toFixed(4) + 'px';
 
@@ -714,7 +918,12 @@ class CanvasSectionContainer {
 		app.console.debug('CSC: set inRedrawCallback = false');
 
 
-		this.canvas.style.visibility = 'unset';
+		if (!this.canvasVisibilityLatched) {
+			// Undoes the one-time 'hidden' from CanvasTileLayer.js; nothing
+			// re-hides the canvas afterwards, so write the style exactly once.
+			this.canvas.style.visibility = 'unset';
+			this.canvasVisibilityLatched = true;
+		}
 
 		// need to check if we should continue animation
 		this.animate(timestamp);
@@ -735,7 +944,7 @@ class CanvasSectionContainer {
 			app.console.debug('CSC: inRedrawCallback active already');
 		}
 		if (this.drawRequest === null)
-			this.drawRequest = requestAnimationFrame(this.redrawCallback.bind(this));
+			this.drawRequest = requestAnimationFrame(this.boundRedrawCallback);
 	}
 
 	private propagateCursorPositionChanged() {
@@ -1082,6 +1291,30 @@ class CanvasSectionContainer {
 		}
 	}
 
+	private propagateOnMultiTouchCancel(section: CanvasSectionObject, e: TouchEvent) {
+		this.targetSection = section.name;
+
+		var propagate: boolean = true;
+		for (var j: number = 0; j < this.windowSectionList.length; j++) {
+			var windowSection = this.windowSectionList[j];
+			if (windowSection.interactable)
+				windowSection.onMultiTouchCancel(e);
+
+			if (this.lowestPropagatedBoundSection === windowSection.name)
+				propagate = false; // Window sections can not stop the propagation of the event for other window sections.
+		}
+
+		if (propagate) {
+			for (var i: number = section.boundsList.length - 1; i > -1; i--) {
+				if (section.boundsList[i].interactable)
+					section.boundsList[i].onMultiTouchCancel(e);
+
+				if (section.boundsList[i].name === this.lowestPropagatedBoundSection)
+					break; // Stop propagation.
+			}
+		}
+	}
+
 	private propagateOnDrop(section: CanvasSectionObject, position: number[], e: DragEvent) {
 		this.targetSection = section.name;
 
@@ -1220,6 +1453,13 @@ class CanvasSectionContainer {
 	}
 
 	public onDoubleClick (e: MouseEvent) {
+		// VULCAN: a double-click whose second press drifted into a drag
+		// already committed a MOVE — do not also enter text edit. One
+		// physical gesture yields one action (the gesture grammar's rule).
+		if (this.draggedSinceDown) {
+			this.clearMousePositions();
+			return;
+		}
 		this.positionOnDoubleClick = this.convertPositionToCanvasLocale(e);
 
 		var section: CanvasSectionObject = this.findSectionContainingPoint(this.positionOnDoubleClick);
@@ -1236,11 +1476,23 @@ class CanvasSectionContainer {
 
 	private startLongPress(e: TouchEvent) {
 		this.stopLongPress();
+		// 500ms inside the Vulcan phone chrome (docs/mobile-redesign/02 §5):
+		// Google's phone sheets arm the cell menu at half a second and 550
+		// reads as a stall beside it. Phones only -- a small-screen device AND
+		// the pre-paint html.vulcan-mobile-chrome marker js/global.js stamps
+		// iff !desktopChrome && mode.isSmallScreenDevice(). Tablets fail both
+		// halves (isTablet() is *defined* as !isSmallScreenDevice()) and a
+		// desktop never gets here at all: this is only called from
+		// onTouchStart. Only the delay changes -- the timer, what it fires and
+		// every stopLongPress caller are untouched.
+		const longPressDelay = (window as any).mode.isSmallScreenDevice()
+			&& document.documentElement.classList.contains('vulcan-mobile-chrome')
+			? 500 : 550;
 		this.longPressTimer = setTimeout(function() {
 			(e as any).clientX = e.touches[0].clientX;
 			(e as any).clientY = e.touches[0].clientY;
 			this.onMouseMove(e);
-		}.bind(this), 550);
+		}.bind(this), longPressDelay);
 	}
 
 	private stopLongPress() {
@@ -1259,10 +1511,18 @@ class CanvasSectionContainer {
 		if (!this.isLongPressActive()) {
 			if (!this.touchEventInProgress) {
 				this.mousePosition = this.convertPositionToCanvasLocale(e);
+				this.remeasureMousePress();
 				if (this.positionOnMouseDown !== null && !this.draggingSomething) {
 					var dragDistance = [this.mousePosition[0] - this.positionOnMouseDown[0], this.mousePosition[1] - this.positionOnMouseDown[1]];
 					if (Math.abs(dragDistance[0]) >= this.draggingTolerance || Math.abs(dragDistance[1]) >= this.draggingTolerance) {
-						this.draggingSomething = true;
+						// A release lost while the window was blurred leaves the
+						// press pending, and a resize keeps it.
+						if (this.mousePressClient !== null && e.buttons === 0)
+							this.clearMousePositions();
+						else {
+							this.draggingSomething = true;
+							this.draggedSinceDown = true;
+						}
 					}
 				}
 
@@ -1328,7 +1588,11 @@ class CanvasSectionContainer {
 			// so by definition the mouse is inside.
 			this.mouseIsInside = true;
 			this.clearMousePositions();
+			// A fresh press starts a fresh gesture: forget any drag from the
+			// previous press (the flag is read by the trailing dblclick).
+			this.draggedSinceDown = false;
 			this.positionOnMouseDown = this.convertPositionToCanvasLocale(e);
+			this.mousePressClient = [e.clientX, e.clientY];
 
 			var section: CanvasSectionObject = this.findSectionContainingPoint(this.positionOnMouseDown);
 			if (section) {
@@ -1361,6 +1625,8 @@ class CanvasSectionContainer {
 		}
 
 		if (e.button === 0 && !this.touchEventInProgress) {
+			this.remeasureMousePress();
+			this.mousePressClient = null;
 			this.positionOnMouseUp = this.convertPositionToCanvasLocale(e);
 			var section: CanvasSectionObject;
 			if (!this.draggingSomething) {
@@ -1483,6 +1749,10 @@ class CanvasSectionContainer {
 	public onTouchStart (e: TouchEvent) { // Should be ignored unless this.draggingSomething = true.
 		if (e.touches.length === 1) {
 			this.clearMousePositions();
+			// After clearMousePositions — it invalidates this cache. The rect
+			// holds for the whole gesture; a mid-gesture layout change goes
+			// through onResize, which invalidates it again.
+			this.cachedCanvasRect = this.canvas.getBoundingClientRect();
 			this.startLongPress(e);
 			this.positionOnMouseDown = this.convertPositionToCanvasLocale(e);
 
@@ -1501,6 +1771,57 @@ class CanvasSectionContainer {
 		}
 	}
 
+	/*
+		The touch drag latch, as a SQUARED distance in core px.
+
+		Stock is `> 0.1` against a squared distance built from two integers
+		(convertPositionToCanvasLocale rounds), so the smallest value that can
+		clear it is 1: the latch is literally "dragDistance !== [0, 0]". One
+		core pixel is 0.333 CSS px at DPR 3, and no finger holds still to a
+		third of a pixel. Every tap that wobbles is therefore reclassified as a
+		drag, and two things downstream read that classification: onClick is
+		suppressed after a drag (:1180), and touchend resolves its section from
+		the RELEASE point rather than the section that was pressed (:1603).
+
+		The mouse path has always had a real threshold - draggingTolerance, 5
+		core px, tested at :1271 - and is deliberately untouched here.
+
+		BOTH-HALVES gate: a small screen AND the vulcan-mobile-chrome marker
+		global.js stamps pre-paint. ?vulcanChrome=desktop forces desktop chrome
+		onto a small screen, and the desktop latch has to come back with it.
+		When the gate is false this returns the stock 0.1 literal, so the
+		comparison is byte-identical to HEAD, not merely equivalent to it.
+
+		Why raising this is safe for the sections that consume the latch: every
+		drag consumer anchors to a value captured at MOUSEDOWN, never at the
+		latch, and then adds the TOTAL dragDistance - which is also measured
+		from mousedown. ScrollSection seeds previousDragDistance to [0, 0],
+		which IS the drag distance at mousedown; CursorHandler and
+		CommentMarkerSubSection seed a base position that no drag code has
+		moved yet; MouseControl's phone pan re-derives its diff in document
+		coordinates, so it re-anchors itself every move. The visible effect of
+		a wider slop is a one-time catch-up at the latch, bounded by the slop,
+		that puts the dragged thing back under the finger - which is where it
+		belongs. Nothing accumulates and nothing drifts. See the longer note in
+		ScrollSection.onMouseMove for why seeding those accumulators at the
+		LATCH instead would be a regression, not a fix.
+
+		Read per call rather than cached: app.dpiScale changes when the window
+		is dragged to a display with a different DPR, and both halves of the
+		gate are cheap (a cached Browser.mobile boolean plus a screen.width
+		read, and a classList lookup).
+	*/
+	private getTouchDragLatchSquared(): number {
+		if (
+			!(<any>window).mode.isSmallScreenDevice() ||
+			!document.documentElement.classList.contains('vulcan-mobile-chrome')
+		)
+			return 0.1;
+
+		const slop: number = this.touchDraggingToleranceCSS * app.dpiScale;
+		return slop * slop;
+	}
+
 	public onTouchMove (e: TouchEvent) {
 		// Sometimes onTouchStart is fired for another element. In this case, we return.
 		if (this.positionOnMouseDown === null)
@@ -1512,7 +1833,7 @@ class CanvasSectionContainer {
 
 			this.dragDistance = [this.mousePosition[0] - this.positionOnMouseDown[0], this.mousePosition[1] - this.positionOnMouseDown[1]];
 
-			if (this.dragDistance[0] ** 2 + this.dragDistance[1] ** 2 > 0.1)
+			if (this.dragDistance[0] ** 2 + this.dragDistance[1] ** 2 > this.getTouchDragLatchSquared())
 				this.draggingSomething = true;
 
 			var section: CanvasSectionObject = this.getSectionWithName(this.sectionOnMouseDown);
@@ -1540,6 +1861,19 @@ class CanvasSectionContainer {
 
 	public onTouchEnd (e: TouchEvent) { // Should be ignored unless this.draggingSomething = true.
 		this.stopLongPress();
+		// A cancel clears the gesture owner before a browser can deliver a
+		// trailing touchend. Ignore that stale terminal event completely.
+		if (this.positionOnMouseDown === null) {
+			// Preserve the stock terminal release for a two-touch start that never
+			// acquired a section, while still suppressing callbacks after cancel.
+			if (this.multiTouch && e.touches.length === 0) {
+				this.multiTouch = false;
+				this.touchEventInProgress = true;
+			}
+			return;
+		}
+		const completedDrag = this.draggingSomething &&
+			(!this.multiTouch || e.touches.length === 0);
 		if (!this.multiTouch) {
 			this.positionOnMouseUp = this.convertPositionToCanvasLocale(e);
 			var section: CanvasSectionObject;
@@ -1560,12 +1894,26 @@ class CanvasSectionContainer {
 				this.propagateOnMultiTouchEnd(section, e);
 			}
 		}
+		if (completedDrag) {
+			this.clearMousePositions();
+		}
+		this.cachedCanvasRect = null;
+		// Suppress the compatibility mouse sequence if the browser emits one.
+		// The click at the end of that sequence clears this one-shot guard.
 		this.touchEventInProgress = true;
 	}
 
 	public onTouchCancel (e: TouchEvent) {
-		this.clearMousePositions();
 		this.stopLongPress();
+		if (this.multiTouch) {
+			// Unlatch before routing so a later browser touchend cannot dispatch a
+			// second terminal event for the cancelled gesture.
+			this.multiTouch = false;
+			var section: CanvasSectionObject = this.getSectionWithName(this.sectionOnMouseDown);
+			if (section)
+				this.propagateOnMultiTouchCancel(section, e);
+		}
+		this.clearMousePositions();
 	}
 
 	private onDragOver(e: DragEvent) {
@@ -1594,22 +1942,32 @@ class CanvasSectionContainer {
 		if (!newHeight)
 			newHeight = cRect.bottom - cRect.top;
 
-		app.dpiScale = window.devicePixelRatio;
-		app.roundedDpiScale = Math.round(window.devicePixelRatio);
+		app.dpiScale = VulcanTilePerf.clampTileDpi(
+			window.devicePixelRatio,
+			VulcanTilePerf.isVulcanPhoneChrome(),
+		);
+		app.roundedDpiScale = Math.round(app.dpiScale);
+		this.sectionFontString = String(20 * app.dpiScale) + 'px Verdana';
+		this.cachedCanvasRect = null;
 
-		newWidth = Math.floor(newWidth * app.dpiScale);
-		newHeight = Math.floor(newHeight * app.dpiScale);
+		const resizeScale: number = app.dpiScale;
+		newWidth = Math.floor(newWidth * resizeScale);
+		newHeight = Math.floor(newHeight * resizeScale);
 
 		if (this.width === newWidth && this.height === newHeight && this.documentAnchor) {
 			this.reNewAllSections(false);
 			return;
 		}
 
-		if (!this.draggingSomething)
+		// A mouse press survives a resize (the host pulses the iframe 1 px wider
+		// for a frame inside a click): remeasureMousePress re-reads it against the
+		// canvas as it is when the pointer next moves or is released.
+		if (!this.draggingSomething && !this.mousePressClient)
 			this.clearMousePositions();
 
 		this.width = newWidth;
 		this.height = newHeight;
+		this.resizeDpiScale = resizeScale;
 		this.needsResize = true;
 
 		this.reNewAllSections(true);
@@ -2044,11 +2402,23 @@ class CanvasSectionContainer {
 
 		this.context.setTransform(1, 0, 0, 1, 0, 0);
 
-		if (!this.zoomChanged || this.scrollingBeforeZoomSettled) {
+		// The zoomChanged clear-skip is a TILE-path optimization: the stale
+		// frame keeps the screen warm until the new zoom's opaque tiles
+		// overpaint it. The vector path never overpaints (outside the page
+		// its blit is transparent by design), so skipping there stacked
+		// stale frames ("a second slide renders at the center"). One
+		// condition here replaces a duplicated ground-paint in the vector
+		// section.
+		if (
+			!this.zoomChanged ||
+			this.scrollingBeforeZoomSettled ||
+			(typeof RenderManager !== 'undefined' &&
+				RenderManager.isVectorRendering())
+		) {
 			this.clearCanvas();
 		}
 
-		this.context.font = String(20 * app.dpiScale) + 'px Verdana';
+		this.context.font = this.sectionFontString;
 		for (var i: number = 0; i < this.sections.length; i++) {
 			const section = this.sections[i];
 			if (this.shouldDrawSection(section)) {

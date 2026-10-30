@@ -57,6 +57,12 @@ namespace drawinglayer::processor2d
             /// flag to concentrate on text hits only
             bool                        mbHitTextOnly : 1;
 
+            /// text hits also look inside a FULLY transparent group (a
+            /// hidden-ink OCR line of an editable scanned PDF); off for
+            /// every other object, whose fully transparent content stays
+            /// unhittable
+            bool                        mbHitInvisibleText : 1;
+
             /// tooling methods
             void processBasePrimitive2D(const primitive2d::BasePrimitive2D& rCandidate) override;
             bool checkHairlineHitWithTolerance(
@@ -79,6 +85,10 @@ namespace drawinglayer::processor2d
             /// switch on collecting primitives for a found hit on maHitStack, default is off
             void collectHitStack(bool bCollect) { mbCollectHitStack = bCollect; }
 
+            /// with text-only hits, let text inside a fully transparent group
+            /// take the hit too, default is off
+            void setHitInvisibleText(bool bHit) { mbHitInvisibleText = bHit; }
+
             /// get HitStack of primitives, first is the one that created the hit, last is the
             /// top-most
             const primitive2d::Primitive2DContainer& getHitStack() const { return maHitStack; }
@@ -89,6 +99,7 @@ namespace drawinglayer::processor2d
             bool getCollectHitStack() const { return mbCollectHitStack; }
             bool getHit() const { return mbHit; }
             bool getHitTextOnly() const { return mbHitTextOnly; }
+            bool getHitInvisibleText() const { return mbHitInvisibleText; }
         };
 
 } // end of namespace drawinglayer::processor2d

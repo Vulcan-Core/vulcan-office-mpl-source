@@ -30,6 +30,9 @@ boost_patches += msvc2017.patch.0
 
 boost_patches += boost-ios.patch.0
 
+# Android x86_64 (NDK r27+): 128-bit long double, not 80-bit — see the patch header.
+boost_patches += boost-android-x86_64-long-double.patch.0
+
 boost_patches += boost.file_iterator.sharing_win.patch
 
 # Work around <https://gcc.gnu.org/bugzilla/show_bug.cgi?id=53431> "C++ preprocessor ignores #pragma

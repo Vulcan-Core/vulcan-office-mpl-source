@@ -52,8 +52,20 @@
 #include <xllink.hxx>
 #include <xltools.hxx>
 
+#include <com/sun/star/container/XNameContainer.hpp>
 #include <com/sun/star/document/XDocumentPropertiesSupplier.hpp>
 #include <com/sun/star/frame/XModel.hpp>
+#include <com/sun/star/script/ModuleType.hpp>
+#include <com/sun/star/script/XLibraryContainer.hpp>
+#include <com/sun/star/script/XStorageBasedLibraryContainer.hpp>
+#include <com/sun/star/script/vba/XVBACompatibility.hpp>
+#include <com/sun/star/script/vba/XVBAModuleInfo.hpp>
+#include <global.hxx>
+#include <unotools/charclass.hxx>
+#include <map>
+#include <set>
+#include <utility>
+#include <vector>
 #include <o3tl/safeint.hxx>
 #include <oox/helper/attributelist.hxx>
 #include <oox/token/tokens.hxx>
@@ -78,6 +90,167 @@ static void lcl_AddBookviews( XclExpRecordList<>& aRecList, const ExcTable& self
     aRecList.AppendNewRecord( new XclExpWindow1( self.GetRoot() ) );
     aRecList.AppendNewRecord( new XclExpXmlEndElementRecord( XML_bookViews ) );
 }
+
+namespace {
+
+/** workbookPr/@codeName. A record of its own so it lands inside <workbookPr …/>, between
+    XclExpXmlStartSingleElementRecord and XclExpXmlEndSingleElementRecord, like Exc1904's date1904. */
+class XclExpXmlWorkbookCodeName : public XclExpRecordBase
+{
+public:
+    explicit XclExpXmlWorkbookCodeName( OUString aCodeName ) : maCodeName( std::move( aCodeName ) ) {}
+    virtual void SaveXml( XclExpXmlStream& rStrm ) override { rStrm.WriteAttributes( XML_codeName, maCodeName ); }
+private:
+    OUString maCodeName;
+};
+
+/** A name VBA accepts for a module: a letter, then letters, digits or '_', at most 31 characters. Letters are not
+    only ASCII: localized Excel names its sheets' modules in the UI language (Лист1). Drops a sheet whose code name is
+    still its tab name ("My Data", a sheet appended outside VBA mode). */
+bool lcl_IsVbaCodeName( const OUString& rName )
+{
+    if( rName.isEmpty() || rName.getLength() > 31 )
+        return false;
+    const CharClass& rCharClass = ScGlobal::getCharClass();
+    for( sal_Int32 i = 0; i < rName.getLength(); ++i )
+        if( !rCharClass.isLetter( rName, i ) && ( i == 0 || ( !rCharClass.isDigit( rName, i ) && rName[ i ] != '_' ) ) )
+            return false;
+    return true;
+}
+
+/** The module info of the document's Basic project when it is in VBA mode, else null. ScDocument::IsInVBAMode is
+    not SC_DLLPUBLIC, so scfilt asks the Basic container itself. */
+css::uno::Reference< css::script::vba::XVBAModuleInfo > lcl_GetVbaModuleInfo( const XclExpRoot& rRoot )
+{
+    try
+    {
+        ScDocShell* pShell = rRoot.GetDocShell();
+        if( !pShell )
+            return nullptr;
+        css::uno::Reference< css::script::XLibraryContainer > xLibs = pShell->GetBasicContainer();
+        css::uno::Reference< css::script::vba::XVBACompatibility > xVba( xLibs, css::uno::UNO_QUERY );
+        if( !xVba.is() || !xVba->getVBACompatibilityMode() )
+            return nullptr;
+        OUString aLibName = xVba->getProjectName();   // the Basic library the VBA import filled (oox VbaProject)
+        if( aLibName.isEmpty() || !xLibs->hasByName( aLibName ) )
+            aLibName = u"Standard"_ustr;
+        css::uno::Reference< css::container::XNameContainer > xLib;
+        if( xLibs->hasByName( aLibName ) )
+        {
+            cpo::uno::Any aLibAny = xLibs->getByName( aLibName );
+            aLibAny >>= xLib;
+        }
+        return css::uno::Reference< css::script::vba::XVBAModuleInfo >( xLib, css::uno::UNO_QUERY );
+    }
+    catch( const css::uno::Exception& )
+    {
+    }
+    return nullptr;
+}
+
+/** sheetPr/@codeName per Calc sheet, empty = none; also the BIFF CODENAME records when lcl_UseLiveBiffCodeNames. Only
+    for a document in VBA mode or with a workbook code name (a workbook made in Calc without VBA gets none, as before).
+    A sheet's live code name is written when it is a VBA name, when in VBA mode Basic has a DOCUMENT module of that
+    name, and when no other exported sheet and not the workbook carries it (case-insensitive; on a clash none of the
+    sharers is written). */
+std::vector< OUString > lcl_GetXmlSheetCodeNames( const XclExpRoot& rRoot )
+{
+    const ScDocument& rDoc = rRoot.GetDoc();
+    const XclExpTabInfo& rTabInfo = rRoot.GetTabInfo();
+    const SCTAB nCount = rTabInfo.GetScTabCount();
+    std::vector< OUString > aNames( nCount );
+    css::uno::Reference< css::script::vba::XVBAModuleInfo > xModuleInfo = lcl_GetVbaModuleInfo( rRoot );
+    if( !xModuleInfo.is() && rDoc.GetCodeName().isEmpty() )
+        return aNames;
+    std::map< OUString, sal_Int32 > aUses;   // upper case code name -> number of carriers
+    if( lcl_IsVbaCodeName( rDoc.GetCodeName() ) )
+        ++aUses[ rDoc.GetCodeName().toAsciiUpperCase() ];
+    for( SCTAB nTab = 0; nTab < nCount; ++nTab )
+    {
+        OUString aName;
+        if( !rTabInfo.IsExportTab( nTab ) || !rDoc.GetCodeName( nTab, aName ) || !lcl_IsVbaCodeName( aName ) )
+            continue;
+        try
+        {
+            if( xModuleInfo.is() && ( !xModuleInfo->hasModuleInfo( aName )
+                    || xModuleInfo->getModuleInfo( aName ).ModuleType != css::script::ModuleType::DOCUMENT ) )
+                continue;
+        }
+        catch( const css::uno::Exception& )
+        {
+            continue;
+        }
+        aNames[ nTab ] = aName;
+        ++aUses[ aName.toAsciiUpperCase() ];
+    }
+    for( OUString& rName : aNames )
+        if( !rName.isEmpty() && aUses[ rName.toAsciiUpperCase() ] > 1 )
+            rName.clear();
+    return aNames;
+}
+
+/** The BIFF export writes the CODENAME records from the code names the .xls import kept (ScExtDocOptions,
+    lcl_GetListedBiffCodeNames). A project kept from an .xlsx/.xlsm import comes without them (only the .xls import
+    fills that list): its records then come from the live code names, by the .xlsx rules above. */
+bool lcl_UseLiveBiffCodeNames( const XclExpRoot& rRoot )
+{
+    const ScExtDocOptions& rExtDocOpt = rRoot.GetExtDocOptions();
+    return rRoot.HasVbaStorage() && rExtDocOpt.GetCodeNameCount() == 0
+        && rExtDocOpt.GetDocSettings().maGlobCodeName.isEmpty();
+}
+
+/** The BIFF CODENAME records of a document whose .xls import kept a code name list (ScExtDocOptions), per Calc sheet
+    (rSheetNames, empty = none) and for the empty __VBA__N sheets the export appends while that list is longer than the
+    exported sheets (rPadNames, in order). The list is in the import's sheet order: written by position, each sheet
+    after one deleted, inserted or moved in the editor took a neighbour's code name, and in Excel it would run that
+    neighbour's Worksheet_* event code. Each sheet now gets its own code name (ScTable: the import set it from the same
+    record, and it moves with the sheet) when the list holds that name, so only names of the project the export writes
+    back are written. A sheet whose code name the list does not hold (one added in the editor) gets none, as before.
+    As in lcl_GetXmlSheetCodeNames, a name two exported sheets carry (case-insensitive) is written for neither: in VBA
+    mode VBA_InsertModule never reuses a name, but outside it a new sheet's code name is its tab name. The appended
+    sheets take the listed names no sheet was given, in list order, so the module of a deleted sheet stays bound to one
+    of them, as the list's last names were before; the number of appended sheets is unchanged. */
+void lcl_GetListedBiffCodeNames( const XclExpRoot& rRoot, std::vector< OUString >& rSheetNames,
+        std::vector< OUString >& rPadNames )
+{
+    const ScDocument& rDoc = rRoot.GetDoc();
+    const XclExpTabInfo& rTabInfo = rRoot.GetTabInfo();
+    const ScExtDocOptions& rExtDocOpt = rRoot.GetExtDocOptions();
+    const SCTAB nCount = rTabInfo.GetScTabCount();
+    const SCTAB nListed = rExtDocOpt.GetCodeNameCount();
+    rSheetNames.assign( static_cast< size_t >( nCount ), OUString() );
+    rPadNames.clear();
+    std::set< OUString > aListed, aWritten;   // upper case
+    for( SCTAB nIdx = 0; nIdx < nListed; ++nIdx )
+        aListed.insert( rExtDocOpt.GetCodeName( nIdx ).toAsciiUpperCase() );
+    std::map< OUString, sal_Int32 > aUses;   // upper case listed code name -> number of exported sheets carrying it
+    for( SCTAB nTab = 0; nTab < nCount; ++nTab )
+    {
+        OUString aName;
+        if( !rTabInfo.IsExportTab( nTab ) || !rDoc.GetCodeName( nTab, aName ) || aName.isEmpty()
+                || aListed.find( aName.toAsciiUpperCase() ) == aListed.end() )
+            continue;
+        rSheetNames[ nTab ] = aName;
+        ++aUses[ aName.toAsciiUpperCase() ];
+    }
+    for( OUString& rName : rSheetNames )
+    {
+        if( rName.isEmpty() )
+            continue;
+        if( aUses[ rName.toAsciiUpperCase() ] > 1 )
+            rName.clear();
+        else
+            aWritten.insert( rName.toAsciiUpperCase() );
+    }
+    for( SCTAB nIdx = 0; nIdx < nListed; ++nIdx )
+    {
+        const OUString aName = rExtDocOpt.GetCodeName( nIdx );
+        if( !aName.isEmpty() && aWritten.insert( aName.toAsciiUpperCase() ).second )
+            rPadNames.push_back( aName );
+    }
+}
+
+} // namespace
 
 static void lcl_AddCalcPr( XclExpRecordList<>& aRecList, const ExcTable& self )
 {
@@ -204,6 +377,8 @@ void ExcTable::FillAsHeaderBinary( ExcBoundsheetList& rBoundsheetList )
             const OUString& rCodeName = GetExtDocOptions().GetDocSettings().maGlobCodeName;
             if( !rCodeName.isEmpty() )
                 Add( new XclCodename( rCodeName ) );
+            else if( lcl_UseLiveBiffCodeNames( GetRoot() ) && lcl_IsVbaCodeName( rDoc.GetCodeName() ) )
+                Add( new XclCodename( rDoc.GetCodeName() ) );
         }
     }
 
@@ -347,13 +522,14 @@ void ExcTable::FillAsHeaderXml( ExcBoundsheetList& rBoundsheetList )
     Add( new XclExpBoolRecord(0x008D, false, XML_showObjects ) );   // HIDEOBJ
 
     Add( new Exc1904( rDoc ) );
+    if( lcl_IsVbaCodeName( rDoc.GetCodeName() ) )
+        Add( new XclExpXmlWorkbookCodeName( rDoc.GetCodeName() ) );
     // OOXTODO: The following /workbook/workbookPr attributes are mapped
     //          to various BIFF records that are not currently supported:
     //
     //          XML_allowRefreshQuery:          QSISTAG 802h: fEnableRefresh
     //          XML_autoCompressPictures:       COMPRESSPICTURES 89Bh: fAutoCompressPictures
     //          XML_checkCompatibility:         COMPAT12 88Ch: fNoCompatChk
-    //          XML_codeName:                   "Calc"
     //          XML_defaultThemeVersion:        ???
     //          XML_filterPrivacy:              BOOKEXT 863h: fFilterPrivacy
     //          XML_hidePivotFieldList:         BOOKBOOL DAh: fHidePivotTableFList
@@ -413,7 +589,7 @@ void ExcTable::FillAsHeaderXml( ExcBoundsheetList& rBoundsheetList )
     aRecList.AppendRecord( CreateRecord( EXC_ID_SST ) );
 }
 
-void ExcTable::FillAsTableBinary( SCTAB nCodeNameIdx )
+void ExcTable::FillAsTableBinary( const OUString& rCodeName )
 {
     InitializeTable( mnScTab );
 
@@ -534,9 +710,8 @@ void ExcTable::FillAsTableBinary( SCTAB nCodeNameIdx )
         // conditional formats
         Add( new XclExpCondFormatBuffer( GetRoot(), XclExtLstRef() ) );
 
-        if( HasVbaStorage() )
-            if( nCodeNameIdx < GetExtDocOptions().GetCodeNameCount() )
-                Add( new XclCodename( GetExtDocOptions().GetCodeName( nCodeNameIdx ) ) );
+        if( HasVbaStorage() && !rCodeName.isEmpty() )
+            Add( new XclCodename( rCodeName ) );
     }
 
     // list of HLINK records, generated by the cell table
@@ -557,7 +732,7 @@ void ExcTable::FillAsTableBinary( SCTAB nCodeNameIdx )
     Add( new ExcEof );
 }
 
-void ExcTable::FillAsTableXml()
+void ExcTable::FillAsTableXml( const OUString& rCodeName )
 {
     InitializeTable( mnScTab );
 
@@ -590,7 +765,7 @@ void ExcTable::FillAsTableXml()
 
     bool bSummaryBelow = GetRoot().GetDoc().GetTotalsRowBelow(mnScTab);
     Color aTabColor = GetRoot().GetDoc().GetTabBgColor(mnScTab);
-    Add(new XclExpXmlSheetPr(bFitToPages, mnScTab, aTabColor, bSummaryBelow, &GetFilterManager()));
+    Add(new XclExpXmlSheetPr(bFitToPages, mnScTab, aTabColor, bSummaryBelow, &GetFilterManager(), rCodeName));
 
     // GUTS (count & size of outline icons)
     aRecList.AppendRecord( mxCellTable->CreateRecord( EXC_ID_GUTS ) );
@@ -654,11 +829,11 @@ void ExcTable::FillAsTableXml()
     aRecList.AppendRecord( xExtLst );
 }
 
-void ExcTable::FillAsEmptyTable( SCTAB nCodeNameIdx )
+void ExcTable::FillAsEmptyTable( const OUString& rCodeName )
 {
     InitializeTable( mnScTab );
 
-    if( !(HasVbaStorage() && (nCodeNameIdx < GetExtDocOptions().GetCodeNameCount())) )
+    if( !HasVbaStorage() )
         return;
 
     if( GetBiff() <= EXC_BIFF5 )
@@ -668,7 +843,7 @@ void ExcTable::FillAsEmptyTable( SCTAB nCodeNameIdx )
     else
     {
         Add( new ExcBof8 );
-        Add( new XclCodename( GetExtDocOptions().GetCodeName( nCodeNameIdx ) ) );
+        Add( new XclCodename( rCodeName ) );
     }
     // sheet view settings: WINDOW2, SCL, PANE, SELECTION
     aRecList.AppendNewRecord( new XclExpTabViewSettings( GetRoot(), mnScTab ) );
@@ -751,6 +926,14 @@ void ExcDocument::ReadDoc()
 
     SCTAB nScTab = 0, nScTabCount = GetTabInfo().GetScTabCount();
     SCTAB nCodeNameIdx = 0, nCodeNameCount = GetExtDocOptions().GetCodeNameCount();
+    // sheetPr/@codeName from the live sheet code names. The BIFF CODENAME records from the ExtDocOptions list, each
+    // sheet taking its own listed name (lcl_GetListedBiffCodeNames), or from the live code names when the import left
+    // that list empty (lcl_UseLiveBiffCodeNames).
+    std::vector< OUString > aListedCodeNames, aPadCodeNames;
+    lcl_GetListedBiffCodeNames( GetRoot(), aListedCodeNames, aPadCodeNames );
+    const std::vector< OUString > aCodeNames
+        = ( GetOutput() != EXC_OUTPUT_BINARY || lcl_UseLiveBiffCodeNames( GetRoot() ) )
+        ? lcl_GetXmlSheetCodeNames( GetRoot() ) : aListedCodeNames;
 
     for( ; nScTab < nScTabCount; ++nScTab )
     {
@@ -759,18 +942,18 @@ void ExcDocument::ReadDoc()
             ExcTableList::RecordRefType xTab = new ExcTable( GetRoot(), nScTab );
             maTableList.AppendRecord( xTab );
             if (GetOutput() == EXC_OUTPUT_BINARY)
-                xTab->FillAsTableBinary(nCodeNameIdx);
+                xTab->FillAsTableBinary( aCodeNames[ nScTab ] );
             else
-                xTab->FillAsTableXml();
+                xTab->FillAsTableXml( aCodeNames[ nScTab ] );
 
             ++nCodeNameIdx;
         }
     }
-    for( ; nCodeNameIdx < nCodeNameCount; ++nScTab, ++nCodeNameIdx )
+    for( size_t nPad = 0; nCodeNameIdx < nCodeNameCount; ++nScTab, ++nCodeNameIdx, ++nPad )
     {
         ExcTableList::RecordRefType xTab = new ExcTable( GetRoot(), nScTab );
         maTableList.AppendRecord( xTab );
-        xTab->FillAsEmptyTable( nCodeNameIdx );
+        xTab->FillAsEmptyTable( nPad < aPadCodeNames.size() ? aPadCodeNames[ nPad ] : OUString() );
     }
 
     if ( GetBiff() == EXC_BIFF8 )

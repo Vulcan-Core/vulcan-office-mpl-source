@@ -567,15 +567,24 @@ Color ColorConfig::GetDefaultColor(ColorConfigEntry eEntry, int nMod)
         { COL_BLACK,        Color(0xEEEEEE) }, // CALCTEXT
         { COL_LIGHTGRAY,    Color(0x1C1C1C) }, // CALCPROTECTEDBACKGROUND
         { COL_GRAY7,        COL_GRAY7       }, // DRAWGRID
-        { Color(0xC69200),  Color(0xffffa6) }, // AUTHOR1
-        { Color(0x0646A2),  Color(0xb4c7dc) }, // AUTHOR2
-        { Color(0x579D1C),  Color(0xffa6a6) }, // AUTHOR3
-        { Color(0x692B9D),  Color(0xafd095) }, // AUTHOR4
-        { Color(0xC5000B),  Color(0xffb66c) }, // AUTHOR5
-        { Color(0x008080),  Color(0xbf819e) }, // AUTHOR6
-        { Color(0x8C8400),  Color(0xd4ea6b) }, // AUTHOR7
-        { Color(0x35556B),  Color(0xe8a202) }, // AUTHOR8
-        { Color(0xD17600),  Color(0x5983b0) }, // AUTHOR9
+        // No author colour is red or green. Writer draws every tracked
+        // move #008000 (COL_GREEN, as Word does), and red and green carry meanings
+        // of their own, so every hue in both columns is outside 340-20 and 75-165
+        // degrees. A document's second reviewer gets AUTHOR3, after Unknown
+        // Author's AUTHOR1: it was green #579D1C and is the standard palette's
+        // Light Purple 2. AUTHOR5 was red #C5000B. No pair is closer than
+        // LibreOffice's own AUTHOR2 and AUTHOR8 (CIEDE2000 9.0). The editor reads
+        // the light column in both themes and on a dark page paints its
+        // getLightVariant (fntcache.cxx); the dark column holds those colours.
+        { Color(0xC69200),  Color(0xEFB100) }, // AUTHOR1
+        { Color(0x0646A2),  Color(0xAABCFF) }, // AUTHOR2
+        { Color(0xA1467E),  Color(0xFFC9E6) }, // AUTHOR3
+        { Color(0x692B9D),  Color(0xDDC5FF) }, // AUTHOR4
+        { Color(0x0098C0),  Color(0x0CCBFF) }, // AUTHOR5
+        { Color(0x008080),  Color(0x00D1D1) }, // AUTHOR6
+        { Color(0x8C8400),  Color(0xCBBF00) }, // AUTHOR7
+        { Color(0x35556B),  Color(0xBFE2FF) }, // AUTHOR8
+        { Color(0xD17600),  Color(0xFFA76A) }, // AUTHOR9
         { COL_WHITE,        Color(0x1C1C1C) }, // BASICEDITOR
         { COL_GREEN,        Color(0xDDE8CB) }, // BASICIDENTIFIER
         { COL_GRAY,         Color(0xEEEEEE) }, // BASICCOMMENT

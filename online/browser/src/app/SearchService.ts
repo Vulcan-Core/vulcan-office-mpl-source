@@ -69,6 +69,36 @@ class SearchService {
 				type: 'long',
 				value: undefined as any,
 			},
+			// Match the native simple FindBar and do not inherit sticky advanced-search
+			// options for this optionless browser surface.
+			'SearchItem.SearchFlags': {
+				type: 'long',
+				value: 0,
+			},
+			'SearchItem.CellType': {
+				type: 'short',
+				value: 1,
+			},
+			'SearchItem.AlgorithmType': {
+				type: 'short',
+				value: 0,
+			},
+			'SearchItem.AlgorithmType2': {
+				type: 'short',
+				value: 1,
+			},
+			'SearchItem.TransliterateFlags': {
+				type: 'long',
+				value: 0x40000100,
+			},
+			'SearchItem.SearchFormatted': {
+				type: 'boolean',
+				value: false,
+			},
+			UseAttrItemList: {
+				type: 'boolean',
+				value: false,
+			},
 		};
 
 		window.L.Map.THIS.fire('clearselection');

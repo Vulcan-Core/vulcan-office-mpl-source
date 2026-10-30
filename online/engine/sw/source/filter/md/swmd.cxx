@@ -157,6 +157,13 @@ bool SwMarkdownParser::AppendTextNode(SwMdAppendMode eMode, bool bUpdateNum)
     if ((AM_NOSPACE == eMode || AM_SOFTNOSPACE == eMode) && nLFStripped > 1)
         eMode = AM_SPACE;
 
+    if (!m_bNewDoc && AM_SPACE == eMode)
+    {
+        // Don't touch paragraph margins when pasting: a pasted paragraph keeps the spacing of its
+        // paragraph style, like the paragraphs around it, instead of a direct 5 mm below.
+        eMode = AM_NORMAL;
+    }
+
     SwTextNode* pTextNode = (AM_SPACE == eMode || AM_NOSPACE == eMode)
                                 ? m_pPam->GetPoint()->GetNode().GetTextNode()
                                 : nullptr;
@@ -205,6 +212,11 @@ bool SwMarkdownParser::AppendTextNode(SwMdAppendMode eMode, bool bUpdateNum)
 
 void SwMarkdownParser::AddParSpace()
 {
+    // Don't touch paragraph margins when pasting, see AppendTextNode(). On the first block the
+    // node before the PaM is the part of the paragraph the paste split off.
+    if (!m_bNewDoc)
+        return;
+
     //If it already has ParSpace, return
     if (!m_bNoParSpace)
         return;

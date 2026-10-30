@@ -69,6 +69,42 @@ export class Comment extends CanvasSectionObject {
 		return data.id === 'new' ? 'new comment' : 'comment ' + data.id;
 	}
 
+	/*
+		The gate for every Vulcan phone-only piece of comment GEOMETRY in this
+		file (indicator size, touch box). Two halves, the same pair the 44 px
+		Impress marker box already uses at createMarkerSubSection: a small
+		screen AND the pre-paint html.vulcan-mobile-chrome marker js/global.js
+		stamps iff !desktopChrome && mode.isSmallScreenDevice().
+
+		Both halves matter. ?vulcanChrome=desktop forces desktop chrome onto a
+		small screen, and when it does, desktop geometry has to come back with
+		it -- a 44 px box drawn against a desktop hover affordance is worse
+		than either alone.
+
+		Note the deliberate asymmetry with openCommentOnPhone(), which gates on
+		isSmallScreenDevice() ALONE: that one picks a ROUTE, and the route it
+		picks (the mobile wizard) is the upstream phone surface, which exists
+		whether or not our chrome is painted. Geometry is ours; the route is
+		not.
+	*/
+	public static usesPhoneCommentChrome (): boolean {
+		return (<any>window).mode.isSmallScreenDevice()
+			&& document.documentElement.classList.contains('vulcan-mobile-chrome');
+	}
+
+	// The 44 CSS px touch floor, in the core pixels sections are measured in.
+	public static phoneTouchSize (): number {
+		return Math.round(44 * app.dpiScale);
+	}
+
+	// The on-canvas comment indicator's painted size, in core pixels. 14 CSS
+	// px: big enough to read as a deliberate mark at arm's length, small
+	// enough not to cover the cell text or the commented word it sits on. The
+	// TARGET around it is phoneTouchSize(), not this.
+	public static phoneIndicatorSize (): number {
+		return Math.round(14 * app.dpiScale);
+	}
+
 	// eslint-disable-next-line @typescript-eslint/explicit-module-boundary-types
 	constructor (name: string, data: any, options: any, commentListSectionPointer: cool.CommentSection) {
 		super(name);
@@ -125,6 +161,10 @@ export class Comment extends CanvasSectionObject {
 		this.sectionProperties.contentDate = null;
 		this.sectionProperties.acceptButton = null;
 		this.sectionProperties.rejectButton = null;
+		// The <td> wrappers are kept so the pair can be removed again when the
+		// redline permission goes away (destroyTrackChangeButtons).
+		this.sectionProperties.acceptButtonCell = null;
+		this.sectionProperties.rejectButtonCell = null;
 		this.sectionProperties.menu = null;
 		this.sectionProperties.menuBarCell = null;
 		this.sectionProperties.captionNode = null;
@@ -312,6 +352,69 @@ export class Comment extends CanvasSectionObject {
 	// per-comment controls.
 	private updateEditability (): void {
 		this.makeEditable(app.isCommentEditingAllowed());
+		this.updateTrackChangeButtons();
+	}
+
+	// PHONE GATE for the redline half of the comment deadlock. Writer on a
+	// phone opens in the touch read POSTURE (Permission.js
+	// _usesTouchReadPosture), so every comment is constructed while
+	// map.isReadOnlyMode() is true; onInitialize's one-shot
+	// `!isReadOnlyMode()` test therefore never built the Accept/Reject
+	// buttons, and nothing revisited that decision when the user later tapped
+	// the pencil. Redline cards reached the comment wizard with no per-change
+	// controls in EITHER posture.
+	//
+	// Substituting false here makes updateTrackChangeButtons a no-op and
+	// leaves onInitialize's build-once decision standing exactly as before,
+	// which is what desktop and tablet get: neither satisfies
+	// isSmallScreenDevice(), and js/global.js only stamps
+	// html.vulcan-mobile-chrome when it does. Calc and Impress are excluded
+	// too -- they have no track changes, but the doctype test keeps the gate
+	// honest rather than relying on that.
+	private usesDynamicRedlineButtons (): boolean {
+		return (<any>window).mode.isSmallScreenDevice()
+			&& document.documentElement.classList.contains('vulcan-mobile-chrome')
+			&& app.map._docLayer._docType === 'text';
+	}
+
+	// Keeps the Accept/Reject pair in sync with the redline PERMISSION rather
+	// than with the map's posture. app.isRedlineManagementAllowed() is the
+	// flag the server sets over the wire (Socket.ts filemode: ->
+	// app.setRedlineManagementAllowed) and that the menubar already uses to
+	// decide whether the Changes menu survives read-only
+	// (Control.Menubar._checkItemVisibility). HideChangeTrackingControls is a
+	// host suppression and is honored exactly as in onInitialize. A genuinely
+	// read-only session keeps whatever core granted it, because
+	// _applyViewReadOnly early-returns for those and never forces the flag.
+	private updateTrackChangeButtons (): void {
+		if (!this.usesDynamicRedlineButtons())
+			return;
+		if (!this.sectionProperties.data.trackchange)
+			return;
+
+		const wopi = app.map['wopi'];
+		const allowed = app.isRedlineManagementAllowed()
+			&& !(wopi && wopi.HideChangeTrackingControls);
+		const present = !!this.sectionProperties.acceptButton;
+		if (allowed === present)
+			return;
+
+		if (allowed)
+			this.createTrackChangeButtons();
+		else
+			this.destroyTrackChangeButtons();
+	}
+
+	private destroyTrackChangeButtons (): void {
+		const props = this.sectionProperties;
+		[props.acceptButtonCell, props.rejectButtonCell].forEach((cell: HTMLElement) => {
+			if (cell && cell.parentNode)
+				cell.parentNode.removeChild(cell);
+		});
+		props.acceptButtonCell = null;
+		props.rejectButtonCell = null;
+		props.acceptButton = null;
+		props.rejectButton = null;
 	}
 
 	private createContainerAndWrapper (): void {
@@ -547,10 +650,23 @@ export class Comment extends CanvasSectionObject {
 	}
 
 	private createTrackChangeButtons (): void {
-		var tdAccept = window.L.DomUtil.create('td', 'cool-annotation-menubar', this.sectionProperties.authorRow);
+		// When this runs late (updateTrackChangeButtons, after a posture
+		// change) the menu cell already exists, so insert ahead of it: the
+		// author row's cell order must stay accept · reject · menu, the order
+		// onInitialize produces when it builds all three in sequence.
+		// Widget.Comment.ts addresses `.cool-annotation-menubar`[0] by index
+		// when it collapses a thread into a drill-in row, so the order is
+		// load-bearing rather than cosmetic. insertBefore(el, null) appends,
+		// which is exactly the original behaviour when no menu cell exists.
+		var authorRow = this.sectionProperties.authorRow;
+		var beforeCell = this.sectionProperties.menuBarCell || null;
+
+		var tdAccept = this.sectionProperties.acceptButtonCell = window.L.DomUtil.create('td', 'cool-annotation-menubar');
+		authorRow.insertBefore(tdAccept, beforeCell);
 		var acceptButton = this.sectionProperties.acceptButton = window.L.DomUtil.create('button', 'cool-redline-accept-button', tdAccept);
 
-		var tdReject = window.L.DomUtil.create('td', 'cool-annotation-menubar', this.sectionProperties.authorRow);
+		var tdReject = this.sectionProperties.rejectButtonCell = window.L.DomUtil.create('td', 'cool-annotation-menubar');
+		authorRow.insertBefore(tdReject, beforeCell);
 		var rejectButton = this.sectionProperties.rejectButton = window.L.DomUtil.create('button', 'cool-redline-reject-button', tdReject);
 
 		acceptButton.dataset.title = _('Accept change');
@@ -754,13 +870,29 @@ export class Comment extends CanvasSectionObject {
 			xMax = Math.round(xMax * app.twipsToPixels);
 			yMax = Math.round(yMax * app.twipsToPixels);
 
+			// Phone Writer: the indicator's touch box is centred on the LAST
+			// line and is taller than it (phoneWriterIndicatorBox), so it
+			// overhangs this bounding box above and below. isHit tests the
+			// SECTION first, so without this the enlarged target would be
+			// enlarged only on paper -- the extra pixels would belong to the
+			// tiles section and never reach onMouseUp. Zero everywhere else,
+			// so this reduces to the two lines it replaced.
+			const phonePad = this.phoneIndicatorVerticalPad();
+			yMin -= phonePad;
+			yMax += phonePad;
+
 			this.setPosition(xMin, yMin); // This function is added by section container.
 			this.size = [xMax - xMin, yMax - yMin];
 			if (this.size[0] < 5)
 				this.size[0] = 5;
 		}
 		else if (this.sectionProperties.data.cellRange && app.map._docLayer._docType === 'spreadsheet') {
-			this.size = this.calcOptimumSizeForCalc();
+			// calcTouchSizeForCalc() === calcOptimumSizeForCalc() off the phone
+			// chrome. Taking it BEFORE the position is computed is the point:
+			// position is derived from this.size below so the box stays
+			// right-anchored to the cell's right edge, which keeps the widened
+			// box inside the cell instead of spilling into its neighbour.
+			this.size = this.calcTouchSizeForCalc();
 			var cellPos = app.map._docLayer._cellRangeToTwipRect(this.sectionProperties.data.cellRange).toRectangle();
 			let startX = cellPos[0];
 			if (this.isCalcRTL()) { // Mirroring is done in setPosition
@@ -947,6 +1079,58 @@ export class Comment extends CanvasSectionObject {
 			this, // Parent section.
 			this.sectionProperties.data
 		);
+
+		/*
+			Phone Impress: grow the GRAB box, keep the 28 px icon.
+
+			In this architecture the section bounds ARE the hit area
+			(CanvasSectionObject.isHit tests myTopLeft + size, there is no
+			separate hit geometry in the stack) and HTMLObjectSection derives
+			both the bounds and the div's CSS box from the same number, so the
+			28x28 above was the target as well as the art: 64% of the 44 px
+			finger floor, 41% of its area. Growing `size` alone leaves the div
+			at 28 px, so the icon does not change.
+
+			The three-part gate, matching MouseControl.isVulcanPhoneImpress:
+			small screen, AND the vulcan-mobile-chrome marker global.js stamps
+			pre-paint (?vulcanChrome=desktop forces desktop chrome onto a small
+			screen and the desktop geometry must come back with it), AND a
+			presentation - the condition guarding createMarkerSubSection lets
+			Draw build these markers too, and Draw keeps the stock size.
+
+			The box grows DOWN and RIGHT rather than around the icon, which is
+			deliberate. CommentMarkerSubSection.onDragEnd posts
+			`this.position * app.pixelsToTwips` to .uno:EditAnnotation as the
+			marker's new document position, and updatePosition() writes that
+			same position straight from data.anchorPos. Re-centring the box
+			would put its origin 8 px up-left of the icon, and every drag would
+			then walk the comment 8 px up-left of where it was dropped. Anchored
+			growth keeps position === icon top-left, so nothing downstream
+			shifts and every point that hit the marker before still hits it -
+			this is strictly additive. Centring needs the same offset taught to
+			CommentMarkerSubSection, which is not in this change.
+
+			No teleport comes with the bigger box here: onMouseMove tracks
+			dragStartPosition + dragDistance, a delta, so the grab point already
+			cancels out.
+
+			Where a comment also carries an anchor area, nothing changes: that
+			sub-section sets pointerEvents 'auto' on its own div and listens for
+			the click there, so the DOM takes it before the canvas hit test
+			runs, and both paths end in the same selectById.
+		*/
+		if (
+			(<any>window).mode.isSmallScreenDevice() &&
+			document.documentElement.classList.contains('vulcan-mobile-chrome') &&
+			app.map._docLayer._docType === 'presentation'
+		) {
+			const marker = this.sectionProperties.commentMarkerSubSection;
+			const hitSize = 44 * app.dpiScale;
+			marker.size = [
+				Math.max(marker.size[0], hitSize),
+				Math.max(marker.size[1], hitSize),
+			];
+		}
 
 		app.sectionContainer.addSection(this.sectionProperties.commentMarkerSubSection);
 	}
@@ -1175,6 +1359,37 @@ export class Comment extends CanvasSectionObject {
 			this.hideImpressDraw();
 	}
 
+	/*
+	 * Core has put this view on sheet `part` while this comment is
+	 * still open for editing on another sheet. A plain Ctrl+PgUp/PgDn from the
+	 * grid and a Name Box jump switch the sheet in core, so the comment guard
+	 * in Map.setPart never sees them, and hide() keeps a comment that is being
+	 * edited: the box stayed open over the new sheet. Close the edit when that
+	 * loses nothing: the caret has left the box, and the box holds no text
+	 * that was not sent (onLostFocus autosaves when the caret leaves). A 'new'
+	 * draft is dropped. If its autosave is unconfirmed, autoSavedComment no
+	 * longer points at it, so the comment core adds arrives closed.
+	 */
+	public closeEditLeftOnAnotherSheet(part: number): void {
+		const props = this.sectionProperties;
+		if (parseInt(props.data.tab) === part
+			|| props.container.contains(document.activeElement)
+			|| props.nodeModifyText.innerText !== props.contentText.origText
+			|| props.nodeReplyText.innerText !== '')
+			return;
+
+		cool.CommentSection.autoSavedComment = null;
+		cool.CommentSection.commentWasAutoAdded = false;
+		cool.CommentSection.needFocus = null;
+		props.contentText.uneditedText = null;
+		props.contentText.uneditedHTML = null;
+		props.commentListSection.removeCommentAttention(this);
+		if (props.data.id === 'new')
+			props.commentListSection.removeItem(props.data.id);
+		else
+			this.hideCalc();
+	}
+
 	private isInsideActivePart() {
 		// Impress and Draw only.
 		return this.sectionProperties.partIndex === app.map._docLayer._selectedPart;
@@ -1227,10 +1442,60 @@ export class Comment extends CanvasSectionObject {
 			const removeUno = docLayer._docType === 'text' ? '.uno:DeleteComment'
 				: (docLayer._docType === 'spreadsheet' ? '.uno:DeleteNote'
 					: '.uno:DeleteAnnotation');
-
 			if (isAuthor && isShown('.uno:EditAnnotation'))
 				entries.push({ text: _('Modify'), type: 'action', id: 'modify', pos: String(pos++) });
 
+			// REPLY IS WRITER-ONLY, AND FOR IMPRESS THAT IS A REFUSAL RATHER
+			// THAN AN OVERSIGHT. Commit 0ba0fcbe6a ungated this row for
+			// presentation on the strength of the dispatch chain existing; the
+			// chain does exist, and the thing at the end of it is not a reply.
+			// .uno:ReplyToAnnotation REWRITES THE COMMENT YOU REPLIED TO AND
+			// SIGNS YOUR NAME TO IT.
+			//
+			// AnnotationManagerImpl::ExecuteReplyToAnnotation
+			// (engine/sd/source/ui/annotations/annotationmanager.cxx:654-757)
+			// resolves ONE annotation by SID_ATTR_POSTIT_ID (:663-668) and then
+			// mutates that same object:
+			//   :700-710  composes `<original author> (<original date>): "<old
+			//             text>"`, keeping the colleague's words only as an
+			//             italic quote inside the new body;
+			//   :733      pTextApi->SetText(*pOPO) -- overwrites the original
+			//             comment's text with that composite;
+			//   :735-745  sReplyAuthor = mrBase.GetKitAuthor() under
+			//             comphelper::COKit::isActive(), the desktop arm reads
+			//             SvtUserOptions, and BOTH then run
+			//             xAnnotation->setAuthor(sReplyAuthor);
+			//   :747      setDateTime(getCurrentDateTime()).
+			// It closes on a Modify notification (:750). There is no Add, no
+			// child annotation, and no SetThreaded anywhere on the path.
+			//
+			// Net effect on a phone: tapping Reply on a colleague's comment
+			// republishes THEIR comment under YOUR name and timestamp, silently.
+			// The words survive inside the quote, so this is misattribution
+			// rather than data loss -- which is worse than it sounds, because
+			// nothing on the card ever says it happened.
+			//
+			// This is not fixable from here. The slot above is the entire reply
+			// API sd exposes, both COKit arms reattribute, and the client cannot
+			// un-ring a Modify. Writer is unaffected and stays open because it
+			// is a genuinely different mechanism: FN_REPLY registers an ANSWER
+			// and inserts a new note (sw/source/uibase/docvw/AnnotationWin2.cxx
+			// :1103-1112), leaving the parent's author alone -- which is also
+			// why only Writer has IsRootNote and FN_PROMOTE_COMMENT.
+			//
+			// Doing it properly is an ENGINE change and NOT a small one. The
+			// model already carries the field -- svx Annotation has m_ParentId
+			// with SetParentId/GetParentId (include/svx/annotation/Annotation.hxx
+			// :99, :203-204) and sd's own test asserts a root/reply pair
+			// (sd/qa/unit/AnnotationTest.cxx:565-570) -- but the only production
+			// writer is the PDF import filter (sd/source/filter/pdf/
+			// sdpdffilter.cxx:339), and GetParentId has exactly two production
+			// readers, both in unomodel.cxx and both inside `if (IsThreaded())`
+			// (:3599 PDF export, :4775 the LOK JSON writer). No odp or pptx
+			// filter reads or writes parentId or threaded at all, so a reply
+			// built as a real child would survive the session and vanish on
+			// round-trip. Reinstating this row without that persistence work
+			// re-ships the misattribution.
 			if (docLayer._docType === 'text' && isShown('.uno:ReplyComment'))
 				entries.push({ text: _('Reply'), type: 'action', id: 'reply', pos: String(pos++) });
 
@@ -1241,6 +1506,36 @@ export class Comment extends CanvasSectionObject {
 				&& isShown('.uno:DeleteCommentThread'))
 				entries.push({ text: _('Remove Thread'), type: 'action', id: 'removeThread', pos: String(pos++) });
 
+			// RESOLVE IS LEFT GATED FOR IMPRESS, ON PURPOSE. `data.threaded` is
+			// not a client-side habit that can be relaxed; it is the client's
+			// faithful mirror of a capability the engine does not have for
+			// odp/pptx, and dropping it would ship a menu row that silently
+			// does nothing:
+			//   - the flag arrives from core, not from us. SdXImpressDocument's
+			//     comment serialiser (sd/source/ui/unoidl/unomodel.cxx, the
+			//     getPostIts JSON writer) emits "threaded" and "resolved" only
+			//     inside `if (xAnnotation->IsThreaded())`, so for a normal
+			//     presentation the key is simply absent;
+			//   - IsThreaded() is set for Impress in exactly two places, both
+			//     PDF: the import filter (sd/source/filter/pdf/sdpdffilter.cxx)
+			//     and new annotations created while the open document came from
+			//     a *_pdf_import filter (AnnotationManagerImpl at the
+			//     createAnnotation site). Nothing in the odp/pptx path sets it,
+			//     and ExecuteReplyToAnnotation does not set it either -- an
+			//     Impress reply rewrites one annotation's text rather than
+			//     adding a child, so replying never creates a thread;
+			//   - the slot itself refuses. AnnotationManagerImpl::
+			//     ExecuteResolveAnnotation returns early on !IsThreaded()
+			//     before touching SetResolved, so .uno:ResolveComment on a
+			//     pptx/odp comment is a no-op that sends no notification back;
+			//   - and there is nowhere to keep the answer even if it were set:
+			//     `resolved` round-trips for Writer annotations only
+			//     (xmloff/source/text/txtflde.cxx writes loext:resolved) and
+			//     for PDF export via PDFNote::mbResolved, again gated on
+			//     IsThreaded(). No Impress export writes it.
+			// Closing this row is an engine change (give sd annotations real
+			// child comments, or a resolved bit that persists), not a client
+			// one. Ungating here would only put a dead control on the card.
 			const isNonWriterComponent = ['spreadsheet', 'drawing', 'presentation'].includes(docLayer._docType);
 			if (canModerate
 				&& (docLayer._docType === 'text' || (isNonWriterComponent && data.threaded))
@@ -1832,6 +2127,139 @@ export class Comment extends CanvasSectionObject {
 		}
 	}
 
+	/*
+		Writer phone indicator geometry, in the section-local core pixels
+		onMouseUp is handed, or null when there is nothing to draw.
+
+		One box for both jobs so the paint and the hit test cannot drift: onDraw
+		fills a dot inside it, onMouseUp tests the whole of it.
+
+		🔴 THE HEIGHT USED TO BE CLAMPED TO THE LINE AND THAT DEFEATED THE
+		WHOLE 44 px FLOOR. This read
+
+		    const size = Math.min(phoneTouchSize(), lineHeight, lineWidth);
+
+		i.e. a SQUARE whose side was the smallest of the three. lineHeight is
+		the smallest of the three on any ordinary body text: 11 pt at the zoom
+		the phone reflow settles on is a ~20 CSS px line, so the touch floor of
+		44 collapsed to 20 and the target was ~20x20 -- under a fifth of the
+		area the 44 px floor advertises, and squarely in the range where a
+		fingertip misses more often than it hits. The comment was present, the
+		dot was painted, and it could not reliably be tapped: from the reader's
+		side that is indistinguishable from the defect the indicator was added
+		to fix.
+
+		WHAT IS TRADED, STATED RATHER THAN HIDDEN. The two clamps were not the
+		same kind of thing and they are not treated the same way.
+
+		  - lineWidth STAYS. It is the promise that the box never reaches left
+		    of the commented text into words this comment says nothing about.
+		    A short range keeps a short target; that is correct, because a
+		    two-character range IS a small thing to aim at, and widening it
+		    would steal taps from its neighbours.
+
+		  - lineHeight GOES, replaced by a floor. The box is now
+		    phoneTouchSize() tall (or the line, when the line is taller) and
+		    CENTRED on the line rather than hung from its top, so the overhang
+		    is split: at a 20 CSS px line it reaches ~12 CSS px above and ~12
+		    below, one line each way, inside a column at most 44 px wide at the
+		    trailing end of the range. That is the cost, and it buys a target
+		    that can be hit.
+
+		Splitting the overhang is what keeps it to one line either side. Left
+		hanging from the top, a 44 px box over a 20 px line reaches 24 px down
+		-- more than a whole line pitch, so it could take taps from the line
+		below AND the one after it.
+
+		The section box has to grow with it or none of this is reachable:
+		CanvasSectionContainer.findSectionContainingPoint -> isHit tests the
+		section's own position/size first, so a hit box outside the section is
+		a hit box nothing ever tests. setPositionAndSize applies exactly this
+		pad; see phoneIndicatorVerticalPad.
+	*/
+	private phoneWriterIndicatorBox (): { x: number, y: number, width: number, height: number } | null {
+		if (!Comment.usesPhoneCommentChrome())
+			return null;
+		if (app.map._docLayer._docType !== 'text')
+			return null;
+
+		const rectangles: Array<cool.SimpleRectangle> = this.sectionProperties.data.rectangles;
+		if (!rectangles || !rectangles.length)
+			return null;
+
+		// The trailing corner of the range, which is where a reader looks for
+		// "there is a note about this" -- Docs, Word and Pages all put it
+		// after the commented words rather than before them.
+		const last = rectangles[rectangles.length - 1];
+		const lineHeight = Math.max(last.v4Y - last.v1Y, 1);
+		const lineWidth = Math.max(last.v4X - last.v1X, 1);
+		const width = Math.min(Comment.phoneTouchSize(), lineWidth);
+		const height = Math.max(Comment.phoneTouchSize(), lineHeight);
+		if (width <= 0 || height <= 0)
+			return null;
+
+		// v* are canvas-absolute core pixels; the section's own frame starts at
+		// myTopLeft, which is what onDraw undoes with its translate and what
+		// convertPositionToSectionLocale has already taken off the point
+		// onMouseUp receives.
+		return {
+			x: last.v4X - width - this.myTopLeft[0],
+			y: last.v1Y - Math.floor((height - lineHeight) / 2) - this.myTopLeft[1],
+			width: width,
+			height: height,
+		};
+	}
+
+	/*
+		CORE px the indicator box overhangs the comment's own rectangles above
+		and below, and therefore the amount setPositionAndSize has to add to
+		the section box so the container will route a tap there at all. Zero on
+		every surface but phone Writer, so setPositionAndSize keeps its exact
+		shipped geometry everywhere else.
+
+		Read off rectanglesOriginal (twips) rather than rectangles (the
+		SimpleRectangle view) because that is what setPositionAndSize already
+		has in hand at the point it needs this; the two carry the same numbers
+		(CommentListSection.stringToRectangles feeds both, Comment.setData only
+		wraps one of them). Math.ceil, and only ever upward, so a rounding
+		disagreement between the twips path and the v* path can leave the
+		section box a pixel too BIG -- never a pixel too small, which is the
+		direction that would clip the target it exists to expose.
+	*/
+	private phoneIndicatorVerticalPad (): number {
+		if (!Comment.usesPhoneCommentChrome())
+			return 0;
+		if (app.map._docLayer._docType !== 'text')
+			return 0;
+
+		const rectangles = this.sectionProperties.data.rectanglesOriginal;
+		if (!rectangles || !rectangles.length)
+			return 0;
+
+		const last = rectangles[rectangles.length - 1];
+		const lineHeight = Math.max(last[3] * app.twipsToPixels, 1);
+		return Math.max(0, Math.ceil((Comment.phoneTouchSize() - lineHeight) / 2));
+	}
+
+	// Should this comment show an on-canvas indicator at all? Mirrors the
+	// visibility rule the cards follow (CommentSection.showHideComment): a
+	// resolved comment is out unless resolved comments are being shown, and
+	// nothing is drawn while the whole comment layer is switched off via
+	// .uno:ShowAnnotations. `show` is null before the first setView, and a
+	// null must not suppress the indicator -- that is the state a phone
+	// Writer sits in at load, and suppressing there would reproduce exactly
+	// the "loaded but never rendered" defect this is fixing.
+	private phoneIndicatorIsVisible (): boolean {
+		const listProps = this.sectionProperties.commentListSection.sectionProperties;
+		if (listProps.show === false)
+			return false;
+		if (this.sectionProperties.data.resolved === 'true' && !listProps.showResolved)
+			return false;
+		if (this.sectionProperties.data.layoutStatus === CommentLayoutStatus.DELETED)
+			return false;
+		return true;
+	}
+
 	public onDraw (): void {
 		if (this.sectionProperties.showSelectedCoordinate) {
 			if (app.map._docLayer._docType === 'text') {
@@ -1858,7 +2286,17 @@ export class Comment extends CanvasSectionObject {
 				 // Wait for a 'commandstatechanged'.
 				 this.sectionProperties.commentListSection.sectionProperties.calcCommandStateChanged === true) {
 
-				var cellSize = this.calcOptimumSizeForCalc();
+				// Anchor the indicator on the section's OWN box, not on
+				// calcOptimumSizeForCalc(): on the phone chrome
+				// setPositionAndSize sizes and right-anchors the section with
+				// calcTouchSizeForCalc(), so the cell's right edge is at
+				// section-local x = calcTouchSizeForCalc()[0]. Using the
+				// optimum size here instead would slide the triangle left by
+				// the difference. Off the phone chrome the two are the same
+				// call, so this keeps the desktop pixel-identical -- and it
+				// still recomputes rather than reading this.size, which may be
+				// artificially wide after a mouseEnter with no mouseLeave.
+				var cellSize = this.calcTouchSizeForCalc();
 				if (cellSize[0] !== 0 && cellSize[1] !== 0) { // don't draw notes in hidden cells
 					// `zoom` represents the current zoom level of the map, retrieved from `this.map.getZoom()`.
 					// `baseSize` is a constant that defines the base size of the square at the initial zoom level.
@@ -1868,6 +2306,19 @@ export class Comment extends CanvasSectionObject {
 					var baseSize = 2;
 					var zoom = this.map.getZoom();
 					var squareDim = baseSize + zoom;
+
+					// PHONE: baseSize + zoom is CORE pixels, so on a dpr 3
+					// phone the stock triangle lands at ~4 CSS px and measured
+					// ~2. It is the whole of what tells a reader this cell
+					// carries a comment. Paint it at phoneIndicatorSize(),
+					// clamped to the cell so a narrow column or a short row
+					// still gets a triangle that fits inside its own cell
+					// rather than one that overruns the gridline.
+					if (Comment.usesPhoneCommentChrome()) {
+						squareDim = Math.max(squareDim, Comment.phoneIndicatorSize());
+						squareDim = Math.min(squareDim, cellSize[0] - margin, cellSize[1]);
+						squareDim = Math.max(squareDim, baseSize);
+					}
 
 					const isRTL = this.isCalcRTL();
 
@@ -1889,6 +2340,54 @@ export class Comment extends CanvasSectionObject {
 				}
 			}
 		}
+
+		// Last, so the dot sits on top of the 0.25-alpha range wash above
+		// rather than under it, on the phones where both happen to paint.
+		this.drawPhoneWriterIndicator();
+	}
+
+	/*
+		Writer phone: paint the comment indicator.
+
+		DELIBERATELY OUTSIDE the showSelectedCoordinate gate that wraps the
+		rest of onDraw. That flag is set by showWriter() and cleared by
+		hideWriter(), i.e. it tracks whether a comment CARD is on screen -- and
+		on a phone no card is ever on screen, because Comment.onInitialize
+		never puts the container in the document. Hanging the only phone hint
+		off a desktop card's visibility is how "loaded and never rendered"
+		happens. phoneIndicatorIsVisible() carries the rules that do apply
+		(resolved, tracked-deletion, comment layer off).
+
+		A filled dot, not the 0.25-alpha range wash the desktop paints: the
+		wash marks WHICH WORDS are commented, which is worth 393 px of screen
+		only when you can also read the comment; the dot says a comment is
+		here and can be tapped, which is the thing the phone was missing.
+	*/
+	private drawPhoneWriterIndicator (): void {
+		const box = this.phoneWriterIndicatorBox();
+		if (!box || !this.phoneIndicatorIsVisible())
+			return;
+
+		// The dot is centred in the touch box and painted at the indicator
+		// size, so the target is 44 px while the mark stays 14 px. Clamped to
+		// the box's SHORTER side: the box is no longer square once the height
+		// floor lifts it off a short line, and clamping to the longer side
+		// would let a 14 px dot spill out of a narrower one.
+		const dot = Math.min(Comment.phoneIndicatorSize(), box.width, box.height);
+		const cx = box.x + box.width / 2;
+		const cy = box.y + box.height / 2;
+
+		this.context.save();
+		this.context.fillStyle = this.sectionProperties.usedTextColor;
+		this.context.beginPath();
+		this.context.arc(cx, cy, dot / 2, 0, 2 * Math.PI);
+		this.context.fill();
+		// A hairline in the canvas clear colour separates the dot from text of
+		// the same colour underneath it.
+		this.context.strokeStyle = this.containerObject.getClearColor();
+		this.context.lineWidth = Math.max(1, Math.round(app.dpiScale));
+		this.context.stroke();
+		this.context.restore();
 	}
 
 	// Comment-local + this.myTopLeft is the canvas-pixel coordinate; MouseControl
@@ -1949,9 +2448,60 @@ export class Comment extends CanvasSectionObject {
 		if (!this.containerObject.isDraggingSomething() && (<any>window).mode.isSmallScreenDevice() || (<any>window).mode.isTablet()) {
 			if (app.map._docLayer._docType === 'presentation' || app.map._docLayer._docType === 'drawing')
 				app.map._docLayer._openCommentWizard(this);
+
+			// WRITER PHONE READ ROUTE. Checked BEFORE onClick, because onClick
+			// forwards a text tap to MouseControl to place a caret and this is
+			// the one place in the range where the tap means something else.
+			//
+			// The cost, stated rather than hidden: a box at most 44 CSS px
+			// wide, at the trailing end of the range's LAST rectangle, opens
+			// the comment instead of placing a caret. It is 44 CSS px TALL
+			// too, centred on that line, so on ordinary body text it also
+			// takes ~12 CSS px of the line above and ~12 of the line below --
+			// one line each way, in that one narrow column. Everything else in
+			// the range, and every other line of it, still places a caret
+			// exactly as before.
+			//
+			// That vertical overhang is deliberate and it is the second half
+			// of this fix: clamping the box to the line height, which is what
+			// shipped, made the target ~20x20 CSS px on the type a phone
+			// actually renders and it could not be hit. A target you cannot
+			// hit is the same defect as no target at all, which is what this
+			// route was added to end.
+			if (app.map._docLayer._docType === 'text'
+				&& this.phoneIndicatorIsVisible()
+				&& this.isPointInPhoneWriterIndicator(point)
+				&& this.sectionProperties.commentListSection.openCommentOnPhone(this))
+				return;
+
 			this.onMouseEnter();
 			this.onClick(point, e);
+
+			// CALC PHONE READ ROUTE. After onClick, so core has had the tap and
+			// moved the cell cursor onto the noted cell before the sheet opens
+			// over it -- which also means the cell context menu that a
+			// following long-press builds is evaluated against the right cell.
+			//
+			// Nothing steals a tap here: the section is at most a 44 px box
+			// pinned inside the noted cell's right edge (calcTouchSizeForCalc),
+			// so hitting it at all IS aiming at the indicator. Without this the
+			// tap ended at onMouseEnter -> selectById -> select(), which styles
+			// and repositions a DOM card that is not in the document on a
+			// phone: the comment stayed invisible and the only affordance left
+			// on the cell was "insert", i.e. an offer to write a second one.
+			if (app.map._docLayer._docType === 'spreadsheet')
+				this.sectionProperties.commentListSection.openCommentOnPhone(this);
 		}
+	}
+
+	// Section-local hit test against phoneWriterIndicatorBox(). Same geometry
+	// the dot is painted from, so the two cannot drift apart.
+	private isPointInPhoneWriterIndicator (point: cool.SimplePoint): boolean {
+		const box = this.phoneWriterIndicatorBox();
+		if (!box)
+			return false;
+		return point.pX >= box.x && point.pX <= box.x + box.width
+			&& point.pY >= box.y && point.pY <= box.y + box.height;
 	}
 
 	private calcContinueWithMouseEvent (): boolean {
@@ -1982,6 +2532,43 @@ export class Comment extends CanvasSectionObject {
 		return size;
 	}
 
+	/*
+		The Calc comment section's TOUCH box. Identical to
+		calcOptimumSizeForCalc() everywhere except the Vulcan phone chrome.
+
+		calcCommentAreaWidth is 40 CORE pixels, and it is capped there on
+		purpose ("doesn't cover the whole cell, in order to allow multi-cell
+		selections", constructor). On a dpr 3 phone 40 core px is 13 CSS px
+		wide: the section that carries the comment's only on-canvas affordance
+		is a 13 px strip, well under the 44 px floor the rest of this chrome
+		holds to, which is why the corner triangle measured untappable rather
+		than merely small.
+
+		Widen it to the floor, and CLAMP TO THE CELL. Never past the cell:
+		this section swallows the events it is hit by and hands them back to
+		core (sendClickToCore), and a box that reached into the neighbouring
+		cell would put that cell's taps through this comment's code path and
+		pop this comment's sheet. Where a row is shorter than 44 px the cell
+		itself is the ceiling and we stop there -- a short row cannot host a
+		44 px target without stealing the row above or below, and stealing a
+		row is worse than a 30 px target.
+
+		Desktop and tablet get calcOptimumSizeForCalc() unchanged, so the
+		hover-to-show behaviour keeps its exact geometry.
+	*/
+	private calcTouchSizeForCalc(): number[] {
+		const size = this.calcOptimumSizeForCalc();
+		if (!Comment.usesPhoneCommentChrome())
+			return size;
+
+		const cell = this.calcCellSize();
+		const touch = Comment.phoneTouchSize();
+		return [
+			Math.min(Math.max(size[0], touch), cell[0]),
+			Math.min(Math.max(size[1], touch), cell[1]),
+		];
+	}
+
 	public onMouseEnter(): void {
 		if (this.calcContinueWithMouseEvent()) {
 			// When mouse is above this section, comment's HTML element will be shown.
@@ -1997,9 +2584,21 @@ export class Comment extends CanvasSectionObject {
 						return; // Another comment is being edited. Return.
 				}
 
-				var containerWidth: number = this.sectionProperties.container.getBoundingClientRect().width;
-				var cellPos = app.map._docLayer._cellRangeToTwipRect(this.sectionProperties.data.cellRange).toRectangle();
-				this.size = [Math.round((cellPos[2]) * app.twipsToPixels + containerWidth), Math.round((cellPos[3]) * app.twipsToPixels)];
+				if (Comment.usesPhoneCommentChrome()) {
+					// The widening below exists so the pointer can travel from
+					// the cell onto the card that popped up beside it without
+					// crossing outside the section and firing onMouseLeave.
+					// On a phone there is no pointer and no card beside the
+					// cell -- the card is in the wizard sheet -- so there is no
+					// journey to protect, and widening by the container's
+					// measured width would blow the touch box out to the width
+					// of the sheet. Keep the box we sized for the finger.
+					this.size = this.calcTouchSizeForCalc();
+				} else {
+					var containerWidth: number = this.sectionProperties.container.getBoundingClientRect().width;
+					var cellPos = app.map._docLayer._cellRangeToTwipRect(this.sectionProperties.data.cellRange).toRectangle();
+					this.size = [Math.round((cellPos[2]) * app.twipsToPixels + containerWidth), Math.round((cellPos[3]) * app.twipsToPixels)];
+				}
 				this.sectionProperties.commentListSection.selectById(this.sectionProperties.data.id);
 				this.show();
 			}
@@ -2009,8 +2608,11 @@ export class Comment extends CanvasSectionObject {
 	public onMouseLeave(point: cool.SimplePoint): void {
 		if (this.calcContinueWithMouseEvent()) {
 			if (parseInt(this.sectionProperties.data.tab) === app.map._docLayer._selectedPart) {
-				// Revert the changes we did on "onMouseEnter" event.
-				this.size = this.calcOptimumSizeForCalc();
+				// Revert the changes we did on "onMouseEnter" event. Reverts to
+				// the touch box on the phone chrome, which is what
+				// setPositionAndSize wrote and what the finger needs; identical
+				// to calcOptimumSizeForCalc() everywhere else.
+				this.size = this.calcTouchSizeForCalc();
 				if (point) {
 					this.hide();
 				}

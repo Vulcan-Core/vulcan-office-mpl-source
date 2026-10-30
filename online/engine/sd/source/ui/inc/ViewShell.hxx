@@ -22,6 +22,7 @@
 #include <comphelper/OAccessible.hxx>
 #include <rtl/ref.hxx>
 #include <sfx2/viewsh.hxx>
+#include <svl/undo.hxx>
 #include <svl/typedwhich.hxx>
 #include <svtools/scrolladaptor.hxx>
 #include <vcl/prntypes.hxx>
@@ -263,6 +264,9 @@ public:
     virtual bool PrepareClose( bool bUI = true );
 
     void GetMenuState(SfxItemSet& rSet);
+    /// Vulcan fork: Ctrl+Z still reaches ImpSidUndo/ImpSidRedo when Undo is disabled for this
+    /// view, so a refusal is answered (see SfxShell::IsKitPerViewUndoRedo).
+    virtual bool IsConditionalFastCall(const SfxRequest& rReq) override;
 
     virtual sal_Int8 AcceptDrop( const AcceptDropEvent& rEvt, DropTargetHelper& rTargetHelper,
                                  ::sd::Window* pTargetWindow, sal_uInt16 nPage, SdrLayerID nLayer );
@@ -496,6 +500,8 @@ protected:
     void ImpGetRedoStrings(SfxItemSet &rSet) const;
     void ImpSidUndo(SfxRequest& rReq);
     void ImpSidRedo(SfxRequest& rReq);
+    /// Vulcan fork: this view's per-view undo answer on rUndoManager (see sd::UndoManager).
+    SfxViewUndoLookup LookupPerViewUndo(const SfxUndoManager& rUndoManager) const;
 
     DECL_DLLPRIVATE_LINK( HScrollHdl, weld::Scrollbar&, void );
     DECL_DLLPRIVATE_LINK( VScrollHdl, weld::Scrollbar&, void );

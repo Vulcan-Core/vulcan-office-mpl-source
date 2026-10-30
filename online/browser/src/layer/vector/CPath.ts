@@ -15,6 +15,14 @@ abstract class CPath extends CEventsHandler {
 	opacity: number = 1;
 	lineCap: CanvasLineCap = 'round';
 	lineJoin: CanvasLineJoin = 'round';
+	/**
+	 * Canvas dash pattern for the stroke, in device pixels; null means solid.
+	 *
+	 * Read ONLY by CanvasOverlay.fillStroke, which applies it — or clears it —
+	 * on every stroked path. Canvas dash state is context-global and survives
+	 * between paths, so "clears it" is not optional: see the comment there.
+	 */
+	dashArray: number[] | null = null;
 	fill: boolean = false;
 	fillGradient: boolean = false;
 	fillColor: string = this.color;
@@ -77,6 +85,7 @@ abstract class CPath extends CEventsHandler {
 		this.opacity = options.opacity !== undefined ? options.opacity : this.opacity;
 		this.lineCap = options.lineCap !== undefined ? options.lineCap : this.lineCap;
 		this.lineJoin = options.lineJoin !== undefined ? options.lineJoin : this.lineJoin;
+		this.dashArray = options.dashArray !== undefined ? options.dashArray : this.dashArray;
 		this.fill = options.fill !== undefined ? options.fill : this.fill;
 		this.fillColor = options.fillColor !== undefined ? options.fillColor : this.fillColor;
 		this.fillOpacity = options.fillOpacity !== undefined ? options.fillOpacity : this.fillOpacity;

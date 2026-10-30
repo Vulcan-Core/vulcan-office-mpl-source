@@ -3080,10 +3080,17 @@ void SwTabFrame::MakeAll(vcl::RenderContext* pRenderContext)
                 if ( !bTryToSplit )
                     ++nMinNumOfLines;
 
+                // VULCAN: count the table's bottom margin (its bottom
+                // border) here, as Split() does when it measures the space for the
+                // rows. Without it, a table whose first data row may not split and
+                // ends inside that margin passes this check, Split() refuses it on
+                // both tries, and the table is neither split nor moved: the rows
+                // after that one are laid out below the page and appear nowhere.
                 const SwTwips nBreakLine = aRectFnSet.YInc(
                         aRectFnSet.GetTop(getFrameArea()),
                         aRectFnSet.GetTopMargin(*this) +
-                         lcl_GetHeightOfRows( GetLower(), nMinNumOfLines ) );
+                         lcl_GetHeightOfRows( GetLower(), nMinNumOfLines ) +
+                         aRectFnSet.GetBottomMargin(*this) );
 
                 bool bHadFollowFlowLineBeforeSplit = false;
                 // Some more checks if we want to call the split algorithm or not:
@@ -3759,9 +3766,124 @@ void SwTabFrame::Format( vcl::RenderContext* /*pRenderContext*/, const SwBorderA
         // body then in the BrowseView the value refers to the screen width.
         const SwFormatFrameSize &rSz = GetFormat()->GetFrameSize();
         // OD 14.03.2003 #i9040# - adjust variable name.
-        const SwTwips nWishedTableWidth = CalcRel( rSz );
+        SwTwips nWishedTableWidth = CalcRel( rSz );
 
         bool bCheckBrowseWidth = false;
+
+        SwViewShell *pSh = getRootFrame()->GetCurrShell();
+        /*
+         * VULCAN: A FIXED-WIDTH BODY TABLE IS FITTED TO THE CLIENT'S REFLOW
+         * WIDTH, BECAUSE OFF-PAGE HERE MEANS UNREACHABLE, NOT PANNABLE.
+         *
+         * The client states a browse width with .uno:BrowseWidth and
+         * SwRootFrame::ImplCalcBrowseWidth now takes it VERBATIM (see the
+         * evidence block there; measured vote 4700 -> page 4940 = vote +
+         * 2*border). It no longer raises the width to cover the widest table,
+         * which is what used to keep a `w:tblW dxa` table on the page -- and
+         * what also laid EVERY paragraph out at 9252 twips on a 392px phone.
+         *
+         * What that left behind, and what this fixes: the document rectangle
+         * published to the client is derived from PAGE WIDTHS ALONE.
+         * SwRootFrame::CheckViewLayout sets the root size to
+         * `nMaxPageRight - nBorder` (pagechg.cxx) and
+         * SwXTextDocument::getDocumentSize adds only 2*DOCUMENTBORDER
+         * (sw/source/uibase/uno/unotxdoc.cxx). Neither looks at an object
+         * hanging off the right edge of a page. So a table that overflows the
+         * page falls OUTSIDE the canvas the client tiles and scrolls: the
+         * overflow is not pannable, it is unreachable. "Fit" is therefore the
+         * only posture that keeps the whole table reachable; "pan" would have
+         * meant widening the document rectangle, which re-widens the thing
+         * reflow exists to narrow.
+         *
+         * WHICH ORIENTATIONS ACTUALLY OVERFLOWED -- and one refutation. The
+         * pagechg.cxx block records the docx orientations as NONE and
+         * LEFT_AND_WIDTH and says both "take a NEGATIVE right spacing and keep
+         * the wished width". By static reading of the switch below that is
+         * true of LEFT_AND_WIDTH and FALSE of NONE:
+         *
+         *   NONE            nRightSpacing = pAttrs->CalcRight(this), i.e. the
+         *                   LRSpace right margin. The wished width is never
+         *                   consulted, so the print area is already
+         *                   `nMax - CalcLeft - CalcRight` and already fits.
+         *   LEFT_AND_WIDTH  nWishRight = nMax - left - nWishedTableWidth, which
+         *                   at nMax 4700 and a 9360-twip table is about -4660.
+         *                   The print area comes out ~9360 wide inside a
+         *                   4700-wide frame. THIS is the measured overflow.
+         *   LEFT / RIGHT /  same shape as LEFT_AND_WIDTH -- a negative wished
+         *   CENTER          indent preserves the wished width.
+         *   FULL            already clamped, via bCheckBrowseWidth. Untouched
+         *                   here, deliberately.
+         *
+         * Which docx tables get which: DomainMapperTableHandler.cxx:679
+         * defaults a table with no <w:jc> to LEFT_AND_WIDTH, which is what
+         * Dinosaurs.docx has.
+         *
+         * THE FIX IS TWO PARTS, and they cover different failures:
+         *
+         *   1. this clamp of nWishedTableWidth to nMax. A table cannot wish to
+         *      be wider than the frame it is in. That alone makes LEFT, RIGHT
+         *      and CENTER fit exactly (their wished indents collapse to 0 and
+         *      the print area becomes nMax minus the border lines), and it
+         *      brings LEFT_AND_WIDTH to within its own left indent. It is NOT
+         *      restricted to page-body tables: nMax is whatever the container
+         *      is, so a nested table clamps to its cell and a table in a fly
+         *      clamps to the fly. Those are the only two places anything
+         *      reaches them at all.
+         *   2. bCheckBrowseWidth for LEFT_AND_WIDTH and NONE below, which
+         *      re-uses the existing FULL clamp to also take the left indent
+         *      out of the overflow. For NONE that is a backstop and by the
+         *      reading above a std::min no-op; it is set because a document
+         *      with a negative LRSpace right margin would otherwise reach the
+         *      same overflow by a different route, and because a no-op is
+         *      cheaper than a second investigation later.
+         *
+         * ONLY EVER NARROWER. Both parts are min()s against what the table
+         * already wanted, so a table narrower than the browse width comes out
+         * byte-identical.
+         *
+         * THE CELLS DO FOLLOW THE FRAME -- this is the part that had to be
+         * established before writing the clamp, because a narrowed frame with
+         * unnarrowed cells would be clipping, which is worse than off-page.
+         * SwCellFrame::Format scales every cell by
+         * `storedWidth * tabPrintWidth / tabFormatWidth` (this file, in the
+         * !isFrameAreaSizeValid branch; `nWish` is the table format's stored
+         * width, `nPrtWidth` the tab frame's print width) and gives the last
+         * cell in the row the remainder. The chain that gets it there:
+         * SwLayNotify::ImplDestroy sees the tab frame's print size change and
+         * calls ChgLowersProp (frmtool.cxx), which invalidates every row;
+         * SwLayoutFrame::MakeAll re-takes the row width from
+         * `GetUpper()->getFramePrintArea()` (calcmove.cxx); the row's own
+         * SwLayNotify sees ITS width change and calls AdjustCells(0, false),
+         * which invalidates the cells. So the columns squeeze; they do not
+         * spill.
+         *
+         * NO NEW OSCILLATION. The ~10/second `status:` republish documented in
+         * pagechg.cxx came from the browse width being a maximum over tables,
+         * so a re-laid table moved the width that laid it out. Nothing here
+         * writes the browse width, and the three SwTabFrame sites that
+         * invalidate it (Invalidate() on RES_FRM_SIZE/RES_HORI_ORIENT at
+         * :4090, Cut() at :4578, Paste() at :4631 -- line numbers re-checked)
+         * are attribute-change, cut and paste, none of which this reaches. An
+         * invalidation from any of them now recomputes the same stated number,
+         * so the page width does not move and the cascade stops after one
+         * pass.
+         *
+         * WHAT IS DELIBERATELY NOT COVERED: an over-wide fixed-size FLY. The
+         * Dinosaurs.docx fixture also carries a `v:shape` at width:432pt =
+         * 8640 twips, and SwFlyFrame::CalcRel (fly.cxx) resolves against the
+         * browse width only for PERCENT sizes. That text box still overflows
+         * the page at a 4700 vote, by ~3940 twips, and it is a separate change.
+         * A wet test of this one must read the TABLE's right edge, not "does
+         * the fixture have anything past the page edge".
+         *
+         * NOT VERIFIED: none of this has been compiled or run. The fork image
+         * builds on a serialised EC2 runner. Everything above is static
+         * reading of the cited functions.
+         */
+        const bool bFitToKitBrowseWidth =
+            pSh && pSh->hasKitBrowseWidth() && pSh->GetViewOptions()->getBrowseMode();
+        if ( bFitToKitBrowseWidth && nWishedTableWidth > nMax )
+            nWishedTableWidth = nMax;
 
         // OD 14.03.2003 #i9040# - insert new variables for left/right spacing.
         SwTwips nLeftSpacing  = 0;
@@ -3865,6 +3987,12 @@ void SwTabFrame::Format( vcl::RenderContext* /*pRenderContext*/, const SwBorderA
                 break;
             case text::HoriOrientation::NONE:
                 {
+                    // VULCAN: backstop only -- see the block above. This
+                    // branch already fits, because it never consults the
+                    // wished width; the clamp is a std::min and will do
+                    // nothing unless a negative LRSpace right margin pushes
+                    // the print area past the frame.
+                    bCheckBrowseWidth = bFitToKitBrowseWidth;
                     // The margins are defined by the LRSpace attribute.
                     nLeftSpacing = pAttrs->CalcLeft( this );
                     if( nLeftOffset )
@@ -3892,6 +4020,25 @@ void SwTabFrame::Format( vcl::RenderContext* /*pRenderContext*/, const SwBorderA
                     // count left border and width (Word specialty)
                     // OD 10.03.2003 #i9040# - no width alignment in online mode.
                     //bCheckBrowseWidth = true;
+                    //
+                    // VULCAN: the line above stays commented out -- desktop
+                    // Web View keeps OD's 2003 behaviour, and so does every
+                    // headless convert. It is turned back on ONLY for a COKit
+                    // session that stated a reflow width, which is the one
+                    // case where the alternative is content the client cannot
+                    // scroll to. This is the orientation writerfilter gives a
+                    // docx table with no <w:jc>, so it is the measured case.
+                    //
+                    // The clamp below narrows the PRINT area and keeps
+                    // getFramePrintArea().Left(), so the table's left indent
+                    // survives; it is the indent's share of the width that is
+                    // taken out of the table body. THE INDENT IS NEVER
+                    // DROPPED to make room -- if a document indents further
+                    // than the whole browse width the indent still wins and
+                    // the table bottoms out at MINLAY, which is off-page
+                    // again. No fixture does that; it is stated so the next
+                    // reader knows which way the trade was made.
+                    bCheckBrowseWidth = bFitToKitBrowseWidth;
                     nLeftSpacing = pAttrs->CalcLeft( this );
                     if( nLeftOffset )
                     {
@@ -3927,11 +4074,21 @@ void SwTabFrame::Format( vcl::RenderContext* /*pRenderContext*/, const SwBorderA
         else
             aRectFnSet.SetXMargins( *this, nLeftSpacing, nRightSpacing );
 
-        SwViewShell *pSh = getRootFrame()->GetCurrShell();
+        // VULCAN: `pSh->VisArea().Width()` is NOT a usable guard under COKit.
+        // SwViewShell::VisArea() returns GetLayout()->getFrameArea() there
+        // (viewsh.cxx), i.e. the ROOT FRAME's own width -- which is written by
+        // SwRootFrame::CheckViewLayout only AFTER its Calc() has formatted this
+        // very table (pagechg.cxx), and is 0 until then. So on an early pass it
+        // reads 0 and silently skips the clamp, and on later passes it is a
+        // quantity derived from the page widths this function helps produce --
+        // the same circularity the ImplCalcBrowseWidth block was written to get
+        // out of. bFitToKitBrowseWidth is the client's own statement and cannot
+        // be either. VisArea is left in place for the non-COKit callers it was
+        // always for.
         if ( bCheckBrowseWidth &&
              pSh && pSh->GetViewOptions()->getBrowseMode() &&
              GetUpper()->IsPageBodyFrame() &&  // only PageBodyFrames and not ColBodyFrames
-             pSh->VisArea().Width() )
+             ( bFitToKitBrowseWidth || pSh->VisArea().Width() ) )
         {
             //Don't go beyond the edge of the visible area.
             //The page width can be bigger because objects with
@@ -3941,7 +4098,17 @@ void SwTabFrame::Format( vcl::RenderContext* /*pRenderContext*/, const SwBorderA
             nWidth -= pAttrs->CalcRightLine();
 
             SwFrameAreaDefinition::FramePrintAreaWriteAccess aPrt(*this);
-            aPrt.Width( std::min( nWidth, aPrt.Width() ) );
+            tools::Long nNewPrtWidth = std::min( nWidth, aPrt.Width() );
+            // VULCAN: floor, and ONLY on the gate added above -- FULL keeps
+            // exactly the arithmetic it had. LEFT_AND_WIDTH puts a real left
+            // indent into getFramePrintArea().Left(), so a table indented
+            // further than the whole browse width drives `nWidth` negative,
+            // and SwCellFrame::Format would then scale every cell by a
+            // negative print width. MINLAY is the same floor the x-margin
+            // guard a few lines up already uses.
+            if ( bFitToKitBrowseWidth )
+                nNewPrtWidth = std::max( tools::Long(MINLAY), nNewPrtWidth );
+            aPrt.Width( nNewPrtWidth );
         }
 
         if ( nOldHeight != aRectFnSet.GetHeight(getFramePrintArea()) )

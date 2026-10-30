@@ -2,7 +2,7 @@
 # Martin Srebotnjak <miles@filmsi.net>, 2016, 2019.
 msgid ""
 msgstr ""
-"Project-Id-Version: Collabora Online UI\n"
+"Project-Id-Version: Vulcan Office UI\n"
 "Report-Msgid-Bugs-To: \n"
 "POT-Creation-Date: 2026-06-26 11:34+0200\n"
 "PO-Revision-Date: 2026-06-27 10:05+0000\n"
@@ -5140,7 +5140,7 @@ msgid ""
 "Unlinking citations will prevent Collabora Online from updating citations "
 "and bibliography in this document."
 msgstr ""
-"Odstranjevanje povezav citatov prepreči Collabora Online, da posodobi citate "
+"Odstranjevanje povezav citatov prepreči Vulcan Office, da posodobi citate "
 "in bibliografijo v tem dokumentu."
 
 #: src/control/HRuler.ts:321
@@ -6702,7 +6702,7 @@ msgstr "Posodobi prosojnice"
 #: src/map/handler/Map.VersionBar.js:50
 msgid "Your Collabora Online server needs updating. Version {0} is available."
 msgstr ""
-"Vaš strežnik Collabora Online potrebuje posodobitev. Na voljo je različica "
+"Vaš strežnik Vulcan Office potrebuje posodobitev. Na voljo je različica "
 "{0}."
 
 #: src/map/handler/Map.WOPI.js:194
@@ -6988,7 +6988,7 @@ msgstr "Rumena zamisel"
 
 #: welcome/welcome.html%2Bhtml.head.title:9-3
 msgid "Collabora Online Welcome"
-msgstr "Dobrodošli v Collabora Online"
+msgstr "Dobrodošli v Vulcan Office"
 
 #: welcome/welcome.html%2Bhtml.body.div.div.div.div.h1:26-7
 msgid "Explore The New {coolversion}"
@@ -6998,7 +6998,7 @@ msgstr "Odkrijte novo različico {coolversion}"
 #: welcome/welcome.html%2Bhtml.body.div.div.div.div.h2:38-7
 msgid "Collabora Online Development Edition"
 msgstr ""
-"Razvojna različica Collabora Online (angl. Collabora Online Development "
+"Razvojna različica Vulcan Office (angl. Vulcan Office Development "
 "Edition oz. CODE)"
 
 #: welcome/welcome.html%2Bhtml.body.div.div.div.div.p:28-7
@@ -7028,7 +7028,7 @@ msgid ""
 msgstr ""
 "Oglejte si <a target=\"_blank\" rel=\"noopener\" href=\"https://www."
 "collaboraonline.com/code-26-04-release-notes/\">opombe ob izdaji</a> in "
-"izvejte vse o najnovejši razvojni izdaji Collabora Online Development "
+"izvejte vse o najnovejši razvojni izdaji Vulcan Office Development "
 "Edition, namenjeni domačim uporabnikom in manjšim ekipam."
 
 #: welcome/welcome.html%2Bhtml.body.div.div.div.div.h1:48-7
@@ -7663,7 +7663,7 @@ msgstr ""
 #~ "drugem."
 
 #~ msgid "Integrate Collabora Online into your webapp"
-#~ msgstr "Integrirajte Collabora Online v svojo spletno aplikacijo"
+#~ msgstr "Integrirajte Vulcan Office v svojo spletno aplikacijo"
 
 #~ msgid "Or get involved in the development"
 #~ msgstr "Ali pa se pridružite razvoju"
@@ -7679,7 +7679,7 @@ msgstr ""
 #~ "all the essential steps on how to reproduce it."
 #~ msgstr ""
 #~ "Pozanimajte se o integraciji v svojo spletno aplikacijo v <a href=\"%"
-#~ "coolSdkURL\" target=\"_blank\">Collabora Online SDK</a>. Ali pa se namenite "
+#~ "coolSdkURL\" target=\"_blank\">Vulcan Office SDK</a>. Ali pa se namenite "
 #~ "k <a href=\"%coolStepByStepURL\" target=\"_blank\">napotkom korak za "
 #~ "korakom</a> ter zgradite CODE od začetka. Pomagate lahko tudi s <a href=\"%"
 #~ "coolTranslationsURL\" target=\"_blank\">prevajanjem</a> ali <a href=\"%"
@@ -7753,7 +7753,7 @@ msgstr ""
 #~ msgstr "Strežnik se ponovno zaganja in bo na voljo v kratkem."
 
 #~ msgid "Oops, there is a problem connecting to Collabora Online : "
-#~ msgstr "Pri povezovanju z Collabora Online je prišlo do težave: "
+#~ msgstr "Pri povezovanju z Vulcan Office je prišlo do težave: "
 
 #~ msgid "Number of views"
 #~ msgstr "Število ogledov"

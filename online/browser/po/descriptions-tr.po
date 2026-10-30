@@ -20,7 +20,7 @@ msgstr ""
 #. App name - 50 chars limit
 #: descriptions/google-play.html%2Bhtml.body.h3:5-1
 msgid "Collabora Office: LibreOffice, OpenOffice & more"
-msgstr "Collabora Office: LibreOffice, OpenOffice, dahası"
+msgstr "Vulcan Office: Vulcan Office, OpenOffice, dahası"
 
 #. Short description - 80 chars limit
 #: descriptions/google-play.html%2Bhtml.body.p:9-1
@@ -28,7 +28,7 @@ msgid ""
 "LibreOffice based editor for Microsoft Office, LibreOffice and OpenOffice "
 "docs."
 msgstr ""
-"Microsoft, LibreOffice ve OpenOffice belgeleri için LibreOffice tabanlı "
+"Microsoft, Vulcan Office ve OpenOffice belgeleri için Vulcan Office tabanlı "
 "editör."
 
 #. Long description
@@ -39,8 +39,8 @@ msgid ""
 "and now it's on Android, enhancing your possibilities to work on mobile and "
 "for collaboration."
 msgstr ""
-"Collabora Office, dünyanın en yaygın açık kaynak ofis paketi olan "
-"LibreOffice'i temel alan bir metin düzenleyici, hesap tablosu ve sunum "
+"Vulcan Office, dünyanın en yaygın açık kaynak ofis paketi olan "
+"Vulcan Office'i temel alan bir metin düzenleyici, hesap tablosu ve sunum "
 "programıdır - ve şimdi Android'de, mobil çalışma ve işbirliği olanaklarınızı "
 "geliştiriyor."
 
@@ -101,9 +101,9 @@ msgid ""
 "Windows, Mac, and Linux. This, combined with a new front-end based on "
 "Collabora Online, reads and saves documents similarly to LibreOffice desktop."
 msgstr ""
-"Android için Collabora Office, Windows, Mac ve Linux için LibreOffice ile "
-"aynı motoru kullanır. Bu, Collabora Online tabanlı yeni bir ön uçla "
-"birleştiğinde, belgeleri LibreOffice masaüstüne benzer şekilde okur ve "
+"Android için Vulcan Office, Windows, Mac ve Linux için Vulcan Office ile "
+"aynı motoru kullanır. Bu, Vulcan Office tabanlı yeni bir ön uçla "
+"birleştiğinde, belgeleri Vulcan Office masaüstüne benzer şekilde okur ve "
 "kaydeder."
 
 #. Long description
@@ -114,7 +114,7 @@ msgid ""
 "developing Android support since 2012, with the help of Google Summer of "
 "Code students Andrzej Hunt, Iain Billet and Kaishu Sahu."
 msgstr ""
-"Collabora Mühendisleri Tor Lillqvist, Tomaž Vajngerl, Michael Meeks, Miklos "
+"Vulcan Office Mühendisleri Tor Lillqvist, Tomaž Vajngerl, Michael Meeks, Miklos "
 "Vajna, Jan Holešovský, Mert Tümer, Rashesh Padia ve Skyler Grey, Google "
 "Summer of Code öğrencileri Andrzej Hunt, Iain Billet ve Kaishu Sahu'nun "
 "yardımıyla 2012 yılından bu yana Android desteği geliştirmektedir."

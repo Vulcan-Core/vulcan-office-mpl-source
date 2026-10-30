@@ -62,6 +62,7 @@
 #include <sortedobjs.hxx>
 #include <frmatr.hxx>
 #include <frmtool.hxx>
+#include <comphelper/kit.hxx>
 #include <layact.hxx>
 #include <ndtxt.hxx>
 #include <swtable.hxx>
@@ -1738,9 +1739,13 @@ SwTwips SwFrame::AdjustNeighbourhood( SwTwips nDiff, bool bTst )
         {
             //The page can shrink to 0. The first page keeps the same size like
             //VisArea.
+            // Vulcan fork: not under COKit, where VisArea() is the whole layout (SwViewShell::VisArea): "keep the first page
+            // as tall as the window" then GREW page 1 by the rest of the document on every shrink, the next grow shrank
+            // it back, and browse-mode relayout never converged — a narrowed .uno:BrowseWidth, or typing near the top
+            // of a long document, held the iOS engine at 100% CPU for good (2026-10-12).
             nChg = nDiff;
             tools::Long nInvaAdd = 0;
-            if ( pViewShell && !pUp->GetPrev() &&
+            if ( pViewShell && !comphelper::COKit::isActive() && !pUp->GetPrev() &&
                  pUp->getFrameArea().Height() + nDiff < pViewShell->VisArea().Height() )
             {
                 // This means that we have to invalidate adequately.

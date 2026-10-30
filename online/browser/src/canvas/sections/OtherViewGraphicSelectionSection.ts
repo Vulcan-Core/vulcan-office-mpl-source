@@ -22,6 +22,11 @@ class OtherViewGraphicSelectionSection extends CanvasSectionObject {
     static sectionNamePrefix = 'OtherViewGraphicSelection ';
     static sectionPointers: Array<OtherViewGraphicSelectionSection> = [];
 
+    // Remote frames GLIDE between reports instead of teleporting: a short
+    // transition makes a collaborator's move read as motion. Transient
+    // only — no repaints at idle.
+    private static readonly TRANSITION_MS = 140;
+
     constructor(viewId: number, rectangle: cool.SimpleRectangle, part: number, mode: number) {
         super(OtherViewGraphicSelectionSection.sectionNamePrefix + viewId);
 
@@ -33,6 +38,31 @@ class OtherViewGraphicSelectionSection extends CanvasSectionObject {
         this.sectionProperties.part = part;
         this.sectionProperties.mode = mode;
         this.sectionProperties.viewLockInfo = null;
+        // {from: [x,y,w,h] core px, start: ms} while a glide is live.
+        this.sectionProperties.transition = null;
+    }
+
+    // Linear interpolation of the frame geometry; exposed for tests.
+    public static lerpFrame(from: number[], to: number[], t: number): number[] {
+        const k = Math.max(0, Math.min(1, t));
+        return [
+            from[0] + (to[0] - from[0]) * k,
+            from[1] + (to[1] - from[1]) * k,
+            from[2] + (to[2] - from[2]) * k,
+            from[3] + (to[3] - from[3]) * k,
+        ];
+    }
+
+    public beginTransition(fromRect: number[], samePart: boolean): void {
+        // Never glide across a slide change - that is navigation, not motion.
+        if (!samePart) {
+            this.sectionProperties.transition = null;
+            return;
+        }
+        this.sectionProperties.transition = {
+            from: fromRect,
+            start: performance.now(),
+        };
     }
 
     onDraw(frameCount?: number, elapsedTime?: number): void {
@@ -40,8 +70,69 @@ class OtherViewGraphicSelectionSection extends CanvasSectionObject {
 		this.context.setTransform(1, 0, 0, 1, 0, 0);
         this.context.strokeStyle = this.sectionProperties.color;
         this.context.lineWidth = 2;
-        this.drawViewRectangle(this.boundingRectangle);
+
+        let rectangle = this.boundingRectangle;
+        const transition = this.sectionProperties.transition;
+        if (transition) {
+            const t =
+                (performance.now() - transition.start) /
+                OtherViewGraphicSelectionSection.TRANSITION_MS;
+            if (t >= 1) this.sectionProperties.transition = null;
+            else {
+                const frame = OtherViewGraphicSelectionSection.lerpFrame(
+                    transition.from,
+                    [this.position[0], this.position[1], this.size[0], this.size[1]],
+                    t,
+                );
+                rectangle = cool.SimpleRectangle.fromCorePixels(frame);
+                this.containerObject.requestReDraw();
+            }
+        }
+
+        this.drawViewRectangle(rectangle);
+        // Canvas documents (decks and pages) show WHO holds the selection:
+        // they resorted to typing slide numbers at each other. Writer/Calc
+        // already name remote users on their cursors.
+        if (VulcanLiveCanvas.isCanvasDoc())
+            this.drawNameChip(rectangle);
         this.context.restore();
+    }
+
+    // A small color pill above the frame's top-left carrying the view's
+    // username. Same identity color as the frame; skipped when the roster
+    // has no name for the view yet. Anchored to the rect being DRAWN, so
+    // it rides a live glide.
+    private drawNameChip(anchorRectangle: cool.SimpleRectangle): void {
+        // getViewName lives on the runtime Leaflet map, not MapInterface.
+        const map: any = app.map;
+        const name = map && map.getViewName
+            ? map.getViewName(this.sectionProperties.viewId)
+            : null;
+        if (!name) return;
+
+        const fontPx = 10 * app.dpiScale;
+        this.context.font = String(fontPx) + 'px sans-serif';
+        this.context.textAlign = 'left';
+        this.context.textBaseline = 'middle';
+        const padX = 5 * app.dpiScale;
+        const height = 15 * app.dpiScale;
+        const width = this.context.measureText(name).width + 2 * padX;
+        const radius = height / 2;
+        const left = anchorRectangle.v1X - 0.5;
+        const top = anchorRectangle.v1Y - height - 3 * app.dpiScale;
+
+        this.context.beginPath();
+        this.context.moveTo(left + radius, top);
+        this.context.arcTo(left + width, top, left + width, top + height, radius);
+        this.context.arcTo(left + width, top + height, left, top + height, radius);
+        this.context.arcTo(left, top + height, left, top, radius);
+        this.context.arcTo(left, top, left + width, top, radius);
+        this.context.closePath();
+        this.context.fillStyle = this.sectionProperties.color;
+        this.context.fill();
+
+        this.context.fillStyle = '#ffffff';
+        this.context.fillText(name, left + padX, top + height / 2);
     }
 
     checkMyVisibility() {
@@ -71,11 +162,25 @@ class OtherViewGraphicSelectionSection extends CanvasSectionObject {
         let section: OtherViewGraphicSelectionSection;
         if (app.sectionContainer.doesSectionExist(sectionName)) {
             section = app.sectionContainer.getSectionWithName(sectionName) as OtherViewGraphicSelectionSection;
+            const samePart = section.sectionProperties.part === part;
+            const fromRect = [
+                section.position[0],
+                section.position[1],
+                section.size[0],
+                section.size[1],
+            ];
+            const moved =
+                fromRect[0] !== rectangle.pX1 ||
+                fromRect[1] !== rectangle.pY1 ||
+                fromRect[2] !== rectangle.pWidth ||
+                fromRect[3] !== rectangle.pHeight;
             section.sectionProperties.part = part;
             section.sectionProperties.mode = mode;
             section.size[0] = rectangle.pWidth;
             section.size[1] = rectangle.pHeight;
             section.setPosition(rectangle.pX1, rectangle.pY1);
+            if (moved && rectangle.pWidth > 0)
+                section.beginTransition(fromRect, samePart);
         }
         else {
             section = new OtherViewGraphicSelectionSection(viewId, rectangle, part, mode);

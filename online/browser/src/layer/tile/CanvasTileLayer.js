@@ -3,7 +3,7 @@
  * window.L.CanvasTileLayer is a layer with canvas based rendering.
  */
 
-/* global app JSDialog CanvasSectionContainer GraphicSelection CanvasOverlay CursorHeaderSection $ _ CPolyUtil CPolygon Cursor UNOKey cool OtherViewCellCursorSection RenderManager SplitSection TextSelections CellSelectionMarkers URLPopUpSection CalcValidityDropDown DocumentBase CellCursorSection FormFieldButton TextCursorSection CStyleData CSelections CReferences OtherViewGraphicSelectionSection CompareChangesLabelSection InternPointUtil InternBoundsUtil */
+/* global app JSDialog CanvasSectionContainer GraphicSelection CanvasOverlay CursorHeaderSection $ _ CPolyUtil CPolygon Cursor UNOKey cool OtherViewCellCursorSection RenderManager SplitSection TextSelections CellSelectionMarkers URLPopUpSection CalcValidityDropDown DocumentBase CellCursorSection FormFieldButton TextCursorSection CStyleData CSelections CReferences OtherViewGraphicSelectionSection CompareChangesLabelSection InternPointUtil InternBoundsUtil VulcanFilmstripFollow VulcanImpressFit VulcanWriterFit VulcanCaretReveal VulcanPdfCanvas VulcanCanvasAutosave VulcanImpressOverlap */
 
 function clamp(num, min, max)
 {
@@ -273,15 +273,146 @@ window.L.TileSectionManager = window.L.Class.extend({
 		if (!this._inZoomAnim) {
 			app.sectionContainer.setInZoomAnimation(true);
 			this._inZoomAnim = true;
+			this._vulcanSpecRungSent = undefined;
 			// Start RAF loop for zoom-animation
 			this._zoomAnimation();
 		}
+
+		this._vulcanSpeculativePrefetch(zoom);
+	},
+
+	/*
+	 * R6-7 lever L3: mid-gesture, predict the rung the release grammar will
+	 * commit and prefetch its viewport (RenderManager.prefetchZoomStop), so
+	 * the commit's tile wait exits on its first poll instead of swapping at
+	 * the deadline with holes (measured: the first new-rung tilecombine
+	 * left at +154ms AFTER finger-up on every doctype, while the server
+	 * answers a full viewport in 70-90ms).
+	 *
+	 * Prediction is the nearest rung — phone Impress and the sub-snap Calc
+	 * band commit exactly that; Calc's directional snap past 0.35 and a
+	 * floored commit (fit / legibility) land elsewhere, costing one wasted
+	 * viewport and today's wait, no worse than shipped. Phone chrome only.
+	 *
+	 * PHONE WRITER JOINS THIS AS OF R6-15. It was excluded, with the reason
+	 * "its browse-width re-vote relayouts on commit, so pre-commit tiles are
+	 * dead weight" — true while a pinch re-stated .uno:BrowseWidth. It no
+	 * longer does: VulcanWriterReflow.layoutPinned withholds the re-vote so a
+	 * pinch magnifies a fixed layout instead of re-wrapping it, and the
+	 * page-layout posture votes a constant -1 that the dedupe drops. Nothing
+	 * relayouts on a Writer zoom commit any more, so the predicted rung's
+	 * tiles are the tiles the commit will draw.
+	 *
+	 * That exclusion also became the expensive one to keep. Cross-rung phone
+	 * Writer was rare while every pinch cost a whole-document relayout;
+	 * optical zoom makes it the primary reading gesture, and it is the only
+	 * path left paying the full tile wait (the L6a fast arm covers same-rung
+	 * only).
+	 *
+	 * The commit-center math (_getZoomMapCenter -> _getZoomDocPos) ratchets
+	 * this._offset; snapshot/restore so a mid-gesture prediction cannot
+	 * disturb the live frame's pan clamp. typeof-guards keep the minimal
+	 * mocha painter rigs on the shipped path.
+	 */
+	_vulcanSpeculativePrefetch: function (zoom) {
+		var layer = this._layer;
+		if (typeof layer._vulcanPhoneChrome !== 'function' ||
+			!layer._vulcanPhoneChrome())
+			return;
+		if (typeof RenderManager === 'undefined' ||
+			typeof RenderManager.prefetchZoomStop !== 'function')
+			return;
+		var map = this._map;
+		var predicted = Math.round(map._limitZoom(zoom));
+		if (predicted === Math.round(map.getZoom()))
+			return;
+		if (predicted === this._vulcanSpecRungSent)
+			return;
+		this._vulcanSpecRungSent = predicted;
+		var savedOffset = this._offset && this._offset.clone ?
+			this._offset.clone() : undefined;
+		var center;
+		try {
+			center = this._getZoomMapCenter(predicted);
+		} finally {
+			if (savedOffset !== undefined)
+				this._offset = savedOffset;
+		}
+		if (!center)
+			return;
+		RenderManager.prefetchZoomStop(predicted, center);
 	},
 
 	zoomStepEnd: function (zoom, newCenter, mapUpdater, runAtFinish, noGap) {
 
-		if (!this._inZoomAnim || this._finishingZoom)
+		// TWO LANES LAND THE SAME TWO PHONE-PINCH DECISIONS HERE, on different
+		// surfaces: the SLIDES lane scoped them to phone Impress (below), the
+		// SHEETS lane shipped them for every document. Each phone doctype
+		// keeps its fix -- the DOCS arm below completes the set with the
+		// no-animation restore only -- while desktop stays on the stock path,
+		// the narrower contract the Impress lane deliberately drew (see
+		// MouseControl.onMultiTouchCancel).
+		//
+		// A two-finger TAP reaches here: onMultiTouchStart ran preZoomAnimation
+		// -- which hides the caret and the overlay markers -- but no move ever
+		// called zoomStep, so there is no animation to finish. Returning without
+		// runAtFinish left postZoomAnimation uncalled and the markers hidden
+		// until some later unrelated redraw happened to restore them. Measured
+		// 0 -> 1 postZoomAnimation calls on the rig.
+		//
+		// The `!this._finishingZoom` term makes this arm identical to running it
+		// after the guard below; it is hoisted only so that guard stays
+		// byte-identical, because ImpressPhonePinch.test.ts extracts this
+		// method's source and mutates that exact block back to its legacy form.
+		// `isCalc` is read defensively for the same reason: that test drives the
+		// painter with a minimal _layer stub carrying only the Impress pair, and
+		// a missing method there must read as "not Calc", not throw.
+		const vulcanPhoneCalc =
+			typeof this._layer.isCalc === 'function' &&
+			this._layer.isCalc() && this._layer._vulcanPhoneChrome();
+
+		if (vulcanPhoneCalc && !this._finishingZoom && !this._inZoomAnim) {
+			if (runAtFinish)
+				runAtFinish();
 			return;
+		}
+
+		// THE SAME RESTORE FOR PHONE WRITER (the DOCS lane). A two-finger
+		// TAP -- resting two fingers on the page without moving, the common
+		// re-grip -- ran preZoomAnimation (caret marker and knob to opacity
+		// 0, TextSelections.hideHandles) but never zoomStep, so nothing was
+		// animating and phone Writer fell through the guards below without
+		// runAtFinish: the caret marker and the selection teardrops stayed
+		// invisible -- the teardrops until a real moving pinch completed,
+		// because postZoomAnimation is the only caller of
+		// TextSelections.showHandles in the tree. Same hoisted shape as the
+		// Calc arm above: the `!this._finishingZoom` term keeps it identical
+		// to running after the guard below, which ImpressPhonePinch.test.ts
+		// pins byte-for-byte, and `typeof` keeps minimal mocha layer stubs
+		// reading as "not Writer" instead of throwing.
+		const vulcanPhoneWriter =
+			typeof this._layer.isWriter === 'function' &&
+			this._layer.isWriter() && this._layer._vulcanPhoneChrome();
+
+		if (vulcanPhoneWriter && !this._finishingZoom && !this._inZoomAnim) {
+			if (runAtFinish)
+				runAtFinish();
+			return;
+		}
+
+		// A no-move phone pinch ran preZoomAnimation but never started zoomStep;
+		// its finish callback still has to restore the hidden overlay state.
+		if (this._finishingZoom)
+			return;
+
+		const vulcanPhoneImpress =
+			this._layer.isImpress() && this._layer._vulcanPhoneChrome();
+
+		if (!this._inZoomAnim) {
+			if (vulcanPhoneImpress && runAtFinish)
+				runAtFinish();
+			return;
+		}
 
 		this._finishingZoom = true;
 
@@ -303,7 +434,10 @@ window.L.TileSectionManager = window.L.Class.extend({
 
 		var stopAnimation = noGap ? true : false;
 		var waitForTiles = false;
-		var waitTries = 30;
+		// Wall-clock, not RAF frames: the old 30-try counter was ~250ms on
+		// a 120Hz phone and ~500ms at 60Hz — the swap contract should not
+		// depend on the display's refresh rate. (R6-7)
+		var waitDeadline = undefined;
 		var finishingRAF = undefined;
 
 		var finishAnimation = function () {
@@ -326,22 +460,150 @@ window.L.TileSectionManager = window.L.Class.extend({
 				app.sectionContainer.setInZoomAnimation(false);
 				painter._inZoomAnim = false;
 
+				// Every zoom frame wrote app.twipsToPixels = base*scale and
+				// swapped in a zoom-frame viewedRectangle. A rung CHANGE heals
+				// both (_reset gates _updateTileTwips on tileZoomChanged); a
+				// SAME-RUNG settle never did, so the frame drift compounded
+				// pinch over pinch, all doctypes. Recompute from the rounded
+				// rung — never multiply the drift back out — then rebuild the
+				// rectangle. Hoisted ABOVE the phone fast arms below, which are
+				// pinned as exact source text by ImpressPhonePinch.test.ts;
+				// typeof-guarded because mocha rigs drive this with minimal
+				// _layer stubs.
+				if (zoom === map.getZoom() &&
+					typeof painter._layer._restoreRoundedRungTwips === 'function' &&
+					typeof painter._layer._syncTilePanePos === 'function') {
+					painter._layer._restoreRoundedRungTwips();
+					painter._layer._syncTilePanePos();
+				}
+
+				// A same-rung phone pinch can still translate the map, but its
+				// current-zoom tiles are already available. Commit the new center
+				// and finish without entering the tile-refetch wait below.
+				if (vulcanPhoneImpress && zoom === map.getZoom()) {
+					cancelAnimationFrame(finishingRAF);
+					mapUpdater(newMapCenterIntern);
+					app.sectionContainer.setZoomChanged(false);
+					map.enableTextInput();
+					map.focus(map.canAcceptKeyboardInput());
+					app.sectionContainer.requestReDraw();
+					painter._finishingZoom = false;
+					runAtFinish();
+					return;
+				}
+
+				// THE SAME SHORTCUT FOR PHONE CALC, and NOTHING TO REFETCH when the
+				// gesture landed on the zoom it started at. Every tile in view is
+				// already at this zoom, so the wait-for-tiles round trip below --
+				// setWaitForTiles, setZoomChanged and up to 500ms of a frozen,
+				// input-disabled canvas -- is entirely spent on a gesture that
+				// changed nothing. Before the nearest-rung settle in
+				// MouseControl.onMultiTouchEnd this branch was nearly unreachable,
+				// because ceil/floor guaranteed every pinch changed the zoom; now it
+				// is the common case for a small pinch. Measured on the rig: settles
+				// entered per pinch went 1.0 -> 0.0 for magnitudes under half a
+				// level, and stayed 1.0 for every pinch that did change the zoom.
+				//
+				// mapUpdater still runs: a pinch pans as well as zooms, and at
+				// unchanged zoom setView takes its own panBy path (Map.js:490)
+				// rather than a hard view reset.
+				//
+				// Kept as its own arm rather than folded into the Impress condition
+				// above: that block is mutated as exact source text by
+				// ImpressPhonePinch.test.ts, which also pins non-phone-Impress
+				// documents to the tile-wait path.
+				if (vulcanPhoneCalc && zoom === map.getZoom()) {
+					cancelAnimationFrame(finishingRAF);
+					mapUpdater(newMapCenterIntern);
+					app.sectionContainer.setZoomChanged(false);
+					map.enableTextInput();
+					map.focus(map.canAcceptKeyboardInput());
+					app.sectionContainer.requestReDraw();
+					painter._finishingZoom = false;
+					runAtFinish();
+					return;
+				}
+
+				// THE SAME SHORTCUT FOR PHONE WRITER (R6-7 lever L6a). A
+				// same-rung commit re-votes an IDENTICAL browse width -- the
+				// reflow vote is a function of viewport and zoom, both
+				// unchanged (VulcanWriterReflow) -- so no relayout follows
+				// and every tile in view is already at this rung. Measured
+				// on the slot-02 z1 rig (r6-7 baseline): the micro pinch
+				// spent the FULL exhausted wait -- +400ms of frozen,
+				// input-disabled canvas at 120Hz, ~double at 60Hz -- on a
+				// gesture that fetched nothing. Cross-rung Writer commits
+				// keep the wait below: those DO re-vote and refetch. Kept as
+				// its own arm, after the Calc one: ImpressPhonePinch.test.ts
+				// pins the Impress arm's exact bytes and executes this whole
+				// method, so additions stay outside the pinned spans.
+				if (vulcanPhoneWriter && zoom === map.getZoom()) {
+					cancelAnimationFrame(finishingRAF);
+					mapUpdater(newMapCenterIntern);
+					app.sectionContainer.setZoomChanged(false);
+					map.enableTextInput();
+					map.focus(map.canAcceptKeyboardInput());
+					app.sectionContainer.requestReDraw();
+					painter._finishingZoom = false;
+					runAtFinish();
+					return;
+				}
+
 				painter.setWaitForTiles(true);
 				// Set view and paint the tiles if all available.
 				mapUpdater(newMapCenterIntern);
+				// VULCAN belt (slides-blank-zoom): the committed view must
+				// hold painted content — reconcile/clamp per doctype (see
+				// _vulcanClampCommittedView) BEFORE the wait below starts
+				// polling for its tiles. typeof-guarded because the mocha
+				// rigs drive this method with minimal _layer stubs, which
+				// must read as "no belt", not throw; phone chrome only
+				// inside, so desktop and tablet keep the stock pipeline.
+				if (typeof painter._layer._vulcanClampCommittedView ===
+					'function') {
+					painter._layer._vulcanClampCommittedView();
+					// The belt's layout.scroll queues its tile re-request on
+					// the ASYNC layouting queue — measured landing at +365ms
+					// after finger-up (z1/z3 rigs, in1 leg) while the wait
+					// below polls the post-belt view from its first frame:
+					// the request the wait depends on went out 200ms after
+					// the wait began, and every big zoom-in swapped at the
+					// deadline with holes. Request the post-belt view NOW —
+					// update() reads the already-scrolled layout state
+					// synchronously. Phone chrome only, like the belt itself;
+					// desktop's stock pipeline keeps its own update timing.
+					// The typeof read keeps the mocha zoomStepEnd rigs — a
+					// bare Function scope without the bundle's globals — on
+					// the shipped path. (R6-7 lever L3)
+					if (typeof RenderManager !== 'undefined' &&
+						typeof painter._layer._vulcanPhoneChrome ===
+							'function' && painter._layer._vulcanPhoneChrome())
+						RenderManager.update();
+				}
 				waitForTiles = true;
+				waitDeadline = performance.now() + 500;
 			}
 
 			if (waitForTiles) {
 				// Wait until we get all tiles or wait time exceeded.
-				if (waitTries <= 0 || painter._tilesSection.haveAllTilesInView()) {
+				if (performance.now() >= waitDeadline ||
+					painter._tilesSection.haveAllTilesInView()) {
 					// All done.
 					waitForTiles = false;
 					cancelAnimationFrame(finishingRAF);
 					painter.setWaitForTiles(false);
 					app.sectionContainer.setZoomChanged(false);
 					map.enableTextInput();
-					map.focus(map.canAcceptKeyboardInput());
+					// VULCAN (code review): a trackpad pinch (ctrl+wheel)
+					// over the document is no keyboard gesture, and on the vbox
+					// rig this restore took the keyboard from the agent composer:
+					// the next words typed there went into a cell. While the host
+					// owns the keyboard and this frame does not hold it, it stays
+					// there (the caret path's test, _updateCursorAndOverlay). The
+					// policy test comes first for the rigs that run this over a
+					// stub map.
+					if (!(map._vulcanAutoFocusOnLoad === false && !document.hasFocus()))
+						map.focus(map.canAcceptKeyboardInput());
 					// Paint everything.
 					app.sectionContainer.requestReDraw();
 					// Don't let a subsequent pinchZoom start before finishing all steps till this point.
@@ -350,8 +612,6 @@ window.L.TileSectionManager = window.L.Class.extend({
 					runAtFinish();
 					return;
 				}
-				else
-					waitTries -= 1;
 			}
 
 			finishingRAF = requestAnimationFrame(finishAnimation);
@@ -371,6 +631,19 @@ window.L.CanvasTileLayer = window.L.Layer.extend({
 		tileSize: window.tileSize,
 		opacity: 1,
 
+		// DEAD OPTION -- reads as "phones only draw tiles once the pan has
+		// stopped", and it does not do that, because nothing reads it. This
+		// name is inherited from Leaflet's own L.TileLayer, which this class
+		// replaced; `updateWhenIdle` occurs exactly once in the whole browser
+		// tree (this line), and `L.setOptions` only copies options onto the
+		// instance. The pan-time tile path is device-neutral and does NOT
+		// consult it: `getEvents` throttles `move` by `updateInterval` and
+		// always calls `_moveThrottledUpdate` -> `RenderManager.update()`, and the only
+		// move-time filter in the pipeline is the duplicate-request dedup in
+		// BitmapTileManager.removeIrrelevantsFromCoordsQueue, keyed on
+		// `_moveInProgress`, not on the device. Left in place rather than
+		// deleted: removing it changes no behaviour, and an integrator may
+		// pass the name in. Do not "fix" phone pan rendering by flipping it.
 		updateWhenIdle: (window.mode.isSmallScreenDevice() || window.mode.isTablet()),
 		updateInterval: 200,
 
@@ -454,8 +727,41 @@ window.L.CanvasTileLayer = window.L.Layer.extend({
 
 		this._canvas = window.L.DomUtil.createWithId('canvas', 'document-canvas', this._canvasContainer);
 		this._canvas.style.visibility = 'hidden';
-		this._canvas.role = 'img';
-		this._canvas.ariaLabel = _('Online Editor');
+		// setAttribute, not the ARIA reflection IDL properties (`.role` /
+		// `.ariaLabel`). Reflection is recent -- `Element.ariaLabel` is
+		// Safari 16.4+, and `Element.role` is later still (Chrome 119,
+		// Firefox 119, Safari 16.4) -- and where it is missing BOTH lines
+		// below silently become plain JS expandos: the element ends up with
+		// no `role` attribute and no `aria-label` attribute, and a screen
+		// reader gets nothing.
+		//
+		// Two reasons this is the wrong place to rely on it.
+		//
+		// 1. It is against the grain of the tree. Counted, not assumed:
+		//    `grep -rn "setAttribute('role'" src/` is 96 hits, `grep -rEn
+		//    "\w\.role = " src/` is 2 -- and after this change both of those
+		//    survivors are jsdialog widgets (Widget.Containers.ts:80,
+		//    Widget.Combobox.js:247), a separate surface with the same latent
+		//    problem that is not this file's to fix. This WAS the tree's only
+		//    `.ariaLabel =`; after this change that grep returns nothing.
+		//
+		// 2. It silently defeats the phone Impress fix that depends on it.
+		//    ImpressTileLayer._updateSlideAccessibleName re-labels THIS
+		//    element with 'Slide N of M' and already writes through
+		//    setAttribute for exactly the Safari reason above (the note at
+		//    ImpressTileLayer.js:356-358). But <canvas> has no implicit ARIA
+		//    role, so with the `role` line no-oped the label lands on a
+		//    role-less generic element and is not reliably exposed -- the
+		//    label half was hardened and the role half it needs was left on
+		//    the unsafe path.
+		//
+		// Where reflection DOES exist this is a no-op: both properties
+		// reflect to these same two attributes, so the resulting DOM is
+		// byte-identical on every modern browser. No gate, because there is
+		// no behaviour to gate -- this is the same accessible name on every
+		// doctype and every form factor, just written so it survives.
+		this._canvas.setAttribute('role', 'img');
+		this._canvas.setAttribute('aria-label', _('Online Editor'));
 
 		app.sectionContainer = new CanvasSectionContainer(this._canvas, this.isCalc() /* disableDrawing? */);
 		app.activeDocument = new DocumentBase();
@@ -486,6 +792,34 @@ window.L.CanvasTileLayer = window.L.Layer.extend({
 		// rendering is enabled. The tile grid stays empty in this mode.
 		if (RenderManager.isVectorRendering()) {
 			app.sectionContainer.addSection(new cool.VectorContentSection());
+		}
+
+		// Rubber-band select visual for the live canvas (Impress and Draw):
+		// core already marks the objects an empty-canvas drag covers, but its
+		// rubber-band overlay never reaches LOK clients — this draws it.
+		if (this.isImpress() || this.isDraw()) {
+			app.sectionContainer.addSection(new cool.VulcanImpressMarqueeSection());
+			// The PDF half of the canvas: pages that arrive as protected
+			// pictures are decomposed for an edit session. A PDF opens as a
+			// drawing; a deck would post every slide to the PDF-only routes.
+			if (this.isDraw()) VulcanPdfCanvas.attach();
+			// The page canvas saves itself a few seconds after the last edit
+			// (a deck keeps the server's idle autosave).
+			VulcanCanvasAutosave.attach();
+			// A PDF is a finished document: the spellchecker's red underlines
+			// (COMAR, a statute's citation, a person's name) are not the
+			// reader's. Switch automatic spellcheck off once the engine reports
+			// it on; the command is a toggle, so only a reported "true" flips it.
+			if (this.isDraw()) {
+				let spellSwitched = false;
+				this._map.on('commandstatechanged', (e) => {
+					if (spellSwitched || !e || e.commandName !== '.uno:SpellOnline') return;
+					if (e.state === 'true' || e.state === true) {
+						spellSwitched = true;
+						app.socket.sendMessage('uno .uno:SpellOnline');
+					}
+				});
+			}
 		}
 
 		this._canvasOverlay = new CanvasOverlay(this._map, app.sectionContainer.getContext());
@@ -641,6 +975,17 @@ window.L.CanvasTileLayer = window.L.Layer.extend({
 	},
 
 	_updateTileTwips: function () {
+		this._restoreRoundedRungTwips();
+
+		if (this._docType === 'spreadsheet')
+			this._syncTileContainerSize();
+	},
+
+	// The rounded-rung half of _updateTileTwips, split out so the same-rung
+	// settle in zoomStepEnd can heal the globals without re-entering
+	// _syncTileContainerSize — that is a resize responder (setView,
+	// _fitWidthZoom) and nothing resized during a same-rung pinch.
+	_restoreRoundedRungTwips: function () {
 		// smaller zoom = zoom in
 		const factor = Math.pow(1.2, (this._map.options.zoom - this._tileZoom));
 		const tileWidthTwips = Math.round(this.options.tileWidthTwips * factor);
@@ -648,9 +993,6 @@ window.L.CanvasTileLayer = window.L.Layer.extend({
 		app.twipsToPixels = RenderManager.tileSize / tileWidthTwips;
 		app.pixelsToTwips = 1 / app.twipsToPixels;
 		app.tile.size.pX = app.tile.size.pY = RenderManager.tileSize;
-
-		if (this._docType === 'spreadsheet')
-			this._syncTileContainerSize();
 	},
 
 	_checkSpreadSheetBounds: function (newZoom) {
@@ -703,6 +1045,28 @@ window.L.CanvasTileLayer = window.L.Layer.extend({
 		RenderManager.resetPreFetching(true);
 	},
 
+	// The `move` throttle's target, deliberately NOT `_move`. Map.panBy fires
+	// movestart, move and moveend in one statement, so between two panBy
+	// calls `_moveInProgress` is already false -- and the throttle's queued
+	// trailing call runs from its own timer, i.e. always between panBy calls.
+	// Through `_move` it returned without updating, and because that trailing
+	// call re-arms the lock, every later leading edge of the gesture was
+	// queued and dropped the same way. A continuous pan (a finger drag, a
+	// fling, a selection handle held at the screen edge driving
+	// ScrollSection's autoscroll) therefore requested no tiles after its
+	// first frame, and everything it scrolled into stayed blank until the
+	// motion stopped. Updating here regardless of the flag keeps one update
+	// per updateInterval for the whole gesture; the settle still adds the
+	// last one. `_container` is nulled in onRemove, so a timer left over from
+	// a torn-down layer cannot update behind its replacement.
+	_moveThrottledUpdate: function () {
+		if (!this._container)
+			return;
+
+		RenderManager.update();
+		RenderManager.resetPreFetching(true);
+	},
+
 	_isInternInView: function (position) {
 		var centerOffset = this._map._getCenterOffset(position);
 		var viewHalf = this._map.getSize()._divideBy(2);
@@ -713,10 +1077,98 @@ window.L.CanvasTileLayer = window.L.Layer.extend({
 	},
 
 	_moveEnd: function () {
-		this._move();
+		// THROTTLED, because "moveend" is not the end of anything during a drag.
+		//
+		// Map.panBy fires `move` and `moveend` in ONE statement (Map.js:481),
+		// and a touch drag calls panBy once per animation frame. `move` is
+		// throttled to updateInterval; `moveend` was not, and this called
+		// _move() raw -- so the throttle was bypassed sixty times a second and
+		// every frame of every scroll paid for a full tile-cache sweep, a sort
+		// of the visible set, and a clientvisiblearea message on the socket.
+		// That is the largest block of non-paint main-thread work on the scroll
+		// path, and it is why scrolling stutters more the longer you scroll.
+		//
+		// 🔴 AN EARLIER REVISION OF THIS COMMENT SAID sharing the throttled
+		// instance was safe because "app.util.throttle keeps a trailing call,
+		// so the last panBy of a gesture still produces a real _move() once
+		// the lock expires. The settle is not dropped, it is coalesced."
+		//
+		// THAT IS REFUTED BY THE THREE LINES IT SAT ON TOP OF. The trailing
+		// call DID fire -- and returned at `if (!this._moveInProgress) return`
+		// (_move, above), because `_moveInProgress = false` ran on the
+		// statement below, synchronously, long before the lock expired. So the
+		// settle was not coalesced, it was DELETED, and the code that deleted
+		// it was in the same function as the comment claiming it survived.
+		//
+		// What that costs: Map.panBy fires movestart, move and moveend in one
+		// statement (Map.js:489), so during a drag the throttled `move`
+		// updates once per updateInterval (through _moveThrottledUpdate, which
+		// does not read the flag -- through `_move` it updated only on the
+		// gesture's first frame) -- the throttling win is real and is kept.
+		// It is the LAST panBy that has no leading edge to catch
+		// it: you stop scrolling and the newly revealed strip stays blank,
+		// with nothing scheduled to fill it. Every form factor, not just
+		// phones. Before the campaign, `moveend` called `_move()` raw and
+		// synchronously, i.e. while the flag was still true, which is why the
+		// settle used to arrive.
+		//
+		// THE SETTLE IS NOW ITS OWN SCHEDULE, and deliberately not the `move`
+		// throttle: "the gesture ended" is a TRAILING-only question, and
+		// answering it needs a timer that each new panBy pushes back rather
+		// than one that a leading edge can consume. It also does not read
+		// `_moveInProgress` -- the whole point is that it runs after the flag
+		// has gone down.
+		//
+		// Everything else here stays immediate: they are cheap bookkeeping and
+		// _moveInProgress in particular gates other code.
+		this._scheduleMoveSettle();
 		this._moveInProgress = false;
 		this._moveTileRequests = [];
 		app.updateFollowingUsers();
+	},
+
+	// One update, updateInterval after the LAST moveend rather than after the
+	// first. A drag pushes it back on every frame; when the frames stop, it
+	// fires once. Cancelled on remove so a torn-down layer cannot update
+	// behind its replacement.
+	//
+	// ⚠ MEASURED, AND IT BUYS NOTHING OBSERVABLE. An earlier version of this
+	// comment said it "fills whatever the gesture revealed", and the commit
+	// that added it called the missing settle a P0. Both overstate it. On the
+	// live build, phone profile, Dinosaurs.docx at zoom 14 with 5979 CSS px of
+	// pan headroom, counting `tilecombine` after the finger stops:
+	//
+	//     before the fix   1027, 1035, 1025 ms
+	//     after the fix    1226, 1227, 1231 ms  (and 1227/1227/1234 on a repeat)
+	//
+	// i.e. UNCHANGED. Tiles were never actually lost: another path -- the
+	// server's own invalidation following `clientvisiblearea` -- fetches them
+	// about 1.2 s after the gesture, and it did so before this existed. One
+	// run showed 262 ms on its first gesture and that was an outlier on a cold
+	// document, not a result; two repeat runs did not reproduce it.
+	//
+	// This is kept anyway, and the reason is not the tiles. `_moveEnd`'s
+	// trailing `_move` genuinely could not run -- `_moveInProgress` is cleared
+	// on the statement below the call -- so the comment there described
+	// behaviour that did not exist, and the next person to rely on moveend to
+	// settle anything would have inherited that. The cost is one update per
+	// GESTURE, which is what the raw `_move()` did before the throttle went
+	// in; the per-FRAME cost the throttle removed stays removed.
+	_scheduleMoveSettle: function () {
+		if (this._moveSettleTimer)
+			clearTimeout(this._moveSettleTimer);
+		this._moveSettleTimer = setTimeout(window.L.bind(function () {
+			this._moveSettleTimer = null;
+			RenderManager.update();
+			RenderManager.resetPreFetching(true);
+		}, this), this.options.updateInterval);
+	},
+
+	_cancelMoveSettle: function () {
+		if (this._moveSettleTimer) {
+			clearTimeout(this._moveSettleTimer);
+			this._moveSettleTimer = null;
+		}
 	},
 
 	_requestNewTiles: function () {
@@ -731,9 +1183,70 @@ window.L.CanvasTileLayer = window.L.Layer.extend({
 		var newClientZoom = 'tilepixelwidth=' + RenderManager.tileSize + ' ' +
 		    'tilepixelheight=' + RenderManager.tileSize + ' ' +
 		    'tiletwipwidth=' + app.tile.size.x + ' ' +
-		    'tiletwipheight=' + app.tile.size.y + ' ' +
-		    'dpiscale=' + window.devicePixelRatio + ' ' +
-		    'zoompercent=' + this._map.getZoomPercent()
+		    'tiletwipheight=' + app.tile.size.y;
+
+		// Calc phone chrome only: withhold the zoom pair so our zoom never
+		// reaches the saved document.
+		//
+		// zoompercent becomes ScViewData::oExportZoom in core
+		// (ChildSession.cpp setViewOption "zoom" -> init.cxx setExportZoom),
+		// and the Excel exporter writes it straight into the file:
+		// xeview.cxx `moExportZoom ? *moExportZoom : mnNormalZoom` -> the
+		// sheet's zoomScale/zoomScaleNormal. Upstream does that on purpose,
+		// because on desktop the zoom IS the user's intent and is worth
+		// persisting. On the phone chrome it is OURS -- a legibility constant
+		// picked for a 390px screen -- so persisting it would silently rewrite
+		// a workbook a customer had stored at, say, zoomScale="75".
+		//
+		// THIS WITHHOLD IS NECESSARY BUT NOT SUFFICIENT ON ITS OWN, and the
+		// other half of the fix is in the engine. Unsetting oExportZoom only
+		// takes the first branch of that ternary; the `: mnNormalZoom`
+		// fallback is derived from OUR zoom by a second, ungated route:
+		//
+		//   tiletwipwidth (sent UNCONDITIONALLY, four lines above this gate)
+		//     -> ScModelObj::setClientZoom derives newZoomX from it
+		//     -> SetZoom(bAll=true) sets every tab's fZoomY = 1.2
+		//     -> WriteExtOptions sets mnNormalZoom = fZoomY*100 = 120
+		//     -> xeview.cxx:387 falls back to it -> zoomScale="120"
+		//
+		// Index 11 was chosen partly because its reported percentage equals
+		// its real scale, so the two branches of that ternary carried the SAME
+		// number and withholding alone bought nothing.
+		//
+		// That second route is now CLOSED in the engine, and .ods's third one
+		// with it. tiletwipwidth cannot be withheld -- the tile grid is the
+		// rendering zoom -- so the fix is at the serialisation sites instead,
+		// copying OverrideWithKitFreeze: ScViewData::SetZoom snapshots the
+		// DOCUMENT's zoom before a COKit client's first zoom overwrites
+		// fZoomY, and all three writers (WriteExtOptions for .xlsx, both
+		// WriteUserDataSequence for .ods) export
+		// ScViewData::GetKitExportZoomPercent instead of the live value. See
+		// engine/sc/source/ui/view/viewdata.cxx GetKitExportZoomPercent.
+		//
+		// Keep the withhold anyway: it removes one route, it costs nothing,
+		// and it is what keeps the Calc phone chrome from depending on a
+		// vendored core patch surviving the next upstream rebase.
+		//
+		// Both halves are pinned by scripts/display-state-export-guard.mjs --
+		// W1 fails if this gate is removed, widened or steps off the zoom
+		// pair, and E1 fails if any of the three engine call sites or the
+		// snapshot goes away. Wet-tested end to end by
+		// a host end-to-end test,
+		// which stores zoomScale=75, drives the phone at live zoom 120, saves,
+		// and asserts the stored pair came back 75.
+		//
+		// ChildSession requires all 7 tokens before it calls setViewOption at
+		// all, so the shorter form is an already-supported shape and needs no
+		// wsd or core change. dpiscale rides the same gate but is a no-op in
+		// the engine (only "zoom" is handled), so dropping it costs nothing.
+		// Desktop, tablet and the other doctypes are untouched.
+		var withholdExportZoom = this.isCalc() &&
+			window.mode.isSmallScreenDevice() &&
+			document.documentElement.classList.contains('vulcan-mobile-chrome');
+
+		if (!withholdExportZoom)
+			newClientZoom += ' dpiscale=' + app.dpiScale + ' ' +
+			    'zoompercent=' + this._map.getZoomPercent();
 
 		if (this._clientZoom !== newClientZoom || forceUpdate || this.isImpress()) {
 			// the zoom level has changed
@@ -860,6 +1373,8 @@ window.L.CanvasTileLayer = window.L.Layer.extend({
 		else if (textMsg.startsWith('graphicselection:')) {
 			this._map.fire('resettopbottompagespacing');
 			GraphicSelection.onMessage(textMsg);
+			if (app.definitions && app.definitions.vulcanCalcCursorEcho && !textMsg.match('EMPTY'))
+				app.definitions.vulcanCalcCursorEcho.onGraphicSelection();
 		}
 		else if (textMsg.startsWith('graphicinnertextarea:')) {
 			return; // Not used.
@@ -881,6 +1396,13 @@ window.L.CanvasTileLayer = window.L.Layer.extend({
 		}
 		else if (textMsg.startsWith('referenceclear:')) {
 			this._clearReferences();
+			// The one message that means "there are no references any more".
+			// _clearReferences itself is NOT the site: _updateReferenceMarks
+			// calls it on every sheet switch before re-adding the marks for
+			// the new part, and dropping the colours there would blank the
+			// formula text on a state that still has references.
+			if (window.VulcanFormulaRefColors)
+				window.VulcanFormulaRefColors.clear();
 		}
 		else if (textMsg.startsWith('invalidatecursor:')) {
 			this._onInvalidateCursorMsg(textMsg);
@@ -1004,6 +1526,23 @@ window.L.CanvasTileLayer = window.L.Layer.extend({
 		}
 		else if (textMsg.startsWith('unocommandresult:')) {
 			this._onUnoCommandResultMsg(textMsg);
+		}
+		else if (textMsg.startsWith('transformeddocumentstructure:')) {
+			// Ack for an interactive transformdocumentstructure (the Impress
+			// agent bridge's SlideCommand batches). The kit answers on this
+			// broker-shaped frame, not unocommandresult; surface it as the
+			// 'commandresult' event the bridge awaits.
+			try {
+				var transformResult = JSON.parse(
+					textMsg.substring('transformeddocumentstructure:'.length));
+				this._map.fire('commandresult', {
+					commandName: '.uno:TransformDocumentStructure',
+					success: !transformResult || transformResult.success !== false,
+					result: transformResult,
+				});
+			} catch (e) {
+				window.app.console.error('Failed to parse transformeddocumentstructure: ' + e);
+			}
 		}
 		else if (textMsg.startsWith('aichatresult:')) {
 			try {
@@ -1161,10 +1700,15 @@ window.L.CanvasTileLayer = window.L.Layer.extend({
 		else if (textMsg.startsWith('redlinetablemodified:')) {
 			obj = JSON.parse(textMsg.substring('redlinetablemodified:'.length + 1));
 			app.sectionContainer.getSectionWithName(app.CSections.CommentList.name).onACKComment(obj);
+			// Surface the engine's push as a map event (same pattern as
+			// 'comment:' above) so listeners — the Writer agent bridge's
+			// event-driven redline ack — see it without polling.
+			this._map.fire('redlinetablemodified', obj);
 		}
 		else if (textMsg.startsWith('redlinetablechanged:')) {
 			obj = JSON.parse(textMsg.substring('redlinetablechanged:'.length + 1));
 			app.sectionContainer.getSectionWithName(app.CSections.CommentList.name).onACKComment(obj);
+			this._map.fire('redlinetablechanged', obj);
 		}
 		else if (textMsg.startsWith('applicationbackgroundcolor:')) {
 			app.sectionContainer.setClearColor('#' + textMsg.substring('applicationbackgroundcolor:'.length + 1).trim());
@@ -1190,7 +1734,7 @@ window.L.CanvasTileLayer = window.L.Layer.extend({
 			this._map.lockAccessibilityOn();
 		}
 		else if (textMsg.startsWith('a11y')) {
-			if (!window.prefs.getBoolean('accessibilityState')) {
+			if (!window.isAccessibilityStateEffective()) {
 				window.app.console.warn(
 					'dropping a11y event received with accessibility disabled: ' + textMsg);
 				return;
@@ -1369,6 +1913,8 @@ window.L.CanvasTileLayer = window.L.Layer.extend({
 			clearTimeout(this._previewInvalidator);
 			this._previewInvalidator = setTimeout(window.L.bind(this._invalidatePreviews, this), this.options.previewInvalidationTimeout);
 		}
+
+		return command;
 	},
 
 
@@ -1466,7 +2012,11 @@ window.L.CanvasTileLayer = window.L.Layer.extend({
 		else {
 			this._map.fire('commandvalues', {
 				commandName: obj.commandName,
-				commandValues: obj.commandValues
+				commandValues: obj.commandValues,
+				// Fork: Writer/Impress engine responses carry no commandName
+				// wrapper ({redlines}/{Targets}/{DocStructure}); the Vulcan
+				// bridges match on the raw payload's key instead.
+				rawValues: obj
 			});
 		}
 	},
@@ -1509,6 +2059,9 @@ window.L.CanvasTileLayer = window.L.Layer.extend({
 		}
 		this._lastFormula = newFormula;
 		this._map.fire('cellformula', {formula: newFormula});
+		// Vulcan: the cell text confirms (or contradicts) the Calc echo.
+		if (app.definitions && app.definitions.vulcanCalcTextEcho)
+			app.definitions.vulcanCalcTextEcho.onCellFormula(newFormula);
 
 		// Clear pending error; statechanged CellFormulaError will set it
 		// if the new cell has one.
@@ -1541,10 +2094,32 @@ window.L.CanvasTileLayer = window.L.Layer.extend({
 	_onCalcFunctionListMsg: function (textMsg) {
 		if (textMsg.startsWith('hidetip')) {
 			this._map.fire('closepopup');
+			// The phone owns nothing for 'closepopup' on this surface
+			// (AutoCompletePopup's jsdialog id never exists there), so core's
+			// last-writer-wins tip convergence — hidetip bursts per keystroke
+			// and at ✓-commit — was a no-op: the suggestion surface froze at
+			// its last list, survived the commit, and a tap aimed at the grid
+			// sent `completefunction` into the committed cell. Honour hidetip
+			// by clearing the rail's function face.
+			if (window.mode.isSmallScreenDevice())
+				this._vulcanScheduleSuggestionRailClear();
 		} else {
 			var funcData = JSON.parse(textMsg);
 
 			if (window.mode.isSmallScreenDevice()) {
+				this._vulcanCancelSuggestionRailClear();
+
+				// G28-REVISED (c): a typed-prefix suggestion list is the
+				// RAIL's face, not a wizard. The fx BROWSE list — the whole,
+				// categorised catalogue — keeps the full screen, which is the
+				// right shape for it, so the two are told apart before either
+				// surface is built. Both discriminators are core's own and
+				// neither is a marker this file stamps: `wholeList` is set for
+				// the browse payload (and is what assigns _functionWizardData
+				// below), `categories` only ever arrives on it.
+				if (this._vulcanRouteCalcSuggestionsToRail(funcData))
+					return;
+
 				this._closeMobileWizard();
 
 				var data = {
@@ -1563,6 +2138,26 @@ window.L.CanvasTileLayer = window.L.Layer.extend({
 				if (funcData.wholeList)
 					this._map._functionWizardData = data;
 
+				// VO-P-0003. The categorised BROWSE catalogue is a full-screen
+				// four-surface browser on phone chrome, not a wizard tree: the
+				// reference renders it that way (M-0010/M-0011) and the wizard
+				// is the A/+ bottom-sheet machinery, which is the wrong shape.
+				//
+				// This re-renders the SAME payload the wizard was already
+				// given — no new data source, no second catalogue — so the
+				// _functionWizardData assignment above is left intact for the
+				// desktop/tablet paths that still read it.
+				//
+				// Falls through to the wizard whenever the browser is not
+				// available, so a failure here degrades to the old surface
+				// rather than to nothing.
+				var vulcanBrowser = window.VulcanCalcFunctionBrowser;
+				if (funcData.categories && vulcanBrowser &&
+				    document.documentElement.classList.contains('vulcan-mobile-chrome')) {
+					vulcanBrowser.open(funcData);
+					return;
+				}
+
 				this._openMobileWizard(data);
 			}
 			else {
@@ -1570,6 +2165,67 @@ window.L.CanvasTileLayer = window.L.Layer.extend({
 				this._map.fire('sendformulatext', {data: functionList});
 			}
 		}
+	},
+
+	/*
+	 * The typed-prefix arm of `calcfunctionlist:` — true when this payload was
+	 * handed to the rail and the wizard must not open for it.
+	 *
+	 * Fails CLOSED in every direction: no live edit, a categorised or
+	 * whole-list payload, or no rail built, and the caller falls through to
+	 * the wizard exactly as it always did.
+	 *
+	 * The phone-chrome gate is the RAIL'S OWN EXISTENCE and is not re-derived
+	 * here: Control.UIManager builds calcOperatorStrip nowhere but behind
+	 * `isSmallScreenDevice() && vulcan-mobile-chrome` (a registered gate), so
+	 * a second inline copy of that test could only ever drift from it.
+	 *
+	 * The live-edit marker is likewise REUSED — it is the same signal
+	 * §13-CALC.5 raises the rail on, so the rail's visibility and its contents
+	 * cannot drift apart about whether an edit is live, and tapping fx with no
+	 * edit live keeps the browse list's full screen.
+	 */
+	_vulcanRouteCalcSuggestionsToRail: function (funcData) {
+		if (!document.documentElement.classList.contains('vulcan-formula-editing'))
+			return false;
+		if (!this._map || !this._map.calcOperatorStrip)
+			return false;
+		if (!funcData || funcData.wholeList || funcData.categories)
+			return false;
+		// The typed-prefix payload is a bare ARRAY of {index, signature,
+		// description} — the same shape _onCalcFunctionList walks below, which
+		// is the only shape that ever reaches its flat arm. Anything else is
+		// not a suggestion list and belongs to the wizard.
+		if (!Array.isArray(funcData))
+			return false;
+		var names = [];
+		for (var i = 0; i < funcData.length; ++i) {
+			var signature = funcData[i] && funcData[i].signature;
+			if (typeof signature === 'string' && signature !== '')
+				names.push(signature.split('(')[0]);
+		}
+		this._map.fire('vulcancalcfunctions', { names: names });
+		return true;
+	},
+
+	// One frame of settle between core's hidetip and the face clearing: core
+	// interleaves list and hidetip WITHIN a keystroke (measured list@t,
+	// hidetip@t+115ms), so an immediate clear would blink the rail back to
+	// symbols per character typed. A fresh calcfunctionlist inside the frame
+	// cancels it.
+	_vulcanScheduleSuggestionRailClear: function () {
+		if (this._vulcanSuggestionClearFrame !== undefined) return;
+		this._vulcanSuggestionClearFrame = requestAnimationFrame(function () {
+			this._vulcanSuggestionClearFrame = undefined;
+			if (this._map && typeof this._map.fire === 'function')
+				this._map.fire('vulcancalcfunctions', { names: [] });
+		}.bind(this));
+	},
+
+	_vulcanCancelSuggestionRailClear: function () {
+		if (this._vulcanSuggestionClearFrame === undefined) return;
+		cancelAnimationFrame(this._vulcanSuggestionClearFrame);
+		this._vulcanSuggestionClearFrame = undefined;
 	},
 
 	_getCalcFunctionListEntry: function(name, category, index, signature, description) {
@@ -1645,8 +2301,16 @@ window.L.CanvasTileLayer = window.L.Layer.extend({
 			this._map.options.doc, '/download/' + command.downloadid);
 
 		this._map.hideBusy();
-		if (this._map['wopi'].DownloadAsPostMessage) {
-			this._map.fire('postMessage', {msgId: 'Download_As', args: {Type: command.id, URL: url, filename: command.filename}});
+		var hostWordDownload = command.id === 'export' &&
+			this._map['wopi'].HostWordDownloads &&
+			/\.docx?$/i.test(command.filename || '');
+		if (this._map['wopi'].DownloadAsPostMessage || hostWordDownload) {
+			var exportArgs = {Type: command.id, URL: url, filename: command.filename};
+			if (command.id === 'export') {
+				var registered = this._map['wopi']._registerHostExport(url);
+				if (registered) Object.assign(exportArgs, registered);
+			}
+			this._map.fire('postMessage', {msgId: 'Download_As', args: exportArgs});
 		}
 		else if (command.id === 'print') {
 			if (this._map.options.print === false || window.L.Browser.cypressTest) {
@@ -1739,13 +2403,35 @@ window.L.CanvasTileLayer = window.L.Layer.extend({
 
 		OtherViewGraphicSelectionSection.addOrUpdateGraphicSelectionIndicator(viewId, strTwips, parseInt(obj.part), obj.mode !== undefined ? parseInt(obj.mode): 0);
 
+		this._vulcanNoteViewPart(viewId, parseInt(obj.part));
+
 		if (app.getFollowedViewId() === viewId && app.isFollowingUser()) {
 			if (this.isImpress() || this.isDraw() || this.isWriter()) {
 				this.goToOtherUserView(viewId);
 			}
 		}
 
+		this._vulcanNoteViewActivity(viewId, textMsg);
 		this._saveMessageForReplay(textMsg, viewId);
+	},
+
+	// the people list's "Active now" / "Active 6m ago" comes from
+	// other views' cursor and selection messages. UserList.noteViewMessage
+	// decides which of them are moves; replays and join-time state are not.
+	_vulcanNoteViewActivity: function (viewId, textMsg) {
+		if (this._map.userList) this._map.userList.noteViewMessage(viewId, textMsg);
+	},
+
+	// Which slide each OTHER view is on, fed by the per-view messages that
+	// already carry a part. Presence surfaces (the filmstrip dots) listen
+	// for 'vulcanviewparts' instead of re-parsing view messages.
+	_vulcanNoteViewPart: function (viewId, part) {
+		if (!this.isImpress() && !this.isDraw()) return;
+		if (isNaN(part)) return;
+		if (!this._vulcanViewParts) this._vulcanViewParts = {};
+		if (this._vulcanViewParts[viewId] === part) return;
+		this._vulcanViewParts[viewId] = part;
+		this._map.fire('vulcanviewparts');
 	},
 
 	_onCellCursorMsg: function (textMsg) {
@@ -1786,7 +2472,7 @@ window.L.CanvasTileLayer = window.L.Layer.extend({
 		var notJump = sameAddress || !isFollowingOwnCursor;
 		var scrollToCursor = this._sheetSwitch.tryRestore(notJump, this._selectedPart);
 
-		this._onUpdateCellCursor(scrollToCursor, notJump);
+		this._onUpdateCellCursor(scrollToCursor, notJump, sameAddress);
 
 		// Remove the validity input help only when the cursor really moved away
 		// from the cell it belongs to, that is a different address or a hidden
@@ -1803,6 +2489,12 @@ window.L.CanvasTileLayer = window.L.Layer.extend({
 		// Reposition formula error button with the updated cursor rect.
 		app.definitions.formulaErrorHelpSection.hide();
 		this._showPendingCellError();
+
+		// Vulcan: core's cursor answers the Calc echoes' predictions.
+		if (app.definitions && app.definitions.vulcanCalcCursorEcho)
+			app.definitions.vulcanCalcCursorEcho.onCellCursor();
+		if (app.definitions && app.definitions.vulcanCalcTextEcho)
+			app.definitions.vulcanCalcTextEcho.onCellCursor();
 	},
 
 	_onDocumentRepair: function (textMsg) {
@@ -1863,7 +2555,11 @@ window.L.CanvasTileLayer = window.L.Layer.extend({
 		// tells who trigerred cursor invalidation, but recCursors is still "ours"
 		var modifierViewId = parseInt(obj.viewId);
 		var weAreModifier = (modifierViewId === this._viewId);
-		if (weAreModifier && app.isFollowingOff())
+		// The agent bridge's searches move this view's cursor and it puts
+		// the reader back afterwards: while it holds the view, the moved
+		// cursor is not followed, scrolled to, or taken for the reader's input.
+		var bridgeHoldsView = this._bridgeHoldsView();
+		if (weAreModifier && app.isFollowingOff() && !bridgeHoldsView)
 			app.setFollowingUser(this._viewId);
 
 		this._cursorAtMispelledWord = obj.mispelledWord ? Boolean(parseInt(obj.mispelledWord)).valueOf() : false;
@@ -1878,11 +2574,14 @@ window.L.CanvasTileLayer = window.L.Layer.extend({
 
 		app.file.textCursor.rectangle = new cool.SimpleRectangle(recCursor.getTopLeft().x, recCursor.getTopLeft().y, recCursor.getSize().x, recCursor.getSize().y);
 
+		if (weAreModifier && app.definitions && app.definitions.vulcanCalcTextEcho)
+			app.definitions.vulcanCalcTextEcho.onCaret();
+
 		if (this.isWriter()) {
 			app.sectionContainer.onCursorPositionChanged();
 		}
 
-		if (!this._map.editorHasFocus() && app.file.textCursor.visible && weAreModifier) {
+		if (!this._map.editorHasFocus() && app.file.textCursor.visible && weAreModifier && !bridgeHoldsView) {
 			// Regain cursor if we had been out of focus and now have input.
 			// Unless the focus is in the Calc Formula-Bar, don't steal the focus.
 			if (!this._map.calcInputBarHasFocus())
@@ -1911,7 +2610,7 @@ window.L.CanvasTileLayer = window.L.Layer.extend({
 		// If modifier view is different than the current view
 		// we'll keep the caret position at the same point relative to screen.
 		this._onUpdateCursor(
-			/* scroll */ updateCursor && weAreModifier,
+			/* scroll */ updateCursor && weAreModifier && !bridgeHoldsView,
 			/* zoom */ undefined,
 			/* keepCaretPositionRelativeToScreen */ !weAreModifier);
 
@@ -1990,6 +2689,8 @@ window.L.CanvasTileLayer = window.L.Layer.extend({
 
 		TextCursorSection.addOrUpdateOtherViewCursor(viewId, username, rectangle, parseInt(obj.part), mode);
 
+		this._vulcanNoteViewPart(viewId, parseInt(obj.part));
+
 		if (app.getFollowedViewId() === viewId && (app.isFollowingEditor() || app.isFollowingUser())) {
 			if (this.isWriter() || this.isImpress() || this.isDraw()) {
 				this.goToViewCursor(viewId);
@@ -1999,6 +2700,7 @@ window.L.CanvasTileLayer = window.L.Layer.extend({
 			}
 		}
 
+		this._vulcanNoteViewActivity(viewId, textMsg);
 		this._saveMessageForReplay(textMsg, viewId);
 	},
 
@@ -2042,6 +2744,7 @@ window.L.CanvasTileLayer = window.L.Layer.extend({
 			CursorHeaderSection.deletePopUpNow(viewId);
 		}
 
+		this._vulcanNoteViewActivity(viewId, textMsg);
 		if (this.isCalc()) {
 			this._saveMessageForReplay(textMsg, viewId);
 		}
@@ -2100,6 +2803,12 @@ window.L.CanvasTileLayer = window.L.Layer.extend({
 
 		OtherViewCellCursorSection.removeView(viewId);
 		OtherViewGraphicSelectionSection.removeView(viewId);
+
+		if (this._vulcanViewParts && this._vulcanViewParts[viewId] !== undefined) {
+			delete this._vulcanViewParts[viewId];
+			this._map.fire('vulcanviewparts');
+		}
+
 		this._map.removeView(viewId);
 	},
 
@@ -2135,9 +2844,33 @@ window.L.CanvasTileLayer = window.L.Layer.extend({
 		this._map.fire('updateviewslist');
 	},
 
+	// The Writer agent bridge's own searches (VulcanWriterBridge: its match
+	// counts and its anchor FINDs) answer through the same messages as the
+	// reader's. A claimed answer is not the reader's search: it is fired
+	// with vulcanBridge: true, which the find bar ignores, and never becomes
+	// _searchTerm / _searchResults. A count (keepView) is not followed
+	// either. Returns null for the reader's own search.
+	_claimBridgeSearch: function (phrase) {
+		var bridge = app.writerBridge;
+		if (!bridge || typeof bridge.claimSearchAnswer !== 'function')
+			return null;
+		return bridge.claimSearchAnswer(phrase);
+	},
+
+	// True while the Writer agent bridge moves this view's cursor with its
+	// own searches and will put it back (VulcanWriterBridge.holdsView).
+	_bridgeHoldsView: function () {
+		var bridge = app.writerBridge;
+		return !!(bridge && typeof bridge.holdsView === 'function' && bridge.holdsView());
+	},
+
 	_onSearchNotFoundMsg: function (textMsg) {
-		this._clearSearchResults();
 		var originalPhrase = textMsg.substring(16);
+		if (this._claimBridgeSearch(originalPhrase)) {
+			this._map.fire('search', {originalPhrase: originalPhrase, count: 0, vulcanBridge: true});
+			return;
+		}
+		this._clearSearchResults();
 		this._map.fire('search', {originalPhrase: originalPhrase, count: 0});
 	},
 
@@ -2187,6 +2920,17 @@ window.L.CanvasTileLayer = window.L.Layer.extend({
 			this._getSearchResultRectangles(obj, results);
 		else
 			this._getSearchResultRectanglesFileBasedView(obj, results);
+
+		var bridgeSearch = this._claimBridgeSearch(originalPhrase);
+		if (bridgeSearch) {
+			this._map.fire('search', {originalPhrase: originalPhrase, count: count, highlightAll: highlightAll, results: results, vulcanBridge: true});
+			if (bridgeSearch.keepView)
+				return;
+			app.setFollowingUser(this._viewId);
+			if (app.file.textCursor.visible)
+				this._onUpdateCursor(/* scroll */ true);
+			return;
+		}
 
 		// do not cache search results if there is only one result.
 		// this way regular searches works fine
@@ -2308,6 +3052,51 @@ window.L.CanvasTileLayer = window.L.Layer.extend({
 			this._map.fire('vrulerupdate', obj);
 		}
 		else {
+			/*
+			 * VULCAN: keep the TEXT COLUMN width for the opening fit.
+			 *
+			 * `margin2` is the text width in mm100 (not a margin -- see
+			 * VulcanWriterFit.textFitLevel for the decoded payload and the
+			 * two checks that confirm it). The first update after load is all
+			 * zeros, so only a positive pair is worth recording; a zero would
+			 * otherwise latch and pin every later fit to a bogus geometry.
+			 */
+			if (obj && obj.margin2 > 0 && obj.pageWidth > 0) {
+				var vulcanFirstRuler = !(this._vulcanTextWidthMm100 > 0);
+				this._vulcanTextWidthMm100 = obj.margin2;
+				this._vulcanPageWidthMm100 = obj.pageWidth;
+				// leftOffset is the left margin in mm100; the scroll band is
+				// measured from the page's left edge, so it needs both.
+				this._vulcanLeftMarginMm100 = obj.leftOffset > 0 ? obj.leftOffset : 0;
+
+				/*
+				 * THE OPENING FIT RUNS BEFORE THIS ARRIVES.
+				 *
+				 * MEASURED on build a2a3e82a: a document settled at level 12
+				 * with the text geometry present (margin2 16510) in a 1217px
+				 * column, where the text rule gives 13. The fit had already run
+				 * at load, when the only ruler payload was the all-zero one core
+				 * sends first, so textFitLevel returned null and the commit fell
+				 * back to the stock page-fit floor. Nothing re-fitted afterwards
+				 * because the column never moved.
+				 *
+				 * So the first REAL payload re-runs the fit. Guarded on the
+				 * document still sitting at the zoom the last fit applied,
+				 * so a reader who has already zoomed by hand keeps their
+				 * zoom.
+				 */
+				// A reader who switched smart zoom off asked for their own
+				// rung: the opening fit already honoured that, and the
+				// re-fit must not overrule it.
+				if (vulcanFirstRuler && this.isWriter() &&
+					document.documentElement.classList.contains('vulcan-desktop-chrome') &&
+					window.prefs.get('smartZoom') != 'false' &&
+					this._lastFitZoom > 0 &&
+					this._map.getZoom() === this._lastFitZoom &&
+					!this._vulcanWriterUserViewport) {
+					this._fitWidthZoom(null, null, true);
+				}
+			}
 			this._map.fire('rulerupdate', obj);
 		}
 	},
@@ -2422,6 +3211,7 @@ window.L.CanvasTileLayer = window.L.Layer.extend({
 
 		app.activeDocument.getView(viewId).updateSelectionRawData(viewMode, parseInt(obj.part), rawRectangles);
 
+		this._vulcanNoteViewActivity(viewId, textMsg);
 		this._saveMessageForReplay(textMsg, viewId);
 	},
 
@@ -2443,7 +3233,20 @@ window.L.CanvasTileLayer = window.L.Layer.extend({
 	// Build the list of {mark, part} references from the marks array of a
 	// referencemarks/SparklineGroup payload. Each mark becomes a CPolygon that
 	// fills the cell range with a translucent highlight.
-	_marksToReferences: function (marks) {
+	//
+	// `phoneDashed` (G34, device exhibit EX-13) swaps that fill for Google's
+	// DASHED OUTLINE in the mark's own colour, at full opacity. It is passed
+	// only by the formula-reference call site: a sparkline group highlight is a
+	// group shading, not a formula reference, and must keep its fill. The
+	// colours are core's either way, so the outline on the grid and the
+	// coloured token in the formula bar (VulcanFormulaRefColors) agree by
+	// construction.
+	//
+	// Why the fill had to go rather than be tinted: at 25% fill + a 25%-opacity
+	// hairline, a reference mark on a phone reads as nothing — which is why
+	// "we do neither" was a fair description of a client that was already
+	// receiving and drawing the marks.
+	_marksToReferences: function (marks, phoneDashed) {
 		var references = [];
 
 		for (var mark = 0; mark < marks.length; mark++) {
@@ -2468,12 +3271,23 @@ window.L.CanvasTileLayer = window.L.Layer.extend({
 					corePxPt.round();
 					return corePxPt;
 				});
-				var reference = new CPolygon(pointSet, {
-					pointerEvents: 'none',
-					fillColor: '#' + strColor,
-					fillOpacity: 0.25,
-					weight: 2 * app.dpiScale,
-					opacity: 0.25});
+				var reference = phoneDashed
+					? new CPolygon(pointSet, {
+						pointerEvents: 'none',
+						fill: false,
+						color: '#' + strColor,
+						// [4, 3] is the fork's own dash art — the same pattern
+						// ShapeHandlesSection already draws its outlines with —
+						// scaled to device pixels so it does not vanish at 3x.
+						dashArray: [4 * app.dpiScale, 3 * app.dpiScale],
+						weight: 2 * app.dpiScale,
+						opacity: 1})
+					: new CPolygon(pointSet, {
+						pointerEvents: 'none',
+						fillColor: '#' + strColor,
+						fillOpacity: 0.25,
+						weight: 2 * app.dpiScale,
+						opacity: 0.25});
 
 				references.push({mark: reference, part: part});
 			}
@@ -2485,8 +3299,14 @@ window.L.CanvasTileLayer = window.L.Layer.extend({
 	_onReferencesMsg: function (textMsg) {
 		textMsg = textMsg.substr(textMsg.indexOf(' ') + 1);
 		var marks = JSON.parse(textMsg);
-		this._referencesAll = this._marksToReferences(marks.marks);
+		this._referencesAll = this._marksToReferences(marks.marks, this._vulcanPhoneChrome());
 		this._updateReferenceMarks();
+		// G34's text half. The same payload, in the same order, so the token
+		// colours in the formula bar cannot drift from the outlines on the
+		// grid. Inert off the phone chrome (VulcanFormulaRefColors.setMarks
+		// returns before storing anything).
+		if (window.VulcanFormulaRefColors)
+			window.VulcanFormulaRefColors.setMarks(marks.marks);
 	},
 
 	// Highlight of the cells belonging to the sparkline group of the current
@@ -2670,6 +3490,51 @@ window.L.CanvasTileLayer = window.L.Layer.extend({
 			app.sectionContainer.getSectionWithName(app.CSections.ColumnHeader.name)._updateCanvas();
 	},
 
+	/*
+	 * S6 -- THE CLEAR ON THE EMPTY MESSAGE IS PROVISIONAL, AND NOTHING USED TO
+	 * MAKE IT SO.
+	 *
+	 * The line below says it in its own comment: the whole-axis flags are
+	 * dropped "because a RowColSelCount message is on the way". That premise
+	 * holds for a selection CHANGE and fails for a selection RESTATEMENT.
+	 *
+	 * Measured on the wire (round-10 R4b, p4-cols-and-wire.json): tapping an
+	 * already-selected row header answers with
+	 *
+	 *     cellselectionarea: EMPTY          <- both flags cleared here
+	 *     cellselectionarea: <the same rect> <- 1 ms later, identical
+	 *
+	 * and NO '.uno:RowColSelCount' statechanged at all, because the count did
+	 * not change and core dedupes unchanged state. So the provisional clear
+	 * became permanent, and it stayed permanent for the life of the selection.
+	 *
+	 * What that costs a finger, and why the owner said "resize not working on
+	 * rows, period": the resize grip is drawn only while the whole-axis flag
+	 * is set (Header.shouldDrawResizeGrip), and the widened phone hit band is
+	 * keyed on the same predicate (Header._vulcanTappedResizeBand). With the
+	 * flag stuck false the grip disappears from the canvas (pixel-verified,
+	 * darkPct 45.3 -> 3.9) and the band collapses to the stock quarter-row --
+	 * about 5 CSS px on a phone row. Re-tapping a header is what every human
+	 * does when unsure the first tap landed, so the feature dies on the second
+	 * tap. Columns survive it only because their stock fallback band is 15 CSS
+	 * px, which a finger can still hit: that asymmetry is why the report names
+	 * rows specifically.
+	 *
+	 * THE FIX RESTORES ONLY WHAT WAS TRUE ONE MESSAGE AGO, FOR A SELECTION
+	 * THAT DID NOT CHANGE. The EMPTY branch remembers the flags together with
+	 * the rectangle they described; the next non-empty message restores them
+	 * if and only if it describes the SAME rectangle. A different rectangle is
+	 * a real selection change and keeps the clear, which is the behaviour
+	 * every other path shipped with -- and `_onRowColSelCount` remains the
+	 * authority whenever core does restate, because it runs after and writes
+	 * both flags outright. This invents no `true` that was not true 1 ms
+	 * earlier for the identical selection, so it is not a second opinion about
+	 * what is selected.
+	 */
+	_vulcanSelectionSignature: function (area) {
+		return area ? area.x1 + ',' + area.y1 + ',' + area.width + ',' + area.height : null;
+	},
+
 	_onCellSelectionAreaMsg: function (textMsg) {
 		var cellfillMarkerSection = app.sectionContainer.getSectionWithName(app.CSections.CellFillMarker.name);
 		var strTwips = textMsg.match(/\d+/g);
@@ -2684,6 +3549,20 @@ window.L.CanvasTileLayer = window.L.Layer.extend({
 			const adjustedTwipsHeight = boundsTwips.max.y - boundsTwips.min.y;
 			this._cellSelectionArea = new cool.SimpleRectangle(boundsTwips.min.x, boundsTwips.min.y, adjustedTwipsWidth, adjustedTwipsHeight);
 
+			// The restatement half of the provisional clear above. Consumed
+			// whatever the answer, so a stale note can never outlive the one
+			// message it was written for.
+			var provisional = this._vulcanWholeAxisProvisional;
+			this._vulcanWholeAxisProvisional = null;
+			if (provisional &&
+			    provisional.signature !== null &&
+			    provisional.signature === this._vulcanSelectionSignature(this._cellSelectionArea)) {
+				this._map.wholeColumnSelected = provisional.column;
+				this._map.wholeRowSelected = provisional.row;
+				if (this._refreshRowColumnHeaders)
+					this._refreshRowColumnHeaders();
+			}
+
 			if (cellfillMarkerSection)
 				cellfillMarkerSection.calculatePositionViaCellSelection([this._cellSelectionArea.pX2, this._cellSelectionArea.pY2]);
 
@@ -2691,6 +3570,11 @@ window.L.CanvasTileLayer = window.L.Layer.extend({
 
 			CellSelectionMarkers.update();
 		} else {
+			this._vulcanWholeAxisProvisional = {
+				column: !!this._map.wholeColumnSelected,
+				row: !!this._map.wholeRowSelected,
+				signature: this._vulcanSelectionSignature(this._cellSelectionArea),
+			};
 			this._cellSelectionArea = null;
 			if (cellfillMarkerSection)
 				cellfillMarkerSection.calculatePositionViaCellSelection(null);
@@ -2980,6 +3864,15 @@ window.L.CanvasTileLayer = window.L.Layer.extend({
 				'\n'
 			);
 		}
+		// Vulcan: Calc echoes (cell text and cell cursor) observe document
+		// key sends, AFTER the socket write; the cursor echo first, as in
+		// TextInput._sendKeyEvent.
+		if (winId === 0 && app.definitions) {
+			if (app.definitions.vulcanCalcCursorEcho)
+				app.definitions.vulcanCalcCursorEcho.onKey(charCode, unoKeyCode, type);
+			if (app.definitions.vulcanCalcTextEcho)
+				app.definitions.vulcanCalcTextEcho.onKey(charCode, unoKeyCode, type);
+		}
 		if (completeEvent)
 			completeEvent.finish();
 	},
@@ -3175,6 +4068,84 @@ window.L.CanvasTileLayer = window.L.Layer.extend({
 
 	// enable or disable blinking cursor and the cursor overlay depending on
 	// the state of the document (if the flags are set)
+	/*
+		VULCAN (lane B, pending UI-B-004 option B): on an Android phone, a
+		double tap on a PICTURE in a slide leaves the keyboard down. A double
+		tap on a shape, a text box or a table I can type in brings it up,
+		EMPTY or not, and so does typing in a title.
+
+		Why a picture gets a caret at all: core's double click on a selected
+		object it can text-edit dispatches SID_TEXTEDIT (sd FuDraw::DoubleClick,
+		fudraw.cxx:670-679), and a graphic is one (SdrGrafObj : SdrRectObj,
+		svdograf.hxx:67; SdrRectObj : SdrTextObj, svdorect.hxx:38). So core
+		opens text edit INSIDE the picture, and this caret path's focus(true)
+		raised the Android keyboard over the picture and left it up (redroid,
+		lane-b runs/run2/pic-dtap).
+		Google Slides edits no text on a picture.
+
+		The test is the object's KIND, never its text. Core writes
+		extraInfo.type = the SdrObjKind of the selected object
+		(svdmrkv.cxx:1018-1022; include/svx/svdobjkind.hxx: Graphic 22, OLE2
+		23, CustomShape 33, Media 34, Table 35). Measured on the device: a PNG
+		picture is type 22, a text box 33, a table 35 (runs/run2/pic-kind/k1,
+		runs/run2/table-kind/tk1). Only 22 counts: a chart or other OLE object
+		(23) is activated by the double click, not given a caret
+		(fudraw.cxx:653-661), and media (34) has no text edit
+		(svdomedia.cxx:96). NOT innerTextRect: core writes it only for an
+		object that already HAS rendered text (CreateInnerTextRectString,
+		svdmrkv.cxx:878-901), so an empty rectangle, text box or new table has
+		none, and keying on it (4ceee1422a) gave a double tap into an empty
+		shape a caret with no keyboard. innerTextRect may only ADD a keyboard:
+		a picture that already holds typed text (a graphic can, in an .odp
+		authored on the desktop) names it, and keeps the keyboard IF a caret
+		opens in it. On a phone a double tap no longer opens one in a picture
+		at all (UI-B-004, Google's path: VulcanImpressOverlap.isTextlessKind
+		stops the count 2), so that text is not reachable by double tap on a
+		phone. That covers core's payload BEFORE the edit only:
+		mid-edit, core may suppress the picture's text primitives
+		(sdrdecompositiontools.cxx:843-851, texthierarchyprimitive2d.cxx:153-159),
+		so a resend can drop innerTextRect, and the keyboard may then go after
+		the 2 s hold (unmeasured on the device). A RASTER picture's own pixels
+		never name it (TextExtractor2D skips bitmap, metafile and mask
+		primitives, textextractor2d.cxx:61-69), but an SVG/EMF/WMF vector
+		picture with drawn text can: it decomposes into text primitives the
+		extractor walks (graphicprimitivehelper2d.cxx:628-652), so it names
+		innerTextRect and keeps the keyboard. A known gap.
+
+		B-0288: while I type in the eval deck's slide-1 title, core reports the
+		slide-sized background (OrdNum 0) as the selection for the rest of the
+		edit (runs/run2/b0288 t13, g1), and the caret is in another object
+		(MouseControl.vulcanImpressCaretHolder). A selection that covers the
+		whole slide therefore never counts, even when it is a picture.
+
+		Android host only (TextInput's B-0094 gate), phone Impress only: the
+		iPhone and every other doctype keep focus(true). Both routes that turn
+		a caret into a keyboard ask this (here and
+		GraphicSelection.updateGraphicSelection), and so does
+		ShapeHandlesSection.onDoubleClick's keyboard door, so the door never
+		raises a keyboard this takes back, nor stays shut for a caret it keeps
+		(the door also stays shut for a chart, audio, and a group with no
+		text, where core opens no caret, except a single-member group whose
+		member core marks: see onDoubleClick).
+	*/
+	_vulcanCaretInTextlessObject: function () {
+		if (!window.vulcanPhoneChrome || !this.isImpress()) return false;
+		var ti = this._map._textInput;
+		if (!ti || typeof ti.vulcanAndroidKeyboardBranch !== 'function' || !ti.vulcanAndroidKeyboardBranch())
+			return false;
+		if (typeof GraphicSelection === 'undefined' || !GraphicSelection.hasActiveSelection())
+			return false;
+		var extraInfo = GraphicSelection.extraInfo;
+		// A picture is SdrObjKind::Graphic (22) holding no text of its own.
+		if (!extraInfo || extraInfo.type !== 22 || extraInfo.innerTextRect)
+			return false;
+		var selection = GraphicSelection.rectangle;
+		if (typeof VulcanImpressOverlap === 'undefined' || VulcanImpressOverlap.coversWholeSlide(
+			[selection.x1, selection.y1, selection.x2, selection.y2], this._partWidthTwips, this._partHeightTwips))
+			return false;
+		return true;
+	},
+
 	_updateCursorAndOverlay: function (/*update*/) {
 		if (app.file.textCursor.visible   // only when COKit has told us it is ok
 			&& this._map.editorHasFocus()   // not when document is not focused
@@ -3191,8 +4162,19 @@ window.L.CanvasTileLayer = window.L.Layer.extend({
 
 			var hasMobileWizardOpened = this._map.uiManager.mobileWizard ? this._map.uiManager.mobileWizard.isOpen() : false;
 			var hasIframeModalOpened = $('.iframe-dialog-modal').is(':visible');
+			// VULCAN: core's cursor is no gesture in this
+			// frame. Edit-mode entry (updatepermission -> updateGraphicSelection
+			// -> here), at load and at a reload the server ordered, took the
+			// keyboard from the host page, and what the person pasted or typed
+			// into the agent composer went into the document as their own saved
+			// edit. While the host owns the keyboard (Vulcan_FocusPolicy, or the
+			// embedded default Map.initialize sets) and this frame does not hold
+			// it, the caret is drawn but focus stays where it is. The policy
+			// test comes first so rigs that lift this method over a stub map
+			// never read `document`.
+			var vulcanKeyboardInHost = this._map._vulcanAutoFocusOnLoad === false && !document.hasFocus();
 			// Don't show the keyboard when the Wizard is visible, or when we have just been in a zoom
-			if (!window.mobileWizard && !window.pageMobileWizard &&
+			if (!vulcanKeyboardInHost && !window.mobileWizard && !window.pageMobileWizard &&
 				!window.insertionMobileWizard && !hasMobileWizardOpened &&
 				!JSDialog.IsAnyInputFocused() && !hasIframeModalOpened && !app.sectionContainer.isPostZoomReplay()) {
 				// If the user is editing, show the keyboard, but don't change
@@ -3204,14 +4186,102 @@ window.L.CanvasTileLayer = window.L.Layer.extend({
 					if (!section || !section.sectionProperties.selectedComment || !section.sectionProperties.selectedComment.isEdit())
 						this._map.focus(true);
 				}
+				// A caret core opened inside a picture takes focus WITHOUT the
+				// Android keyboard (see _vulcanCaretInTextlessObject).
+				// UI-B-004: a double tap on an object painted above the selected
+				// photo opens the keyboard door (ShapeHandlesSection.onDoubleClick)
+				// before core says what that object is. When it is a picture too (a
+				// logo), core opens its caret in it, and the door's 2 s hold
+				// (TextInput.focus) would swallow this focus(false): a caret in the
+				// logo with the keyboard up. Ending the door's hold here takes the
+				// keyboard down. It runs only on this branch, where the caret is in
+				// a picture; a caret in text takes focus(true) below and keeps the
+				// hold.
+				else if (this._vulcanCaretInTextlessObject()) {
+					this._map._textInput._vulcanImpressDoorAt = 0;
+					this._map.focus(false);
+				}
 				else
 					this._map.focus(true);
 			}
 		} else {
 			this._map._textInput.hideCursor();
+			// VULCAN: THE UNLATCH ARM ONLY EVER RAN ON IMPRESS. The stock
+			// `_preview && !_preview.partsFocused` term asks "the parts
+			// preview is not what holds focus", but `_preview` is assigned in
+			// exactly one place in the tree (ImpressTileLayer), so on Calc and
+			// Writer it is undefined, the whole term is falsy, and core saying
+			// the cursor is gone never reached focus(false) at all. On the
+			// phone chrome that is the leak: the edit ends, the caret is
+			// hidden, and _acceptInput stays latched true for the next zoom
+			// settle to replay as a real keyboard raise. Read the term for
+			// what it means -- no parts preview cannot be a parts preview
+			// holding focus -- and only where the leak has a cost, so desktop
+			// and tablet keep the arm exactly as dead as upstream shipped it.
+			var vulcanNoPartsPreview = window.vulcanPhoneChrome && !this._map._docLayer._preview;
+			// VULCAN: ...BUT NOT WHILE A COMMIT-AND-ADVANCE IS IN FLIGHT.
+			// Map._onEditorGotFocus reaches this method through
+			// _changeFocusWidget BEFORE it ends the cell edit session, so the
+			// arm above gets to answer the keyboard question first -- and on
+			// the Return commit-and-advance it answers the opposite of what
+			// that site decides one line later (dismissKeyboard:false, so a
+			// serial data-entry run keeps typing). Measured: Enter committed,
+			// the cursor advanced a row, and activeElement was left on BODY.
+			// Ask it the way that site asks it, so the two agree instead of
+			// racing: the live-edit marker says the session end has not run
+			// yet, and a Return verb that is NOT a newline says this arrival
+			// is the advance rather than a tap-away out of a door-opened
+			// edit. Whatever the session end then decides stands, its own
+			// dismissal included. The latch test comes FIRST so the door
+			// site's absence short-circuits before `document` is read -- the
+			// extraction rigs lift these statements into a bare vm context.
+			var vulcanReturnKey = window.vulcanPhoneChrome ? window.VulcanCalcReturnKey : null;
+			var vulcanAdvanceInFlight = !!vulcanReturnKey &&
+				!vulcanReturnKey.returnInsertsNewline() &&
+				document.documentElement.classList.contains('vulcan-formula-editing');
+			// VULCAN (VO-P-0022): ...NOR WHILE A GESTURE-OPENED DOOR IS IN
+			// FLIGHT. The phone Calc double tap raises the keyboard inside tap
+			// 2's click and core answers the count-2 with cellcursor ->
+			// invalidatecursor -> cursorvisible; the first two reach this arm
+			// from message context while the caret is still hidden (cellcursor
+			// through _onUpdateCellCursor's 'editorgotfocus' fire, because the
+			// editable now holds focus). A cursor-gone inside the edit-intent
+			// window a gesture stamped is that round trip, not an edit that
+			// ended -- measured on the served fork under WebKit: each pass ran
+			// focus(false) -> dismissSoftKeyboard (blur, window zeroed), so
+			// the caret's own focus(true) at cursorvisible was vetoed and
+			// focused edit opened with no keyboard. Ask the window's owner,
+			// TextInput.vulcanGestureDoorInFlight: bounded by the window, false
+			// for a live gesture (tap 2's own fire still dismisses; the raise
+			// after it re-stamps), false outside phone Calc. The existence
+			// test is real, as for dismissSoftKeyboard's callers: the
+			// extraction rigs lift these statements over a stub _textInput.
+			var vulcanDoorInput = window.vulcanPhoneChrome ? this._map._textInput : null;
+			var vulcanDoorInFlight = !!vulcanDoorInput && !!vulcanDoorInput.vulcanGestureDoorInFlight &&
+				vulcanDoorInput.vulcanGestureDoorInFlight();
+			// VULCAN (B-0099/B-0100/B-0102): ...NOR WHILE QUICK ENTRY HOLDS THE
+			// KEYBOARD. An edit that ended with the keyboard kept (the Return
+			// commit-and-advance, a tap on another cell) leaves it up over a
+			// selected cell on purpose, and this arm's next caret-less pass
+			// (the first key's answer, a resize ~3 s later) dropped it mid-run.
+			// TextInput.vulcanQuickEntryHolds: Android, phone Calc, released by
+			// every deliberate exit. The existence test as for the door above.
+			var vulcanQuickEntryHeld = !!vulcanDoorInput && !!vulcanDoorInput.vulcanQuickEntryHolds &&
+				vulcanDoorInput.vulcanQuickEntryHolds();
+			// VULCAN: ...NOR WHILE THE HOST PAGE HOLDS THE KEYBOARD
+			// (the same test as for the caret above). Off the phone this
+			// focus(false) is a real focus: a deck that loaded while the person
+			// typed in the agent composer took the keyboard here. On the phone
+			// it takes none and only releases the keyboard latch, so the phone
+			// keeps it. The phone and policy tests come first for the rigs that
+			// lift this arm alone.
+			var vulcanHostKeepsKeyboard = !window.vulcanPhoneChrome &&
+				this._map._vulcanAutoFocusOnLoad === false && !document.hasFocus();
 			// Maintain input if a dialog or search-box has the focus.
 			if (this._map.editorHasFocus() && !this._map.uiManager.isAnyDialogOpen() && !this._map.isSearching()
-				&& !JSDialog.IsAnyInputFocused() && (this._map._docLayer._preview && !this._map._docLayer._preview.partsFocused))
+				&& !JSDialog.IsAnyInputFocused() && !vulcanAdvanceInFlight && !vulcanDoorInFlight && !vulcanQuickEntryHeld
+				&& !vulcanHostKeepsKeyboard
+				&& (vulcanNoPartsPreview || (this._map._docLayer._preview && !this._map._docLayer._preview.partsFocused)))
 				this._map.focus(false);
 		}
 
@@ -3267,7 +4337,7 @@ window.L.CanvasTileLayer = window.L.Layer.extend({
 	},
 
 	// TODO: used only in calc: move to CalcTileLayer
-	_onUpdateCellCursor: function (scrollToCursor, sameAddress) {
+	_onUpdateCellCursor: function (scrollToCursor, sameAddress, addressUnchanged) {
 		CellSelectionMarkers.update();
 
 		if (app.calc.cellCursorVisible) {
@@ -3275,9 +4345,23 @@ window.L.CanvasTileLayer = window.L.Layer.extend({
 			    !this._map.calcInputBarHasFocus()) {
 				const scroll = this._calculateScrollForNewCellCursor();
 				if (scroll.x !== 0 || scroll.y !== 0) {
-					scroll.x += app.activeDocument.activeLayout.viewedRectangle.x1;
-					scroll.y += app.activeDocument.activeLayout.viewedRectangle.y1;
-					app.activeDocument.activeLayout.scrollTo(scroll.pX, scroll.pY);
+					// ORDER IS LOAD-BEARING: read scroll.pX/pY BEFORE the two
+					// += lines below. Until then `scroll` is a RELATIVE delta,
+					// which is what vulcanSmoothScrollBy wants; the += turn it
+					// into an absolute document position for scrollTo.
+					// The section refuses hops longer than four lines, refuses
+					// entirely off-phone, and refuses while another section
+					// holds the container's single animation slot (it cannot
+					// pay the delta out then), so every other case and every
+					// other device falls straight through to the stock teleport.
+					const scrollSection = app.sectionContainer.getSectionWithName(app.CSections.Scroll.name);
+					const smoothed = !!(scrollSection && scrollSection.vulcanSmoothScrollBy
+						&& scrollSection.vulcanSmoothScrollBy(scroll.pX, scroll.pY));
+					if (!smoothed) {
+						scroll.x += app.activeDocument.activeLayout.viewedRectangle.x1;
+						scroll.y += app.activeDocument.activeLayout.viewedRectangle.y1;
+						app.activeDocument.activeLayout.scrollTo(scroll.pX, scroll.pY);
+					}
 				}
 
 				this._prevCellCursorAddress = app.calc.cellAddress.clone();
@@ -3288,13 +4372,79 @@ window.L.CanvasTileLayer = window.L.Layer.extend({
 			var focusOutOfDocument = document.activeElement === document.body;
 			var dontFocusDocument = JSDialog.IsAnyInputFocused() || focusOutOfDocument;
 			var dontStealFocus = sameAddress && this._map.calcInputBarHasFocus();
-			dontFocusDocument = dontFocusDocument || dontStealFocus;
+			// VULCAN: THE PHONE CELL EDITOR GREW; THE CURSOR DID NOT MOVE.
+			// Phone Calc edits in the cell (#clipboard-area, the map's text
+			// input), not in the formula-bar input, so the stock guard above
+			// never matches it. While that edit is live, core answers the
+			// keystroke that makes the text wider than its column with a
+			// cellcursor for the SAME cell and a wider rectangle. Firing
+			// 'editorgotfocus' for it ended the edit mid-word
+			// (Map._onEditorGotFocus -> vulcanEndCellEditSession): the keyboard
+			// dropped and the next keystrokes landed on the grid -- measured in
+			// desktop Chromium at 360x683 and on Android, 3-7 of 20 typed
+			// characters lost, while a text that still fits kept the edit
+			// (mocha_tests/CalcPhoneCellEditGrows.test.ts). A cursor that
+			// moved still fires, and off the phone or outside a live edit
+			// nothing changes. The existence test on _vulcanPhoneChrome is real:
+			// the extraction rigs lift this block over a stub `this`.
+			// `addressUnchanged`, not `sameAddress`: the caller passes notJump
+			// as sameAddress, which is also true for a cursor that moved once
+			// the member panned it out of view (own-cursor following off), and
+			// that move must still end the edit. And a same cell right after a
+			// Return that commits is core answering a commit that could not
+			// move the cursor (last row or column, "Enter moves selection"
+			// off), which must end the edit too (VulcanCalcReturnKey.ts).
+			var vulcanCellEditGrew = addressUnchanged &&
+				!!this._vulcanPhoneChrome && this._vulcanPhoneChrome() &&
+				document.documentElement.classList.contains('vulcan-formula-editing') &&
+				!!this._map._textInput && this._map._textInput.hasFocus() &&
+				!(window.VulcanCalcReturnKey && window.VulcanCalcReturnKey.commitReturnPending());
+			dontFocusDocument = dontFocusDocument || dontStealFocus || vulcanCellEditGrew;
 
 			// when the cell cursor is moving, the user is in the document,
 			// and the focus should leave the cell input bar
 			// exception: when dialog opened don't focus the document
 			if (!dontFocusDocument)
 				this._map.fire('editorgotfocus');
+			// VULCAN: A STAMPED EDIT WITH NOTHING FOCUSED IS A STRANDED EDIT.
+			//
+			// 'editorgotfocus' is the ONLY thing that ends a phone-Calc cell
+			// edit on the Return commit-and-advance route -- Map._onEditorGotFocus
+			// -> vulcanEndCellEditSession -> onFormulaBarBlur is what drops
+			// vulcan-formula-editing, drops vulcan-chrome-hidden, re-emits the
+			// posture and clears the Return-verb latch. And the guard above
+			// suppresses that fire exactly when `document.activeElement` is
+			// `document.body`, i.e. when nothing at all holds focus.
+			//
+			// Those two facts meet on the one route that matters. Measured on
+			// device: Enter in B2 committed and advanced to B3, focus left
+			// #clipboard-area, and vulcan-formula-editing + vulcan-chrome-hidden
+			// stayed stamped for the rest of the session -- keyboard gone, sheet
+			// strip gone, host chrome still withdrawn, ✕/✓ still in the fx bar,
+			// the escape ladder still claiming a live edit. The ✓ path is fine
+			// because docdispatcher calls vulcanEndCellEditSession outright;
+			// only this route depends on a focus test to notice.
+			//
+			// The invariant is flat: vulcan-formula-editing CLAIMS a live cell
+			// editor, and activeElement === body says there is none. Both cannot
+			// be true, and the cursor answer is when we learn it. So end the
+			// session here instead -- the same call the fire would have reached,
+			// minus the focus grab this branch exists to avoid.
+			//
+			// dismissKeyboard:false, matching what Map._onEditorGotFocus passes
+			// for this same gesture: nothing holds focus, so on a phone there is
+			// no keyboard left to collapse, and serial entry must never lose one
+			// mid-run. The cell stays ENGAGED -- vulcan-calc-edit-ready is
+			// monotone and untouched here -- so this lands in EDIT-READY, one
+			// tap from the next edit, which is the honest reading of a screen
+			// with no editor on it.
+			//
+			// Idempotent by construction: the marker is what arms it, and the
+			// first thing the call does is clear the marker.
+			else if (focusOutOfDocument &&
+			         this.isCalc() && this._vulcanPhoneChrome() &&
+			         document.documentElement.classList.contains('vulcan-formula-editing'))
+				this._map.vulcanEndCellEditSession({ dismissKeyboard: false });
 		}
 
 		this._removeCellDropDownArrow();
@@ -3425,6 +4575,20 @@ window.L.CanvasTileLayer = window.L.Layer.extend({
 		return 10; /* failsafe 100% */
 	},
 
+	/*
+	 * The phone-chrome gate, BOTH halves.
+	 *
+	 * `isSmallScreenDevice()` alone is not the gate: `?vulcanChrome=desktop`
+	 * forces desktop chrome on any device regardless of screen size, and the
+	 * `vulcan-mobile-chrome` marker class on <html> is what records the
+	 * decision that was actually taken. Substituting `false` for this must
+	 * reproduce stock behaviour exactly on every non-phone surface.
+	 */
+	_vulcanPhoneChrome: function () {
+		return window.mode.isSmallScreenDevice() &&
+			document.documentElement.classList.contains('vulcan-mobile-chrome');
+	},
+
 	_recalcZoom: function(newSize, bringCommentsIntoView, maxZoom) {
 		let _zoom;
 
@@ -3443,6 +4607,14 @@ window.L.CanvasTileLayer = window.L.Layer.extend({
 		if (this.isImpress()) {
 			const MAX_DIAGONAL = 2200;
 			const MIN_DIAGONAL = 1000;
+			// KNOWN LATENT BUG, deliberately not fixed here: the height term is
+			// `+ innerHeight` twice where it should be `* innerHeight`, so this
+			// computes 392 instead of 930 at 390x844. It changes NOTHING on a
+			// phone -- both values fall below MIN_DIAGONAL, so factor clamps to
+			// 0 either way -- but it does understate the diagonal on tablets and
+			// desktops, giving them a smaller margin than intended. Fixing it
+			// changes tablet and desktop zoom, which is out of scope for a phone
+			// change and untested; carve it separately rather than smuggling it in.
 			const diagonal = Math.sqrt(window.innerWidth * window.innerWidth + window.innerHeight + window.innerHeight);
 			const factor = clamp((diagonal - MIN_DIAGONAL) / (MAX_DIAGONAL - MIN_DIAGONAL), 0, 1);
 
@@ -3450,9 +4622,73 @@ window.L.CanvasTileLayer = window.L.Layer.extend({
 			const availW = newSize.x * (1 - percentMargin);
 			const availH = newSize.y * (1 - percentMargin);
 
-			const xRatio = availW / documentWidth;
-			const yRatio = availH / documentHeight;
-			ratio = Math.min(xRatio, yRatio);
+			// Fit ONE SLIDE on the phone, not the whole deck.
+			//
+			// In fileBasedView every part is stacked vertically and
+			// app.activeDocument.fileSize becomes the STACKED extent -- max
+			// width across parts, and the SUM of all part heights (see
+			// ImpressTileLayer's _computeFileBasedFileSize). Contain-fitting
+			// that means yRatio is availH/(N * slideHeight), so yRatio overtakes
+			// xRatio at about four slides and every deck of five or more opens
+			// pinned to the minZoom floor -- a 205x115 CSS px slide, the same
+			// size whether the deck has 5 slides or 50. Longer deck, smaller
+			// slide, which is exactly backwards.
+			//
+			// Fit ONE slide, and let the existing filebased scroll move between
+			// them. The single-part dimensions are already tracked --
+			// ImpressTileLayer records them from statusJSON BEFORE it overwrites
+			// fileSize with the stacked extent.
+			//
+			// ⚠ THE JUSTIFICATION HERE USED TO BE "Google Slides shows ONE slide
+			// filling the viewport and you swipe between them." That is not what
+			// Slides does on a phone and it is not why this substitution is
+			// right. Google REPLACED a one-slide-at-a-time pager with a vertical
+			// stream in August 2020, and said why: "enables you to see more
+			// information at once, which can help you review slides faster",
+			// replacing "swiping to view slides one by one" (Workspace Updates
+			// 2020-08-05). More than one slide visible is the stated goal. The
+			// claim was downstream of the same mis-transcription of
+			// google-slides.json #27 that MouseControl's read-posture block
+			// documents; #27 now carries Google's verbatim sentence.
+			//
+			// The substitution stands on its own defect, which is the stacked
+			// extent above, not on a parity claim about how many slides fit on
+			// screen. What Google's geometry actually contributes is the NEXT
+			// decision -- which axis binds -- and that is fitRatio below.
+			//
+			// Phone only: desktop and tablet keep the deck-fit, and the guard is
+			// the same two-part test the rest of the phone chrome uses.
+			let fitWidth = documentWidth;
+			let fitHeight = documentHeight;
+			const vulcanPhoneImpress = this._vulcanPhoneChrome();
+			if (vulcanPhoneImpress && app.file.fileBasedView &&
+				this._partWidthTwips > 0 && this._partHeightTwips > 0) {
+				fitWidth = Math.round(this._partWidthTwips * app.twipsToPixels);
+				fitHeight = Math.round(this._partHeightTwips * app.twipsToPixels);
+			}
+
+			// PHONE PORTRAIT: THE WIDTH BINDS AND THE HEIGHT IS NOT CONSULTED.
+			//
+			// Everything about why is in VulcanImpressFit.fitRatio's header,
+			// including the measured sweep it comes from and why the
+			// obvious-looking `xRatio * fitHeight <= availH` form of this is
+			// algebraically a no-op. The short version: a contain-fit against a
+			// box whose height moves is a slide size that moves. Google's box
+			// height does not move on a phone in portrait; ours is inset by the
+			// phone chrome, the speaker-notes strip, the bottom sheet and the
+			// software keyboard, none of which are a change of form factor. So
+			// the height term goes, and the vertical stream that is already
+			// there absorbs a slide taller than the canvas.
+			//
+			// Landscape still contain-fits and pillarboxes: the caller-side
+			// predicate is orientation, not box aspect, so a keyboard cannot
+			// flip it (DomUtil.isPortrait is matchMedia('(orientation:
+			// portrait)'), resolved against the LAYOUT viewport).
+			//
+			// Phone only. Substituting `false` for _vulcanPhoneChrome() gives
+			// back Math.min(xRatio, yRatio) on desktop and tablet exactly.
+			const widthBound = vulcanPhoneImpress && window.L.DomUtil.isPortrait();
+			ratio = VulcanImpressFit.fitRatio(availW, availH, fitWidth, fitHeight, widthBound);
 			_zoom = this._map.getScaleZoom(ratio);
 		}
 
@@ -3475,10 +4711,146 @@ window.L.CanvasTileLayer = window.L.Layer.extend({
 	_fitWidthZoom: function (e, maxZoom, recalcFirstFit=false) {
 		if (this.isCalc() || this.isDraw() || this._isMultiPageView())
 			return;
+		/*
+		 * VULCAN (Lane W, W1): the CLIENT half of the browse-width ratchet.
+		 *
+		 * Fixing only the engine leaves this loop turning. In web view the
+		 * page width is BY DEFINITION the viewport -- the engine reflows to
+		 * the width the client states -- so "zoom until the page width fits
+		 * the viewport" is not a second opinion about the same quantity, it
+		 * is a second WRITER of it. The two rules chase each other: reflow
+		 * narrows the document, `_recalcZoom` reads the narrower
+		 * `app.activeDocument.fileSize.x` and zooms in to fit it, the
+		 * narrower viewport-in-twips produces a narrower reflow, and around
+		 * again. That is the client-side half of the measured
+		 * 35035 -> 19110 -> 12800 twips slide (see ImplCalcBrowseWidth).
+		 *
+		 * So in web view the zoom belongs to the user and to
+		 * VulcanWriterReflow's legibility target, and nothing else writes it.
+		 * Acceptance criterion 2 -- browse width identical across three
+		 * scroll and three zoom cycles -- is only reachable with this
+		 * return: a zoom cycle that ends where it started must produce the
+		 * width it started with, which is true of a pure function of
+		 * (viewport, zoom) and false of anything with a fit-to-width term in
+		 * the loop.
+		 *
+		 * Page view is completely untouched: `isBrowseMode()` is false until
+		 * the engine broadcasts `.uno:BrowseView=true`, which only happens
+		 * after a deliberate toggle. Substituting `false` for the whole
+		 * condition reproduces HEAD.
+		 */
+		if (this.isWriter() && app.writerReflow && app.writerReflow.isBrowseMode())
+			return;
 		if (app.activeDocument.fileSize.x === 0)
 			return;
 		if (this._map.uiManager.getStartCompareChanges()) // comparechanges view, don't zoom in, to have space for two pages side by side.
 			return;
+
+		/*
+		 * Phone Impress: a resize must not throw away the zoom the user pinched to.
+		 *
+		 * `isImpress()` forces `recalcFirstFit` true below, unconditionally, which
+		 * clears `_firstFitDone` -- so the "already fitted, width unchanged" early
+		 * return never fires for Impress and the "keep the current zoom" branch
+		 * (`if (this._firstFitDone) zoom = this._map._zoom;`) is dead. Every
+		 * `resize` therefore recomputes the fit zoom and calls setZoom with it.
+		 *
+		 * On a phone `resize` is not a rare event. A ResizeObserver on
+		 * #document-container (see _initContainer) runs `_syncTileContainerSize`,
+		 * which calls this argument-less, on the software keyboard opening or
+		 * closing, on a bottom sheet appearing, on rotation, and on browser chrome
+		 * retracting. Each of those discarded the pinch.
+		 *
+		 * That matters because of what Slides says pinch is FOR: "Two-finger pinch
+		 * zooms into a slide in both read and edit posture, letting you place small
+		 * objects accurately on a phone-sized canvas" (google-slides.json, "Pinch
+		 * to zoom the slide canvas"). Placing accurately and typing are exactly the
+		 * actions that raise the keyboard, so the refit was cancelling the gesture
+		 * on the very interactions it exists to serve -- and on a viewer-first
+		 * product the pinch is also the one recovery gesture for a slide that has
+		 * been fitted too small to read.
+		 *
+		 * So: once the user has zoomed by hand, a resize keeps their zoom. An
+		 * EXPLICIT refit still wins and re-arms the automatic fit -- 'Zoom to Fit
+		 * Slide' (dispatcher 'fitwidthzoom' -> ViewLayout.adjustViewZoomLevel) is
+		 * the caller that passes recalcFirstFit = true, and it is the deliberate
+		 * "put it back" control. The initial fit on load is unaffected: the latch
+		 * starts false.
+		 *
+		 * 🔴 THE PARAGRAPH ABOVE SHIPPED A ONE-WAY DOOR. It is right about what the
+		 * latch is for and wrong about it having a way out. `_vulcanUserZoomed` is
+		 * initialised false in `onAdd` -- ONCE PER DOCUMENT LOAD, not per resize --
+		 * set by any pinch or ctrl+wheel in `zoomStepEnd`, and cleared only on
+		 * `recalcFirstFit === true`. Every caller that passes true is behind the
+		 * 'fitwidthzoom' action, and 'fitwidthzoom' had no phone surface:
+		 * `fitwidthzoom-impress` is a status-bar item (Control.StatusBar.js:291)
+		 * and vulcan-theme.css §13i.13 sets `display: none !important` on
+		 * `#toolbar-down` for phone presentations, while the phone kebab's View
+		 * submenu carried only spellonline / notesmode / fullscreen /
+		 * toggledarktheme. So one pinch disabled the automatic fit for the rest of
+		 * the session and there was no way back on the device.
+		 *
+		 * The visible consequence is a rotation. Portrait -> landscape changes the
+		 * available box by roughly three 1.2x zoom steps, and the deck kept the
+		 * portrait zoom -- a crop, which is the "not showing the slides properly"
+		 * half of the report. Google Slides re-fits on rotation.
+		 *
+		 * THE NARROWING: the latch survives an INSET but not a SHAPE CHANGE. An
+		 * inset (keyboard, bottom sheet, notes strip, browser chrome) leaves the
+		 * device orientation alone and must keep the pinch, for every reason the
+		 * paragraph above gives. A rotation is a real size-class change: the box
+		 * the pinch was chosen for no longer exists, so the pinch expires with it.
+		 *
+		 * ORIENTATION, NOT BOX ASPECT. `DomUtil.isPortrait()` is
+		 * `matchMedia('(orientation: portrait)')`, which resolves against the
+		 * LAYOUT viewport, and the software keyboard cannot flip it -- iOS shrinks
+		 * only the visual viewport, and an Android resize of 390x844 to 390x544 is
+		 * still portrait. Comparing the aspect of the canvas BOX instead would flip
+		 * spuriously, because that box is inset by the top bar and the speaker-notes
+		 * strip on top of the keyboard and can genuinely end up wider than tall in
+		 * portrait. `ImpressTileLayer.onResizeImpress` already picks its
+		 * portrait/landscape layout off the same predicate.
+		 *
+		 * SLIDE CHANGE IS DELIBERATELY NOT A THIRD RELEASE, and that is a recorded
+		 * refusal rather than an oversight. The obvious next trigger -- expire the
+		 * pinch when the user moves to another slide -- has no source behind it.
+		 * SLIDES-SCROLL-MODEL-SPEC R24a is explicit: "UNCERTAIN -- whether a user
+		 * zoom survives a slide change. Not catalogued, not measured. Do not
+		 * encode a guess." Rotation is the one that IS measured (R25), which is
+		 * why rotation is the one implemented.
+		 *
+		 * On our geometry the question is moot as well, which is the stronger
+		 * half of the argument because it does not expire when someone finally
+		 * measures Slides. The phone fit is computed from `_partWidthTwips` /
+		 * `_partHeightTwips` -- a SINGLE part's size, substituted in `_recalcZoom`
+		 * above -- and Impress gives every slide in a document the same page size.
+		 * So moving between slides cannot change the box the pinch was chosen
+		 * for, and there is nothing for the latch to expire against. Contrast a
+		 * rotation, which changes that box by about three 1.2x steps.
+		 *
+		 * Google's read posture does not even have a current slide to change
+		 * (google-slides.json #27, as corrected: the read-mode verbs are swipe to
+		 * scroll, pinch to zoom, tap, double-tap -- no slide-change event); ours
+		 * resolves a part only to answer "which slide did you just tap".
+		 *
+		 * Phone only. The gate is the same two-part phone-chrome test as the rest
+		 * of the phone work, so substituting `false` for `_vulcanPhoneChrome()`
+		 * reproduces HEAD on desktop and tablet.
+		 */
+		const vulcanPhoneImpress = this.isImpress() && this._vulcanPhoneChrome();
+		const vulcanPhoneWriter = this.isWriter() && this._vulcanPhoneChrome();
+		if (vulcanPhoneImpress) {
+			if (recalcFirstFit === true) {
+				// The deliberate "put it back" re-arms the automatic fit. On the
+				// phone this is the kebab's 'Zoom to Fit Slide' row, added to
+				// Control.Menubar.ts mobilepresentation for exactly this purpose.
+				this._vulcanUserZoomed = false;
+			} else if (this._vulcanUserZoomed) {
+				if (window.L.DomUtil.isPortrait() === this._vulcanZoomedPortrait)
+					return;
+				this._vulcanUserZoomed = false;
+			}
+		}
 
 		var oldSize = e && e.oldSize ? e.oldSize : this._map.getSize();
 		var newSize = e && e.newSize ? e.newSize : this._map.getSize();
@@ -3489,6 +4861,26 @@ window.L.CanvasTileLayer = window.L.Layer.extend({
 
 		let bringCommentsIntoView = false;
 		let changeZoom = false;
+		const vulcanDesktopWriter = this.isWriter() && !vulcanPhoneWriter;
+		if (vulcanDesktopWriter) {
+			// The map can still carry the pre-split inline width until the
+			// container observer runs. Never fit beyond the visible workspace.
+			const containerWidth = this._getDocumentContainerSize()[0] * app.dpiScale;
+			if (!(containerWidth > 0) || !(newSize.x > 0)) return;
+			newSize.x = Math.min(newSize.x, containerWidth);
+			if (recalcFirstFit) this._vulcanWriterUserViewport = false;
+		}
+
+		// The VIEWPORT width, snapshotted before `_recalcZoom` subtracts the
+		// comment rail from `newSize.x` IN PLACE (:4132). The desktop-Writer
+		// dead-band below asks a viewport question -- "has the pane changed
+		// since the fit landed?" -- so its baseline has to be the pane, not the
+		// comment-reduced content width. Recording the post-subtraction value
+		// made the NEXT pass see a commentWidth-sized change at an unmoved pane,
+		// refit with `bringCommentsIntoView` already latched false, and throw the
+		// rail allowance away -- on every document that has comments, which is
+		// the document this product exists for.
+		const vulcanFitViewportX = newSize.x;
 
 		if (this.isWriter()) {
 			const smartZoomEnabled = window.prefs.get('smartZoom') != 'false';
@@ -3501,31 +4893,178 @@ window.L.CanvasTileLayer = window.L.Layer.extend({
 
 			// this isn't being triggered now when the sidebar shows up
 			const considerCommentWidthInOffset = () => {
+				// Phones never render the comment rail -- CommentSection does
+				// not even attach its container to #document-container on a
+				// small screen -- so reserving room for it shrinks the fit-width
+				// calculation by the width of something that is not on screen.
+				// On a 390px phone that is a large fraction of the viewport, and
+				// it fires only on documents that HAVE comments, i.e. exactly the
+				// reviewed contracts this product exists for. Skipping the flag
+				// rather than the subtraction also avoids the side effects below,
+				// which force an extra first-fit recalculation.
+				if (window.mode.isSmallScreenDevice())
+					return;
 				if (app.activeDocument.partHasComments) {
+					// The ALLOWANCE is not one-shot. It was safe to arm it once
+					// while a Writer fit happened once: #9272 turned the desktop
+					// branch into a REPEATING fit that follows the pane, and the
+					// refit that follows the split workspace into its real width
+					// -- the whole point of that PR -- then ran with this latched
+					// false and fitted the text to the full pane, over the column
+					// the comments occupy. #9305 fixed the other half of this
+					// (which width the dead-band RECORDS); the allowance itself
+					// still has to be reserved on every fit that has comments.
+					bringCommentsIntoView = true;
+					// The RE-FIT TRIGGER stays one-shot, for the reason above:
+					// clearing _firstFitDone forces an extra first-fit
+					// recalculation, and doing that on every pane change is the
+					// side effect this latch exists to avoid.
 					if ((recalcFirstFit || !this._includedCommentsInFirstFit)) {
-						bringCommentsIntoView = true;
 						this._includedCommentsInFirstFit = true;
-						this._firstFitDone = false;
+						// ...and it never outranks a reader who took the
+						// viewport. Now that desktop Writer reaches here on every
+						// fit, this runs on the plain refit that follows the
+						// first comment arriving (a co-editor's, or the agent's
+						// addComment); clearing _firstFitDone would skip the
+						// dead-band below, and with it `_vulcanWriterUserViewport`,
+						// and fit over the reader's own zoom. Zoom to Fit is
+						// unaffected: recalcFirstFit has already cleared that latch.
+						if (!(vulcanDesktopWriter && this._vulcanWriterUserViewport))
+							this._firstFitDone = false;
 					}
 				}
 			}
 
-			changeZoom  = smartZoomEnabled || recalcFirstFit;
-			if (changeZoom)
+			// Phone Writer must still take its FIRST fit when a stored
+			// smartZoom=false would otherwise open the document at 100%.
+			changeZoom  = smartZoomEnabled || recalcFirstFit ||
+				(vulcanPhoneWriter && !this._firstFitDone);
+			// Desktop Writer computes a fit at the `vulcanDesktopWriter` clause
+			// below whether or not `changeZoom` is set -- smartZoom is FALSE by
+			// default, so on a stock profile `changeZoom` is false on exactly the
+			// width-follow refits #9272 added. The rail has to be considered on
+			// the same terms as the fit, or the refit reserves nothing.
+			if (changeZoom || vulcanDesktopWriter)
 				considerCommentWidthInOffset();
-		} else if (this.isImpress()) {
+		} else if (this.isImpress() && !vulcanPhoneImpress) {
+			// STOCK, minus the phone. See the block below for why the phone is
+			// carved out; desktop and tablet Impress keep discarding the fit
+			// state on every resize exactly as before.
 			recalcFirstFit = true;
 		}
 
 		if (recalcFirstFit)
 			this._firstFitDone = false;
-		if (this._firstFitDone && newSize.x - oldSize.x === 0)
+
+		/*
+		 * The no-op guard, and on this surface it is being allowed to run for
+		 * the first time.
+		 *
+		 * WHAT WAS WRONG. `else if (this.isImpress()) recalcFirstFit = true;`
+		 * was UNCONDITIONAL, and `if (recalcFirstFit) this._firstFitDone =
+		 * false;` immediately below it then cleared the latch that the next line
+		 * tests. So for a presentation the width-only early return was DEAD
+		 * CODE, and so was the keep-the-current-zoom branch further down. Every
+		 * resize ran the whole fit.
+		 *
+		 * That is the mechanism behind the reported "it keeps resizing". A phone
+		 * browser retracting its chrome as you scroll changes the viewport
+		 * HEIGHT; js/global.js writes that height onto <body>; #document-container
+		 * changes box; the ResizeObserver runs _syncTileContainerSize, which
+		 * both fires `resize` (wired to this function) and calls this function
+		 * again itself. None of that is a document scroll -- it is exactly the
+		 * "something that feels like it should be a scroll" in the report -- and
+		 * none of it is a change of the only dimension the fit is allowed to
+		 * depend on.
+		 *
+		 * The stock comparison is WIDTH ONLY, which is the right instinct and
+		 * the thing to preserve: completing it with a height term would let
+		 * every chrome tick through, which is the defect, not the fix. Somebody
+		 * already wrote the correct guard; it was disabled three lines above
+		 * itself.
+		 *
+		 * WHY THE PHONE GETS A DIFFERENT COMPARISON RATHER THAN THE STOCK ONE.
+		 * The stock test reads `newSize.x - oldSize.x === 0`, and this function
+		 * is called BOTH with a resize event and argument-less (from
+		 * _syncTileContainerSize). Argument-less, `oldSize` and `newSize` are
+		 * the same map size read twice, so the test is vacuously true and says
+		 * nothing about whether the width changed since anything was fitted.
+		 * That is survivable when the guard is dead; it is not something to
+		 * build on when it is live, because the ordering hazard it creates lands
+		 * squarely on first paint: an early argument-less call against a 0x0
+		 * container (iframe mount) can latch `_firstFitDone` at width 0, and
+		 * every later argument-less call would then match itself and skip the
+		 * real fit. VulcanImpressFit.shouldSkipRefit compares against a width
+		 * RECORDED when a fit was actually applied and refuses a zero baseline,
+		 * so that sequence cannot arise. Its header carries the full first-paint
+		 * argument, and mocha_tests/VulcanImpressFit.test.ts calibrates it
+		 * against a variant with the preconditions dropped, which does suppress
+		 * first paint.
+		 *
+		 * NOT SUPPRESSED, checked rather than assumed:
+		 *   - Rotation. Both axes change, so the width differs from the recorded
+		 *     one and this falls through. (R25: rotation is the legitimate refit
+		 *     trigger, and the one the phone must not lose.)
+		 *   - 🔴 LANDSCAPE INSETS (round-8 G9). The whole "a height change must
+		 *     produce no work" argument is PORTRAIT's: it holds because
+		 *     `fitRatio` drops the height term when `widthBound`, and
+		 *     `widthBound` is `isPortrait()`. In landscape the height BINDS,
+		 *     so the AI rail / notes strip / bottom sheet / keyboard each
+		 *     genuinely change the slide size at an unchanged width -- and
+		 *     until this was passed the orientation, every one of them was
+		 *     skipped and the deck sat at a stale scale. The flag and the two
+		 *     heights are read from the same `newSize` this function already
+		 *     has; `_lastFitSizeY` is recorded beside `_lastFitSizeX` at the
+		 *     one place a fit is applied.
+		 *   - The explicit 'Zoom to Fit Slide' path and the other refit callers
+		 *     (docdispatcher, ViewLayout) pass recalcFirstFit = true, which
+		 *     clears _firstFitDone above and bypasses this entirely -- and still
+		 *     re-arms the automatic fit in the latch block at the top.
+		 *   - The read -> edit posture flip (ImpressTileLayer.
+		 *     _switchToPartBasedView) does not need a refit at an unchanged
+		 *     width: fileBasedView already substitutes the SINGLE-part size in
+		 *     _recalcZoom, and partBasedView's fileSize IS that same single
+		 *     part, so the ratio is the same number on both sides of the flip.
+		 *
+		 * Phone only; substituting `false` for _vulcanPhoneChrome() leaves the
+		 * stock branch, which is byte-identical to what shipped.
+		 */
+		if (vulcanPhoneImpress) {
+			// The SAME predicate `_recalcZoom` uses to decide which axis binds
+			// (`vulcanPhoneImpress && DomUtil.isPortrait()`, :4053) -- read
+			// here rather than re-derived, so the guard and the fit can never
+			// disagree about whether the height matters. We are already inside
+			// the vulcanPhoneImpress branch, so the phone half is implied.
+			var vulcanWidthBound = window.L.DomUtil.isPortrait();
+			if (VulcanImpressFit.shouldSkipRefit(
+				this._firstFitDone, this._lastFitSizeX, newSize.x,
+				vulcanWidthBound, this._lastFitSizeY, newSize.y))
+				return;
+		} else if (vulcanDesktopWriter) {
+			// A first fit can precede the workspace settling into its split
+			// width. Refit the automatic view when that width changes, but
+			// permanently relinquish it after a deliberate horizontal pan/zoom.
+			// Comparing zoom numbers alone would reclaim a user's
+			// zoom-away-and-back.
+			if (this._firstFitDone && (this._vulcanWriterUserViewport ||
+				Math.abs(newSize.x - this._lastFitSizeX) < 2 * app.dpiScale))
+				return;
+		} else if (this._firstFitDone && newSize.x - oldSize.x === 0) {
 			return;
+		}
 
 		maxZoom = maxZoom || this._getMaxZoom();
 
 		var zoom;
-		if (this.isImpress() || changeZoom /* writer */) {
+		// A width re-fit must compute the fit even where a stored
+		// smartZoom=false would otherwise hand back the default rung.
+		// `changeZoom` is gated on the stored smartZoom preference, which is
+		// FALSE by default -- MEASURED on a live document: smartZoomPref false,
+		// column 1241px, page 854px, zoom pinned at 100%. So the fit computed a
+		// level and then never applied it, and the "amber gutter" was fit-width
+		// being switched off rather than any rounding. Desktop Writer always
+		// fits; the preference still governs every other surface.
+		if (this.isImpress() || changeZoom /* writer */ || vulcanDesktopWriter) {
 			zoom = this._recalcZoom(newSize, bringCommentsIntoView, maxZoom);
 		} else {
 			zoom = this._getWriterDefaultZoom();
@@ -3535,14 +5074,179 @@ window.L.CanvasTileLayer = window.L.Layer.extend({
 		// This resets the view & scroll area and does a 'panTo'
 		// to keep the cursor in view.
 		// But of course, zoom to fit the first time.
-		if (this._firstFitDone)
+		//
+		// PHONE IMPRESS KEEPS THE RECOMPUTED FIT, and that is not a new
+		// behaviour -- it is the behaviour that has to be carried across the
+		// change above. `_firstFitDone` was cleared on every Impress resize
+		// until three lines of this function stopped clearing it, so this
+		// discard branch has never once run for a presentation and the phone has
+		// always applied the freshly computed fit. Leaving the branch reachable
+		// now would silently invert that: past the guard above, the width has
+		// genuinely changed since the last applied fit -- a rotation, a sidebar,
+		// a real form-factor change -- and those are exactly the cases that MUST
+		// refit. R25 [MEASURED]: rotation is the legitimate refit trigger, and a
+		// portrait zoom kept across a rotation is a crop, which is the other
+		// half of the same report ("not showing the slides properly").
+		// ...and desktop Writer keeps its recomputed fit for the same reason the
+		// phone deck does: past the guard above, the column has genuinely moved
+		// since the last applied fit, which is precisely the case that MUST
+		// re-fit. Discarding it here is what left the page clipped behind an
+		// opened sidebar.
+		if (this._firstFitDone && !vulcanPhoneImpress && !vulcanDesktopWriter)
 			zoom = this._map._zoom;
 		this._firstFitDone = true;
 
-		if (zoom > 1)
-			zoom = Math.floor(zoom);
+		// The commit stays an integer rung either way (MouseControl invariant).
+		// Phone Writer may snap a near-fit level UP instead of losing a whole
+		// 1.2x rung to the floor; every other surface keeps the stock floor.
+		if (zoom > 1) {
+			// Desktop Writer opens at the tightest rung that still shows the
+			// whole text column, margins allowed to run off the ends. Only the
+			// AUTOMATIC fit is bound by it -- `_getMaxZoom` is untouched, so the
+			// user's own zoom still goes past it and the page scrolls sideways.
+			var vulcanTextLevel = vulcanDesktopWriter
+				? VulcanWriterFit.textFitLevel(
+					newSize.x,
+					app.activeDocument.fileSize.pX,
+					app.activeDocument.fileSize.x,
+					this._vulcanTextWidthMm100,
+					this._map.getZoom())
+				: null;
+			if (vulcanTextLevel !== null)
+				zoom = Math.min(vulcanTextLevel, maxZoom);
+			else
+				zoom = vulcanPhoneWriter
+					? VulcanWriterFit.snapFitLevel(zoom)
+					: Math.floor(zoom);
+		}
+		//
+		// AND PHONE WRITER NEVER COMMITS AN ILLEGIBLE RUNG. This function's
+		// whole job is fitting the PAGE WIDTH, and until now nothing on its
+		// path had a term for type size: Letter on a 393px phone fits at
+		// level 5.74, snaps to rung 6, and renders 11pt body at 7.07 CSS px
+		// (round-12 D8). floorToLegible carries the derivation and the page-
+		// view trade it accepts. Deliberately OUTSIDE the `zoom > 1` guard,
+		// which exists only to keep snapFitLevel off levels it declines to
+		// round: a fit that lands at or below 1 is the most illegible answer
+		// this function can give, so a floor that skipped it would fail open
+		// exactly where it is needed -- the failure mode the Calc fit floor
+		// was deleted for (MouseControl.pinchNavigationFloorCalc).
+		//
+		// Phone Writer only; the desktop arms above are untouched.
+		if (vulcanPhoneWriter)
+			zoom = VulcanWriterFit.floorToLegible(zoom, maxZoom);
 
-		this._map.setZoom(zoom, {animate: false});
+		/*
+		 * Phone Impress: do not write a zoom that is already the zoom.
+		 *
+		 * This is the equality guard the function is missing. Stock HAS one --
+		 * `if (this._firstFitDone && newSize.x - oldSize.x === 0) return;` a few
+		 * lines up -- but Impress cannot reach it: the `else if (this.isImpress())
+		 * recalcFirstFit = true` branch above runs on EVERY call, unconditionally,
+		 * and `if (recalcFirstFit) this._firstFitDone = false;` then clears the
+		 * very latch that guard tests. So for a presentation the early return is
+		 * dead code and every resize falls through to setZoom.
+		 *
+		 * On a phone that is not a rare path. `resize` arrives from a
+		 * ResizeObserver on #document-container (_initContainer) and from
+		 * `map.on('resize', ...)`, which is wired to BOTH this function and
+		 * `_syncTileContainerSize` -- which itself calls this function again. So a
+		 * single browser-chrome retraction while scrolling the deck lands here
+		 * more than once, and each time re-enters Map.setZoom: setZoomChanged(true),
+		 * _limitCenter, _getCenterOffset, panBy, setZoomChanged(false). panBy
+		 * early-returns on a zero offset, but _limitCenter clamps the centre to
+		 * maxBounds first, so the offset is only zero while the view is already
+		 * inside them.
+		 *
+		 * Compare against `_limitZoom(zoom)`, not `zoom`, because that is the value
+		 * setZoom will actually apply -- Map.setView re-limits it and Map's minZoom
+		 * is 1. That distinction is what makes the guard work on a deck-fitted
+		 * document: _recalcZoom's `Math.min(maxZoom, Math.max(0.1, _zoom))` floor
+		 * returns 0.1, which is NEVER equal to the pinned _zoom of 1, so a raw
+		 * comparison would re-write on every resize forever. Limiting first makes
+		 * the two comparable and the write stops.
+		 *
+		 * This is a no-op guard, not a debounce. The recompute is legitimate -- a
+		 * real size change must refit -- and it still happens; what is suppressed is
+		 * only the write of a value equal to what is already there. Nothing is
+		 * delayed and no coalescing window is introduced, so a genuine resize still
+		 * refits on the same frame.
+		 *
+		 * The centre re-clamp is not lost with the write. Every resize path that
+		 * reaches here also runs `_syncTileContainerSize`, which does its own
+		 * `this._map.setView(this._map.getCenter())` immediately after calling this
+		 * function.
+		 *
+		 * NOTE FOR THE EXPLICIT PATH, which is the one exception to the sentence
+		 * above: 'fitwidthzoom' -> `ViewLayout.adjustViewZoomLevel` calls
+		 * `_fitWidthZoom(undefined, undefined, true)` on its own, with no
+		 * `_syncTileContainerSize` behind it, so when the map is ALREADY at the fit
+		 * zoom this guard suppresses the write and nothing re-centres. That is
+		 * deliberate and it does not strand the kebab's 'Zoom to Fit Slide' row:
+		 * the row's real job is clearing `_vulcanUserZoomed`, and that happens at
+		 * the TOP of this function on `recalcFirstFit === true`, before anything
+		 * here runs. What is skipped is a `_limitCenter` re-clamp at a zoom that is
+		 * already correct -- i.e. nothing the user asked for. Do not "fix" this by
+		 * exempting recalcFirstFit; that reintroduces a write of an unchanged value
+		 * on a path a user can tap repeatedly.
+		 *
+		 * Phone only, and the gate is the single `_vulcanPhoneChrome()` evaluation
+		 * already taken at the top of this function -- substituting `false` for it
+		 * reproduces HEAD on desktop and tablet.
+		 */
+		if (vulcanPhoneImpress && this._map._limitZoom(zoom) === this._map.getZoom())
+			return;
+
+		// The baseline the guard above compares against, recorded HERE and
+		// nowhere else: immediately before the write that applies a fit, so it
+		// can only ever hold a width at which a fit actually landed. Setting it
+		// next to `_firstFitDone = true` would look tidier and would be wrong --
+		// it would record widths for passes that returned without writing, and
+		// the point of the second precondition is that it cannot be satisfied by
+		// a pass that did not fit anything.
+		this._lastFitSizeX = vulcanFitViewportX;
+		// The height half of the same baseline (round-8 G9). Recorded in the
+		// same breath and at the same place, because in landscape the fit is
+		// height-bound and the guard above compares BOTH axes there. Writing
+		// it anywhere else would let the two baselines describe different
+		// passes, which is the failure the width comment warns about.
+		this._lastFitSizeY = newSize.y;
+		// The zoom half of the same baseline. Recorded in the same breath and
+		// at the same place, so it can only ever hold a zoom that a fit
+		// actually applied -- that is what lets the first-ruler re-fit in
+		// _onRulerUpdate read "the document is still on our fit" off a
+		// comparison instead of a latch. Limited, because _limitZoom is what
+		// setZoom will really land on and getZoom() will report back.
+		this._lastFitZoom = this._map._limitZoom(zoom);
+		// VULCAN (Lane W): announce this write to the Writer reflow
+		// controller. Its zoomend handler cannot otherwise tell an app fit
+		// write from the reader's pinch, and the two demand opposite
+		// treatment: a pinch retargets the reflow ask, a fit write serves
+		// the PAGINATED posture and says nothing about the reading zoom.
+		// MEASURED on build #2 (wr1-open-trace, 3/3): the open's fit pass
+		// fired zoomend at the page-fit level and the untagged handler
+		// re-sized the parity-default ask to 20209 twips — 5.3x the screen
+		// at the legible level — whose granted answer the verdict then
+		// withdrew from ~900ms into every docx open. A bracket rather than
+		// a bare flag, because a setZoom to the level the map is already at
+		// fires no zoomend, and a leaked flag would mislabel the reader's
+		// next pinch. setZoom fires zoomend synchronously, so the scope is
+		// tight. Writer only; the controller is Writer-scoped and every
+		// other doctype leaves the bracket alone.
+		const vulcanWriterReflowFitTag =
+			this.isWriter() &&
+			app.writerReflow &&
+			typeof app.writerReflow.noteFitZoomWrite === 'function';
+		if (vulcanWriterReflowFitTag)
+			app.writerReflow.noteFitZoomWrite();
+		this._vulcanWriterFitInProgress = vulcanDesktopWriter;
+		try {
+			this._map.setZoom(zoom, {animate: false});
+		} finally {
+			this._vulcanWriterFitInProgress = false;
+			if (vulcanWriterReflowFitTag)
+				app.writerReflow.clearFitZoomWrite();
+		}
 	},
 
 	// Cells can change position during changes of zoom level in calc
@@ -3829,6 +5533,171 @@ window.L.CanvasTileLayer = window.L.Layer.extend({
 		);
 	},
 
+	/*
+	 * VULCAN (slides-blank-zoom): the painted world's viewport top-left, in
+	 * the map's document core pixels.
+	 *
+	 * On phone Impress the pixels on screen come from the SECTION world —
+	 * activeLayout.viewedRectangle / scrollProperties with the document
+	 * anchor — while tile fetch, tilecombine culling and the pinch commit
+	 * all read the leaflet map's view. The two are allowed to part company:
+	 * the read-posture deck scroll moves only the layout, and
+	 * ViewLayoutFileBased.restoreScrollAnchor deliberately re-anchors the
+	 * painted world on zoomend (a zoom keeps you on the slide you were
+	 * reading) with no corresponding map write. MEASURED on build #5 (i2b
+	 * two-worlds trace): one pinch left the map a constant ~13.5k twips off
+	 * the painted world; the next pinch committed the map viewport at
+	 * y=16803..21043 on a 10,801-twip slide — tilecombine followed the
+	 * bogus rect, haveAllTilesInView() read true, and the canvas painted
+	 * background until the next gesture.
+	 *
+	 * canvasToDocumentPoint owns the anchor on every layout, and feeding it
+	 * the document anchor's own canvas position yields exactly the painted
+	 * viewport's top-left: for ViewLayoutBase that is the viewedRectangle
+	 * corner (the map-following world, so reconciling there is a no-op),
+	 * and for the MultiPage/FileBased override it is scroll viewX/viewY
+	 * mapped into stacked document space. Null when no layout can answer.
+	 */
+	_vulcanPaintedWorldTopLeft: function () {
+		const layout = app.activeDocument && app.activeDocument.activeLayout;
+		if (!layout || typeof layout.canvasToDocumentPoint !== 'function')
+			return null;
+		if (!app.sectionContainer ||
+			typeof app.sectionContainer.getDocumentAnchorSection !== 'function' ||
+			!app.sectionContainer.getDocumentAnchorSection())
+			return null;
+		const anchor = app.sectionContainer.getDocumentAnchor();
+		const topLeft = layout.canvasToDocumentPoint(
+			cool.SimplePoint.fromCorePixels([anchor[0], anchor[1]]));
+		if (isNaN(topLeft.pX) || isNaN(topLeft.pY)) return null;
+		return new cool.Point(topLeft.pX, topLeft.pY);
+	},
+
+	/*
+	 * Reconcile the leaflet map onto the painted section world: a pan-only
+	 * setView at the current zoom, taken when the two viewports have
+	 * drifted apart. Phone chrome only. Where the painted world follows the
+	 * map by construction (the part-based layouts through _syncTilePanePos)
+	 * this is a structural no-op; where it does not (fileBasedView), this
+	 * is the one writer that brings the map back. Called from
+	 * MouseControl.onMultiTouchStart — so the whole pinch pipeline,
+	 * _getZoomDocPos's panePortion included, computes against a truthful
+	 * pane — and from _vulcanClampCommittedView below. Returns whether a
+	 * setView was taken.
+	 */
+	_vulcanReconcileMapToPaintedWorld: function () {
+		if (!this._vulcanPhoneChrome()) return false;
+		const painted = this._vulcanPaintedWorldTopLeft();
+		if (!painted) return false;
+		const bounds = this._map.getPixelBoundsCore();
+		if (Math.abs(bounds.min.x - painted.x) < 2 &&
+			Math.abs(bounds.min.y - painted.y) < 2)
+			return false;
+		const size = bounds.getSize();
+		this._map.setView(
+			this._map.unproject(
+				new cool.Point(
+					(painted.x + size.x / 2) / app.dpiScale,
+					(painted.y + size.y / 2) / app.dpiScale)),
+			this._map.getZoom());
+		return true;
+	},
+
+	/*
+	 * The other direction: scroll the PAINTED section world onto the map's
+	 * committed viewport. The zoom commit's map center is the one carrier
+	 * of the pinch anchor — MouseControl latched the document point under
+	 * the fingers through the section world and every zoom frame and the
+	 * commit's _getZoomMapCenter kept it — while the layout's own zoomend
+	 * re-anchor (ViewLayoutFileBased.restoreScrollAnchor) preserves only
+	 * the TOP-EDGE part+fraction and knows nothing of the gesture.
+	 *
+	 * MEASURED on build #6 (g5c frozen-viewport trace, Dinosaurs dpr3): a
+	 * center-anchored pinch from the opening fit committed with the
+	 * section world back at the deck top (scrollProperties viewY=0 after
+	 * BOTH rungs, 3->9->15) because the top-edge anchor at the open IS the
+	 * deck top; the shipped map->painted reconcile then yanked the map
+	 * onto that stale painted world (leaflet {6,0,2364,4240} — on-slide,
+	 * so the on-part belt below reads "nothing to heal"), and at zoom 15
+	 * the viewport is the featureless white top-left corner of slide 1:
+	 * a solid-white paint of CORRECT tiles, reported as a frozen viewport.
+	 *
+	 * So the painted world follows the commit FIRST — a scroll by
+	 * (map - painted), both read as stacked-document core pixels
+	 * (_vulcanPaintedWorldTopLeft converts through canvasToDocumentPoint,
+	 * which owns the anchor; the delta is frame-invariant because the
+	 * view<->document x/y mappings differ by per-part constants). The
+	 * layout's scroll() applies its own clamps and re-runs the tile queue
+	 * (updateViewData), exactly what the tile wait below needs. Returns
+	 * whether a scroll was taken.
+	 */
+	_vulcanCommitPaintedWorldToMap: function () {
+		if (!this._vulcanPhoneChrome()) return false;
+		const layout = app.activeDocument && app.activeDocument.activeLayout;
+		if (!layout || typeof layout.scroll !== 'function') return false;
+		const painted = this._vulcanPaintedWorldTopLeft();
+		if (!painted) return false;
+		const mapTopLeft = this._map.getPixelBoundsCore().min;
+		const dX = mapTopLeft.x - painted.x;
+		const dY = mapTopLeft.y - painted.y;
+		if (Math.abs(dX) < 2 && Math.abs(dY) < 2) return false;
+		layout.scroll(dX, dY);
+		return true;
+	},
+
+	/*
+	 * VULCAN belt (slides-blank-zoom): a committed zoom must land the map
+	 * viewport where painted content exists. Runs right after the commit's
+	 * mapUpdater in the painter's zoomStepEnd finishing block, before the
+	 * tile wait starts polling — converting ANY residual drift, whatever
+	 * produces it next, into a correct paint instead of a multi-second
+	 * blank at rest. Scoped per doctype:
+	 *
+	 *  - fileBasedView (the read-posture deck; Draw/PDF): the map's
+	 *    committed viewport carries the pinch anchor and the layout's
+	 *    zoomend re-anchor does not (it keeps the top edge, not the
+	 *    gesture — the build-#6 frozen-viewport residual), so the PAINTED
+	 *    world scrolls onto the map first
+	 *    (_vulcanCommitPaintedWorldToMap). Then the reconcile pulls the
+	 *    map onto wherever the layout's clamps actually let the painted
+	 *    world land — a commit past the deck end settles at the end, on
+	 *    both worlds. Where the two already agree both halves are no-ops:
+	 *    multi-part scrolling legitimately parks the viewport across slide
+	 *    boundaries, so "inside the current part" is not an invariant this
+	 *    view can assert.
+	 *  - every part-based world (Impress edit posture, Writer, Calc): the
+	 *    painted world follows the map by construction, so the only
+	 *    independent truth is the document bounds. If the committed
+	 *    viewport does not intersect them at all — a state that is blank
+	 *    by definition — clamp the center onto the document. Impress edit
+	 *    posture's document IS the current part, so this is "clamp onto
+	 *    the part"; Writer and Calc cannot reach the state today and are
+	 *    only belted.
+	 *
+	 * Phone chrome only; desktop and tablet keep the stock pipeline.
+	 */
+	_vulcanClampCommittedView: function () {
+		if (!this._vulcanPhoneChrome()) return;
+		if (app.file.fileBasedView) {
+			this._vulcanCommitPaintedWorldToMap();
+			this._vulcanReconcileMapToPaintedWorld();
+			return;
+		}
+		if (!(this._docWidthTwips > 0) || !(this._docHeightTwips > 0)) return;
+		const bounds = this._map.getPixelBounds();
+		const min = this._pixelsToTwips(bounds.min);
+		const max = this._pixelsToTwips(bounds.max);
+		if (max.x > 0 && max.y > 0 &&
+			min.x < this._docWidthTwips && min.y < this._docHeightTwips)
+			return; // The viewport holds document: nothing to heal.
+		const center = new cool.Point(
+			Math.min(Math.max((min.x + max.x) / 2, 0), this._docWidthTwips),
+			Math.min(Math.max((min.y + max.y) / 2, 0), this._docHeightTwips));
+		this._map.setView(
+			this._twipsToIntern(center, this._map.getZoom()),
+			this._map.getZoom());
+	},
+
 	pauseDrawing: function () {
 		if (this._painter && app.sectionContainer)
 			app.sectionContainer.pauseDrawing();
@@ -3930,8 +5799,36 @@ window.L.CanvasTileLayer = window.L.Layer.extend({
 			if (heightIncreased) {
 				// if the keyboard is hidden - be sure we setup correct state in TextInput
 				this._map.setAcceptInput(false);
-			} else
-				this._onUpdateCursor(true);
+			} else {
+				/*
+					A SHRINKING RESIZE MUST NOT MOVE X ON PHONE IMPRESS.
+
+					`_onUpdateCursor(true)` ends in `scrollToPos`, which moves
+					BOTH axes whenever the caret's column is off screen. That is
+					the displacement `_nonDesktopChecksAfterResizeEvent` below
+					was already narrowed to a y-only reveal for -- and the two
+					run from the SAME `_syncTileContainerSize` pass, on the same
+					`heightIncreased === false` branch, against the same caret.
+					So the narrowing covered one half of one caller: the panTo
+					honoured it and this call still slammed the slide sideways.
+					Measured on prod 8/24 (robert-08) at the read -> edit flip,
+					where the keyboard provided the resize and the caret was the
+					read posture's leftover: 117 CSS px off-screen left. The flip
+					retires that caret now (ImpressTileLayer.
+					_vulcanReanchorPartBasedFlip); every LATER resize still
+					reaches this line with whatever caret the edit posture holds.
+
+					Refusing the scroll leaves the overlay refresh, which is what
+					this call is for, and leaves the vertical follow to the
+					sibling that already owns it -- so no caret goes unrevealed.
+
+					Phone Impress only; substituting `false` for
+					`_vulcanPhoneChrome()` passes `true`, which is stock.
+				*/
+				const vulcanPhoneImpress =
+					this.isImpress() && this._vulcanPhoneChrome();
+				this._onUpdateCursor(/* scroll */ !vulcanPhoneImpress);
+			}
 		}
 	},
 
@@ -3944,9 +5841,91 @@ window.L.CanvasTileLayer = window.L.Layer.extend({
 		if (!heightIncreased && this._map._docLoaded && hasVisibleCursor) {
 			const cursorPos = this._map._docLayer._twipsToIntern({ x: app.file.textCursor.rectangle.x1, y: app.file.textCursor.rectangle.y2 });
 			const cursorPositionInView = this._isInternInView(cursorPos);
-			if (!cursorPositionInView)
-				this._map.panTo(cursorPos);
+			if (!cursorPositionInView) {
+				// Under phone chrome a keyboard shrink must never move x:
+				// panTo recenters BOTH axes and can slam the caret column to
+				// the left edge. Reuse VulcanCaretReveal's y-only contract;
+				// its deferred controller pass then recomputes to 0.
+				if (this._vulcanPhoneChrome())
+					this._vulcanRevealCaretVertically();
+				else
+					this._map.panTo(cursorPos);
+			}
 		}
+	},
+
+	_vulcanRevealCaretVertically: function () {
+		const layout = app.activeDocument.activeLayout;
+		const band = layout.viewedRectangle;
+		const caret = app.file.textCursor.rectangle;
+		if (!band || !caret || !app.sectionContainer)
+			return;
+		const scroll = app.sectionContainer.getSectionWithName(app.CSections.Scroll.name);
+		if (!scroll || typeof scroll.scrollVerticalWithOffset !== 'function')
+			return;
+		// Against the band PLUS any scroll already queued this turn: one resize
+		// runs this more than once (B-0219 in Writer, B-0294 on an Android
+		// Impress retap; see revealCaretVertically).
+		VulcanCaretReveal.revealCaretVertically(
+			band, caret, VulcanCaretReveal.pendingVerticalScrollCorePx(layout),
+			VulcanCaretReveal.MARGIN_CSS_PX * app.dpiScale,
+			(dy) => scroll.scrollVerticalWithOffset(dy));
+	},
+
+	/*
+		THE EDIT POSTURE HAS NO RE-CENTRE AND EVERY CONTAINER RESIZE NEEDS ONE.
+
+		`_syncTileContainerSize` ends by re-imposing the map's own centre on the
+		freshly measured pane. In the READ posture that centre is rebuilt from
+		the new width a few lines further down: `ViewLayoutFileBased.reset()`
+		re-bakes every part's X origin against the container's view size, so a
+		displaced deck is put back on the next resize. The EDIT posture swaps in
+		`ViewLayoutBase`, which has no such pass, and the only thing between the
+		collapsed single-slide extent and the new pane is `_limitCenter` -- which
+		clamps to the nearest EDGE of maxBounds, not to the slide. The result is
+		a one-way ratchet: any X the view picks up while editing is re-imposed by
+		every later resize and nothing ever puts it back.
+
+		That is what makes this the residual half of the flip fix rather than a
+		second opinion about it. `_vulcanReanchorPartBasedFlip` retires the two
+		pre-flip origins AT THE FLIP; the paths that can displace X afterwards --
+		the caret follow directly above, the entry/exit text zoom, an engine
+		scroll -- all land in the same posture, and the read posture's recovery
+		is not reachable from there. The resize is not a rare carrier either: the
+		ResizeObserver on #document-container runs this on the software keyboard,
+		a bottom sheet, the notes strip, browser chrome retracting and rotation.
+
+		X ONLY, AND ONLY WITH NO HORIZONTAL FREEDOM. A slide narrower than the
+		pane has no pan to preserve -- every X offset it can hold is slack -- so
+		re-seating on the slide's own centre cannot discard a gesture. Once the
+		user pinches past fit the slide is WIDER than the pane, that offset IS
+		their pan, and this returns the map's centre untouched. The Y axis is
+		left alone at both sizes: the height-moving resizes are the keyboard and
+		the sheets, i.e. exactly the moments a caret owns the vertical position,
+		and a re-centre would fight the reveal that serves it.
+
+		DELIBERATELY NOT INSIDE `_fitWidthZoom`. The measured trigger was a
+		keyboard-provided resize -- height only -- and in portrait
+		`VulcanImpressFit.shouldSkipRefit` returns before `_fitWidthZoom`
+		computes anything, correctly, because the portrait fit does not read the
+		height. A centring correction placed past that guard would be absent from
+		the one path the prod trace named.
+
+		Phone Impress only; substituting `false` for `_vulcanPhoneChrome()`
+		returns the map's own centre, which is the argument that shipped.
+	*/
+	_vulcanImpressResizeCenter: function () {
+		const center = this._map.getCenter();
+		if (!this.isImpress() || !this._vulcanPhoneChrome()) return center;
+		if (!this._map._docLoaded || app.file.fileBasedView) return center;
+
+		const slideCss = app.activeDocument.fileSize.pX / app.dpiScale;
+		if (!(slideCss > 0)) return center;
+		if (slideCss > this._map.getSize().x) return center;
+
+		const centerPx = this._map.project(center);
+		centerPx.x = slideCss / 2;
+		return this._map.unproject(centerPx);
 	},
 
 	_syncTileContainerSize: function () {
@@ -3976,7 +5955,7 @@ window.L.CanvasTileLayer = window.L.Layer.extend({
 		this._fitWidthZoom();
 
 		// Center the view w.r.t the new map-pane position using the current zoom.
-		this._map.setView(this._map.getCenter());
+		this._map.setView(this._vulcanImpressResizeCenter());
 
 		this._nonDesktopChecksAfterResizeEvent(heightIncreased);
 
@@ -4049,6 +6028,54 @@ window.L.CanvasTileLayer = window.L.Layer.extend({
 		 */
 		this._invalidateZoomFirstFit = false;
 		this._includedCommentsInFirstFit = false;
+
+		/*
+		 * Phone Impress only: set by `zoomStepEnd` when the user ends a zoom
+		 * gesture, read by `_fitWidthZoom` so a resize does not discard it.
+		 * Cleared by an explicit 'Zoom to Fit Slide', and by a rotation.
+		 *
+		 * `_vulcanZoomedPortrait` is the orientation the pinch was taken in, and
+		 * it is what makes the latch expire instead of latching for the session:
+		 * `_fitWidthZoom` keeps the zoom only while the orientation still matches.
+		 * It is read only when `_vulcanUserZoomed` is true, but it is seeded from
+		 * the real orientation rather than a bare `false` so the pair is never in
+		 * a state the device was not actually in.
+		 *
+		 * Note this runs on document LOAD, not on resize -- that is precisely why
+		 * a latch cleared only here is a one-way door. Inert everywhere else.
+		 */
+		this._vulcanUserZoomed = false;
+		this._vulcanZoomedPortrait = window.L.DomUtil.isPortrait();
+
+		// One-shot: set by VulcanImpressTextEntry around its programmatic
+		// edit-entry/exit zooms, spent by `zoomStepEnd` so those animated zooms
+		// do not arm `_vulcanUserZoomed` as if the user had pinched.
+		this._vulcanProgrammaticZoom = false;
+
+		// The container width at which _fitWidthZoom last APPLIED a fit, and the
+		// second of the two preconditions on its no-op guard. Zero rather than
+		// undefined so the field has a stated value on every layer, and zero
+		// specifically because `VulcanImpressFit.shouldSkipRefit` refuses any
+		// baseline that is not > 0 -- a fit has to have happened before the
+		// guard is allowed to skip one. Cleared here, i.e. per document load,
+		// alongside the rest of the fit state.
+		this._lastFitSizeX = 0;
+		// The height baseline, cleared with the width one for the same
+		// reason and on the same schedule. `shouldSkipRefit` refuses any
+		// height baseline that is not > 0 in landscape, so zero here means
+		// "no fit has landed" in both orientations rather than only one.
+		this._lastFitSizeY = 0;
+		// The zoom baseline, on the same schedule as the two above: zero means
+		// "no fit has landed", which the first-ruler re-fit treats as "not
+		// ours to re-fit".
+		this._lastFitZoom = 0;
+		this._vulcanWriterUserViewport = false;
+		this._vulcanWriterFitInProgress = false;
+		// Text-column geometry from `hrulerupdate`; 0 until core sends a real
+		// payload, which is what makes textFitLevel fall back rather than guess.
+		this._vulcanTextWidthMm100 = 0;
+		this._vulcanPageWidthMm100 = 0;
+		this._vulcanLeftMarginMm100 = 0;
 
 		this._referencesAll = [];
 		this._sparklineGroupReferencesAll = [];
@@ -4133,16 +6160,24 @@ window.L.CanvasTileLayer = window.L.Layer.extend({
 
 		TextSelections.dispose();
 
+		this._cancelMoveSettle();
 		this._removeSplitters();
 		window.L.DomUtil.remove(this._canvasContainer);
 	},
 
 	getEvents: function () {
+		// Hold ONE throttled instance rather than building it inline, so the
+		// lock survives across getEvents calls. _moveEnd no longer shares it
+		// -- see the note there: a leading-edge throttle cannot answer "has
+		// the gesture stopped", and sharing it deleted the settle.
+		if (!this._moveThrottled)
+			this._moveThrottled = app.util.throttle(this._moveThrottledUpdate, this.options.updateInterval, this);
+
 		var events = {
 			viewreset: this._viewReset,
 			movestart: this._moveStart,
 			// update tiles on move, but not more often than once per given interval
-			move: app.util.throttle(this._move, this.options.updateInterval, this),
+			move: this._moveThrottled,
 			moveend: this._moveEnd,
 			splitposchanged: this._move,
 		};
@@ -4156,10 +6191,70 @@ window.L.CanvasTileLayer = window.L.Layer.extend({
 	},
 
 	zoomStepEnd: function (zoom, newCenter, mapUpdater, runAtFinish, noGap) {
+		// Pinches can reach setView directly without Map.setZoom.
+		//
+		// `isWriter` is read defensively for the same reason the PAINTER's copy of
+		// this method reads `isCalc` and `isWriter` that way (:370, :393): the phone
+		// pinch suites extract this method's SHIPPED TEXT and run it against a
+		// minimal Impress layer stub, so a method the stub does not carry must read
+		// as "not Writer" rather than throw. ImpressPhoneZoomLatch.test.ts happens to
+		// stub `isWriter`; ImpressPhoneEditZoomAnimated.test.ts does not, and all
+		// five of its cases died on "this.isWriter is not a function" -- the whole
+		// fork mocha gate red -- until this read was made defensive.
+		if (typeof this.isWriter === 'function' && this.isWriter() &&
+			this._firstFitDone && !this._vulcanWriterFitInProgress &&
+			document.documentElement.classList.contains('vulcan-desktop-chrome') &&
+			zoom !== this._map.getZoom())
+			this._vulcanWriterUserViewport = true;
+		/*
+		 * The one place a USER-CHOSEN zoom is knowable, which is what the phone
+		 * Impress guard in `_fitWidthZoom` needs. Everything that ends a zoom
+		 * gesture lands here: a pinch (MouseControl.onMultiTouchEnd), a
+		 * ctrl+wheel (Map.Scroll), and the animated zoom controls
+		 * (runZoomAnimation, reached from Map.setZoom when animate is true).
+		 *
+		 * `_fitWidthZoom` itself cannot reach this method: it calls
+		 * `setZoom(zoom, {animate: false})`, and Map.setZoom takes `animate` as
+		 * its THIRD argument -- which is undefined there -- so it goes down the
+		 * non-animated branch and calls its mapUpdater directly. The automatic
+		 * fit therefore cannot latch itself on.
+		 *
+		 * `_firstFitDone` gates the latch so nothing during document load can
+		 * set it before the first fit has happened, and the zoom comparison
+		 * keeps it meaning "the user CHANGED the zoom": the map has not been
+		 * moved to `zoom` yet at this point -- that is what the mapUpdater
+		 * passed in here goes on to do -- so `getZoom()` is still the zoom the
+		 * gesture started from, and a two-finger touch that ends where it began
+		 * leaves the automatic fit armed.
+		 *
+		 * The orientation is stamped alongside the latch, and that is what stops
+		 * the latch being permanent. `_fitWidthZoom` keeps this zoom across a
+		 * resize only while the device is still in the orientation the gesture
+		 * happened in; a rotation is a size-class change and re-fits. Recording it
+		 * HERE rather than deriving it later is the point -- "the box the user
+		 * chose this zoom for" is only knowable at the moment they chose it.
+		 */
+		// One-shot exemption: a zoom REQUESTED BY CODE (VulcanImpressTextEntry's
+		// edit-entry zoom and its exit restore) also lands here once animated,
+		// and must not read as "the user chose this zoom". Spent unconditionally
+		// so a call that never reaches the arm below still consumes it -- a real
+		// pinch can never inherit the exemption.
+		const vulcanProgrammaticZoom = this._vulcanProgrammaticZoom === true;
+		this._vulcanProgrammaticZoom = false;
+
+		if (!vulcanProgrammaticZoom
+			&& this.isImpress() && this._firstFitDone && zoom !== this._map.getZoom()
+			&& this._vulcanPhoneChrome()) {
+			this._vulcanUserZoomed = true;
+			this._vulcanZoomedPortrait = window.L.DomUtil.isPortrait();
+		}
+
 		this._painter.zoomStepEnd(zoom, newCenter, mapUpdater, runAtFinish, noGap);
 	},
 
 	preZoomAnimation: function (pinchStartCenter) {
+		// A new zoom gesture must not race a pending release settle.
+		this.flushVulcanPinchSettle();
 		this._pinchStartCenter = this._map.project(pinchStartCenter).multiplyBy(app.dpiScale); // in core pixels
 		this._painter._offset = new cool.Point(0, 0);
 		// Snapshot the starting scale. Each zoom frame drives app.twipsToPixels
@@ -4179,12 +6274,16 @@ window.L.CanvasTileLayer = window.L.Layer.extend({
 	},
 
 	postZoomAnimation: function () {
-		if (app.file.textCursor.visible) {
+		// The _cursorMarker guard mirrors preZoomAnimation's: a two-finger
+		// tap can land here before the marker has ever been built.
+		if (this._cursorMarker && app.file.textCursor.visible) {
 			this._cursorMarker.setOpacity(1);
 		}
 
+		// Not setOpacity(1): on a phone the knob is tap-summoned and may be
+		// mid-fade, and restoring it flat would put back what the fade removed.
 		if (this._map._textInput._cursorHandler)
-			this._map._textInput._cursorHandler.setOpacity(1);
+			this._map._textInput._cursorHandler.restoreOpacity();
 
 		TextSelections.showHandles();
 
@@ -4203,6 +6302,13 @@ window.L.CanvasTileLayer = window.L.Layer.extend({
 		if (this._map.getDocType() === 'spreadsheet')
 			OtherViewCellCursorSection.closePopups();
 
+		// The 10-step ramp exists to hide tile latency behind scaled
+		// stale frames. Vector Impress repaints the target zoom in a
+		// single frame, and the ramp's only visible product there is the
+		// transition stack of page chrome ("a deeper shadow for a
+		// second") — so the discrete zoom lands noGap, like the pinch
+		// settle above whose eased frames already closed the gap.
+		var noGap = RenderManager.isVectorRendering();
 		this.preZoomAnimation(pinchCenter);
 		this.zoomStep(this._map.getZoom(), pinchCenter);
 		var thisObj = this;
@@ -4212,7 +6318,68 @@ window.L.CanvasTileLayer = window.L.Layer.extend({
 			function () {
 				thisObj.postZoomAnimation();
 				runAtFinish();
-			});
+			},
+			noGap);
+	},
+
+	/*
+	 * Phone pinch release. The rung commit is load-bearing (tiles address the
+	 * rounded zoom), but stepping the view most of a rung in one frame reads
+	 * as a jerk; Google holds the released scale. Close the gap on a clock
+	 * instead: the SAME continuous zoomStep frames the live gesture just
+	 * rendered, eased over pinchSettleDurationMs, then the commit through
+	 * zoomStepEnd -- whose finishing block owns the user-zoom latch, the
+	 * same-rung fast arms and the settle restore. noGap, because the eased
+	 * frames have already closed the visual gap the 10-step finisher exists
+	 * to close.
+	 */
+	runVulcanPinchSettleAnimation: function (fromZoom, zoomEnd, center, mapUpdater, runAtFinish) {
+		this.flushVulcanPinchSettle();
+		var thisObj = this;
+		var startTime;
+		this._vulcanPinchSettleCommit = function () {
+			thisObj._vulcanPinchSettleCommit = undefined;
+			thisObj._vulcanPinchSettleRAF = undefined;
+			thisObj.zoomStepEnd(zoomEnd, center, mapUpdater, runAtFinish, true /* noGap */);
+		};
+		var frame = function (now) {
+			// A flush landed the commit while this frame was queued.
+			if (thisObj._vulcanPinchSettleCommit === undefined)
+				return;
+			if (startTime === undefined)
+				startTime = now;
+			var t = Math.min(1, (now - startTime) / thisObj.pinchSettleDurationMs);
+			// Ease-out: fast off the finger, soft landing on the rung.
+			var eased = t * (2 - t);
+			thisObj.zoomStep(fromZoom + (zoomEnd - fromZoom) * eased, center);
+			if (t < 1) {
+				thisObj._vulcanPinchSettleRAF = requestAnimationFrame(frame);
+				return;
+			}
+			thisObj._vulcanPinchSettleCommit();
+		};
+		this._vulcanPinchSettleRAF = requestAnimationFrame(frame);
+	},
+
+	pinchSettleDurationMs: 150,
+
+	/*
+	 * Land a pending release settle NOW; the commit is load-bearing, only its
+	 * easing is optional. preZoomAnimation calls this so any newly starting
+	 * zoom gesture begins from a committed rung. The programmatic-zoom
+	 * exemption is parked across the commit: the flushed pinch is the USER's
+	 * zoom and must judge the latch on its own, while the caller that raised
+	 * the flag has not reached its own zoomStepEnd yet.
+	 */
+	flushVulcanPinchSettle: function () {
+		if (!this._vulcanPinchSettleCommit)
+			return;
+		if (this._vulcanPinchSettleRAF !== undefined)
+			cancelAnimationFrame(this._vulcanPinchSettleRAF);
+		var programmatic = this._vulcanProgrammaticZoom;
+		this._vulcanProgrammaticZoom = false;
+		this._vulcanPinchSettleCommit();
+		this._vulcanProgrammaticZoom = programmatic;
 	},
 
 	_viewReset: function (e) {
@@ -4295,15 +6462,60 @@ window.L.CanvasTileLayer = window.L.Layer.extend({
 		var docPixelLimits = new cool.Point(app.activeDocument.fileSize.pX / app.dpiScale, app.activeDocument.fileSize.pY / app.dpiScale);
 		var scrollPixelLimits = new cool.Point(app.activeDocument.activeLayout.viewSize.pX / app.dpiScale, app.activeDocument.activeLayout.viewSize.pY / app.dpiScale);
 		var topLeft = this._map.unproject(new cool.Point(0, 0));
+		// VULCAN: vector Impress editing keeps a HALF-INCH APRON of
+		// space past the slide edge (720 twips of slide space) — a
+		// zoomed-in view may keep that much off-slide context, and the
+		// letterbox center is unchanged because the pad is symmetric.
+		// The wheel-pan clamp carries the same apron (ViewLayout's
+		// vulcanScrollPadCore).
+		if ((this.isImpress() || this.isDraw()) && !app.file.fileBasedView &&
+			window.RenderManager && RenderManager.isVectorRendering()) {
+			var apronCss = 720 * app.twipsToPixels / app.dpiScale;
+			topLeft = this._map.unproject(new cool.Point(-apronCss, -apronCss));
+			scrollPixelLimits = scrollPixelLimits.add(new cool.Point(apronCss, apronCss));
+		}
+		// VULCAN: phone Writer READ scrolls a bottom apron past the
+		// document's end (ViewLayoutWriter.vulcanBottomApronCore). The layout's
+		// own clamp carries it, and these bounds must too: panBy's far-pan branch
+		// (_limitCenterInsideDocument) stopped one apron short of the layout's
+		// end, and a size change with the reader at the end (here, then
+		// setMaxBounds -> panInsideBounds) pulled the view back up. Bottom only,
+		// as in the layout, and 0 everywhere else, so every other bound is
+		// unchanged.
+		var bottomApronCss = this._vulcanBottomApronCss();
+		if (bottomApronCss > 0)
+			scrollPixelLimits = scrollPixelLimits.add(new cool.Point(0, bottomApronCss));
 
 		if (this._documentInfo === '' || sizeChanged) {
 			// we just got the first status so we need to center the document
 			this._map.setMaxBounds(InternBoundsUtil.flexConstruct(topLeft, this._map.unproject(scrollPixelLimits)));
+			this._vulcanBoundsApronCss = bottomApronCss;
 		}
 
 		this._docPixelSize = {x: docPixelLimits.x, y: docPixelLimits.y};
 		if (allPages) this._map.fire('scrolllimits', {});
 		else this._map.fire('scrolllimit', {})
+	},
+
+	// the layout's bottom apron in CSS px, 0 where it has none.
+	_vulcanBottomApronCss: function () {
+		var layout = app.activeDocument && app.activeDocument.activeLayout;
+		if (!layout || typeof layout.vulcanBottomApronCore !== 'function')
+			return 0;
+		return layout.vulcanBottomApronCore() / app.dpiScale;
+	},
+
+	// the apron follows the posture and the host's strip, not the
+	// document size, so the bounds _updateMaxBounds last built can miss it.
+	// Rebuild them when the apron they carry is not the current one. Nothing
+	// to do before any bounds are built, or for a layer that builds its own
+	// (Calc), whose apron is always 0.
+	_vulcanRefreshApronBounds: function () {
+		if (this._vulcanBoundsApronCss === undefined)
+			return;
+		if (this._vulcanBottomApronCss() === this._vulcanBoundsApronCss)
+			return;
+		this._updateMaxBounds(true);
 	},
 
 	// Used with filebasedview.
@@ -4392,11 +6604,22 @@ window.L.CanvasTileLayer = window.L.Layer.extend({
 	},
 
 	// Used with file based view. Check the most visible part and set the selected part if needed.
+	//
+	// The filmstrip scroll is INSIDE the part-changed guard. It used to sit
+	// after it and run on every call, which was survivable while the callers
+	// were a wheel notch, a scrollbar-drag frame and a layout reset, and
+	// stopped being survivable when MouseControl.reconcileVulcanFileBasedPart
+	// added a touch-drag frame and a kinetic-fling draw frame: a pan across one
+	// slide then asked _scrollToPart to move the strip dozens of times, and
+	// every one of those asks reached a scrollIntoView that walks the page.
+	// VulcanFilmstripFollow.planReconcile holds the guard, and its test pins
+	// that scrollStrip is never true for an unchanged part.
 	_checkSelectedPart: function () {
 		var queue = RenderManager.updateFileBasedView(true);
 		if (queue.length > 0) {
 			var partToSelect = this._getMostVisiblePart(queue);
-			if (this._selectedPart !== partToSelect) {
+			var plan = VulcanFilmstripFollow.planReconcile(this._selectedPart, partToSelect);
+			if (plan.notifyServer) {
 				this._selectedPart = partToSelect;
 				app.socket.sendMessage('setclientpart part=' + this._selectedPart);
 				this._map.fire('setpart', {
@@ -4405,8 +6628,10 @@ window.L.CanvasTileLayer = window.L.Layer.extend({
 					docType: this._docType
 				});
 			}
-			this._preview._scrollToPart();
-			this.highlightCurrentPart(partToSelect);
+			if (plan.scrollStrip)
+				this._preview._scrollToPart();
+			if (plan.highlight)
+				this.highlightCurrentPart(partToSelect);
 		}
 	},
 

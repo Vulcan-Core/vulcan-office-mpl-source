@@ -34,6 +34,7 @@
 #include <common/Unit.hpp>
 #include <common/Uri.hpp>
 #include <common/Util.hpp>
+#include <common/VulcanLogScrub.hpp>
 #include <kit/ChildSession.hpp>
 #include <kit/KitHelper.hpp>
 #include <kit/KitWebSocket.hpp>
@@ -244,8 +245,9 @@ BackgroundSaveWatchdog::BackgroundSaveWatchdog(unsigned mobileAppDocId,
                   // Failed! Release the lock before the shutdown/kill sequence.
                   lock.unlock();
 
-                  LOG_WRN("BgSave timed out and will self-destroy process " << getpid() <<
-                          " (config timeout: " << timeout << ", real timeout: " << saveDuration << ")");
+                  LOG_ERR("BgSave timed out and will self-destroy process " << getpid() <<
+                          " (config timeout: " << timeout << ", real timeout: " << saveDuration <<
+                          "); the parent kit process is left running");
                   Log::shutdown(); // Flush logs.
                   // this attempts to get the saving-thread to generate a backtrace
                   ProcUtil::killThreadById(savingTid, SIGABRT);
@@ -257,7 +259,21 @@ BackgroundSaveWatchdog::BackgroundSaveWatchdog(unsigned mobileAppDocId,
                   // coverity[sleep : SUPPRESS] - don't report sleep with lock held
                   sleep(30); // long enough for a trace ?
                   std::cerr << "BgSave failed to terminate after SIGABRT - will hard self-destroy process " << getpid() << std::endl;
-                  ::kill(0, SIGKILL); // kill(2) is trapped by seccomp.
+                  // Destroy *this* process only. This was kill(0, SIGKILL), which
+                  // had two outcomes, neither of them the intended hard kill:
+                  // with the kit's seccomp filter in force, kill(2) is trapped
+                  // (common/Seccomp.cpp) and we leave through the SIGSYS handler's
+                  // forcedExit() instead of the syscall; without it (a
+                  // --disable-seccomp build, or an install failure tolerated by
+                  // security.seccomp=false) signal 0 means the caller's process
+                  // GROUP, which takes the parent kit and every view it is serving
+                  // down with one stuck background save. tgkill(2) aimed at a
+                  // thread of this process is still process-fatal for SIGKILL,
+                  // cannot escape to the group either way, and is permitted by the
+                  // filter, unlike kill(2)/tkill(2).
+                  ProcUtil::killThreadById(ProcUtil::getThreadId(), SIGKILL);
+                  // Unreachable in practice; if tgkill(2) failed, still leave.
+                  Util::forcedExit(EX_SOFTWARE);
               }
           })
 {
@@ -2277,6 +2293,25 @@ std::shared_ptr<kit::Document> Document::load(const std::shared_ptr<ChildSession
     std::string theme = getDefaultTheme(session);
 
     std::string backgroundTheme = getDefaultBackgroundTheme(session);
+
+    // A slide or a drawing page paints the background and the text colours its
+    // author chose, and the dark theme repaints neither: it only measures that
+    // text against the wrong ground. On a dark slide white text went grey, and
+    // dark text in a box over a light card was lightened until it could not be
+    // read; a chart's labels were lightened on a white slide. Text laid out
+    // under the dark theme keeps those colours after a later switch to Light,
+    // so the view has to start Light, here. The chrome keeps the session's
+    // theme (Control.UIManager.ts, isPageCanvasPaper).
+    switch (_loKitDocument->getDocumentType())
+    {
+    case KIT_DOCTYPE_PRESENTATION:
+    case KIT_DOCTYPE_DRAWING:
+        theme = "Light";
+        backgroundTheme = "Light";
+        break;
+    default:
+        break;
+    }
 
     // Avoid logging userPrivateInfo till it's not anonymized.
     LOG_INF("Initializing for rendering session [" << sessionId << "] on document url [" <<
@@ -4705,7 +4740,9 @@ void dump_kit_state()
     oss << "\nEnd Kit " << ProcUtil::getProcessId() << " Dump State.\n";
 
     const std::string msg = oss.str();
-    fprintf(stderr, "%s", msg.c_str()); // Log in the journal.
+    // Vulcan: raw stderr bypasses the logger's scrub; each session's "docURL:" is the
+    // token-bearing load url, and an OOM close fires this dump through SIGUSR1.
+    fprintf(stderr, "%s", Vulcan::scrubLogSecrets(msg).c_str()); // Log in the journal.
     LOG_WRN(msg);
 }
 

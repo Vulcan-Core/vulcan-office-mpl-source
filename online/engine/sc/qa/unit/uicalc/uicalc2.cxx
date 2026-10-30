@@ -35,6 +35,7 @@
 #include <document.hxx>
 #include <docsh.hxx>
 #include <formulacell.hxx>
+#include <globalnames.hxx>
 #include <drwlayer.hxx>
 #include <inputopt.hxx>
 #include <postit.hxx>
@@ -942,6 +943,175 @@ CPPUNIT_TEST_FIXTURE(ScUiCalcTest2, testTdf81351)
     CPPUNIT_ASSERT_EQUAL(u".uno:Save"_ustr, pDoc->GetString(ScAddress(0, 2, 0)));
     CPPUNIT_ASSERT_EQUAL(u".uno:Paste"_ustr, pDoc->GetString(ScAddress(0, 3, 0)));
     CPPUNIT_ASSERT_EQUAL(u".uno:Bold"_ustr, pDoc->GetString(ScAddress(0, 4, 0)));
+}
+
+CPPUNIT_TEST_FIXTURE(ScUiCalcTest2, testVulcanOneClickSortKeepsHeader)
+{
+    // Vulcan Sort Ascending/Descending with the cursor in a record. Each table has its
+    // own three columns, a blank column apart, so the data area around the cursor is that table.
+    createScDoc();
+    ScDocument* pDoc = getScDoc();
+    auto fill = [pDoc](SCCOL nCol, SCROW nRow,
+                       std::initializer_list<std::initializer_list<OUString>> aRows) {
+        for (const auto& rRow : aRows)
+        {
+            SCCOL nThisCol = nCol;
+            for (const OUString& rCell : rRow)
+            {
+                if (!rCell.isEmpty())
+                    pDoc->SetString(ScAddress(nThisCol, nRow, 0), rCell);
+                ++nThisCol;
+            }
+            ++nRow;
+        }
+    };
+    // A-C: all text. E-G: a header with a blank cell. I-K: a header of years.
+    fill(0, 0,
+         { { u"Name"_ustr, u"City"_ustr, u"Status"_ustr },
+           { u"Walsh"_ustr, u"Boston"_ustr, u"Open"_ustr },
+           { u"Adams"_ustr, u"Denver"_ustr, u"Closed"_ustr },
+           { u"Young"_ustr, u"Austin"_ustr, u"Open"_ustr },
+           { u"Baker"_ustr, u"Chicago"_ustr, u"Pending"_ustr },
+           { u"Moore"_ustr, u"Seattle"_ustr, u"Open"_ustr } });
+    fill(4, 0,
+         { { u"Name"_ustr, u""_ustr, u"Amount"_ustr },
+           { u"Walsh"_ustr, u"Boston"_ustr, u"120"_ustr },
+           { u"Adams"_ustr, u"Denver"_ustr, u"45"_ustr },
+           { u"Young"_ustr, u"Austin"_ustr, u"300"_ustr },
+           { u"Baker"_ustr, u"Chicago"_ustr, u"80"_ustr },
+           { u"Moore"_ustr, u"Seattle"_ustr, u"15"_ustr } });
+    fill(8, 0,
+         { { u"Name"_ustr, u"2025"_ustr, u"2026"_ustr },
+           { u"Walsh"_ustr, u"120"_ustr, u"130"_ustr },
+           { u"Adams"_ustr, u"45"_ustr, u"55"_ustr },
+           { u"Young"_ustr, u"300"_ustr, u"310"_ustr },
+           { u"Baker"_ustr, u"80"_ustr, u"90"_ustr },
+           { u"Moore"_ustr, u"15"_ustr, u"25"_ustr } });
+    // M-O: a title on the header. Q-S: a header over a number column, and U-W: no header row
+    // (its first record holds a number), the two shapes HasColHeader already sorted right.
+    fill(12, 0,
+         { { u"Q3 Client Roster"_ustr, u""_ustr, u""_ustr },
+           { u"Name"_ustr, u"City"_ustr, u"Amount"_ustr },
+           { u"Walsh"_ustr, u"Boston"_ustr, u"120"_ustr },
+           { u"Adams"_ustr, u"Denver"_ustr, u"45"_ustr },
+           { u"Young"_ustr, u"Austin"_ustr, u"300"_ustr },
+           { u"Baker"_ustr, u"Chicago"_ustr, u"80"_ustr },
+           { u"Moore"_ustr, u"Seattle"_ustr, u"15"_ustr } });
+    fill(16, 0,
+         { { u"Name"_ustr, u"City"_ustr, u"Amount"_ustr },
+           { u"Walsh"_ustr, u"Boston"_ustr, u"120"_ustr },
+           { u"Adams"_ustr, u"Denver"_ustr, u"45"_ustr } });
+    fill(20, 0,
+         { { u"Walsh"_ustr, u"Boston"_ustr, u"120"_ustr },
+           { u"Adams"_ustr, u"Denver"_ustr, u"45"_ustr },
+           { u"Young"_ustr, u"Austin"_ustr, u"300"_ustr } });
+
+    goToCell(u"A3"_ustr);
+    dispatchCommand(mxComponent, u".uno:SortAscending"_ustr, {});
+    // Without the fix in place, this test would have failed with
+    // - Expected: Name
+    // - Actual  : Adams
+    // i.e. the all-text header was sorted in among the records.
+    CPPUNIT_ASSERT_EQUAL(u"Name"_ustr, pDoc->GetString(ScAddress(0, 0, 0)));
+    CPPUNIT_ASSERT_EQUAL(u"Adams"_ustr, pDoc->GetString(ScAddress(0, 1, 0)));
+    CPPUNIT_ASSERT_EQUAL(u"Denver"_ustr, pDoc->GetString(ScAddress(1, 1, 0)));
+    CPPUNIT_ASSERT_EQUAL(u"Young"_ustr, pDoc->GetString(ScAddress(0, 5, 0)));
+    // The sort left the table selected: Sort Descending right after it keeps the header too.
+    dispatchCommand(mxComponent, u".uno:SortDescending"_ustr, {});
+    CPPUNIT_ASSERT_EQUAL(u"Name"_ustr, pDoc->GetString(ScAddress(0, 0, 0)));
+    CPPUNIT_ASSERT_EQUAL(u"Young"_ustr, pDoc->GetString(ScAddress(0, 1, 0)));
+    CPPUNIT_ASSERT_EQUAL(u"Adams"_ustr, pDoc->GetString(ScAddress(0, 5, 0)));
+
+    goToCell(u"E3"_ustr);
+    dispatchCommand(mxComponent, u".uno:SortAscending"_ustr, {});
+    CPPUNIT_ASSERT_EQUAL(u"Name"_ustr, pDoc->GetString(ScAddress(4, 0, 0)));
+    CPPUNIT_ASSERT_EQUAL(u"Amount"_ustr, pDoc->GetString(ScAddress(6, 0, 0)));
+    CPPUNIT_ASSERT_EQUAL(u"Adams"_ustr, pDoc->GetString(ScAddress(4, 1, 0)));
+    CPPUNIT_ASSERT_EQUAL(u"45"_ustr, pDoc->GetString(ScAddress(6, 1, 0)));
+
+    goToCell(u"I3"_ustr);
+    dispatchCommand(mxComponent, u".uno:SortAscending"_ustr, {});
+    CPPUNIT_ASSERT_EQUAL(u"Name"_ustr, pDoc->GetString(ScAddress(8, 0, 0)));
+    CPPUNIT_ASSERT_EQUAL(u"2025"_ustr, pDoc->GetString(ScAddress(9, 0, 0)));
+    CPPUNIT_ASSERT_EQUAL(u"Adams"_ustr, pDoc->GetString(ScAddress(8, 1, 0)));
+
+    // The title: refused, nothing moves.
+    goToCell(u"M4"_ustr);
+    dispatchCommand(mxComponent, u".uno:SortAscending"_ustr, {});
+    CPPUNIT_ASSERT_EQUAL(u"Q3 Client Roster"_ustr, pDoc->GetString(ScAddress(12, 0, 0)));
+    CPPUNIT_ASSERT_EQUAL(u"Name"_ustr, pDoc->GetString(ScAddress(12, 1, 0)));
+    CPPUNIT_ASSERT_EQUAL(u"Walsh"_ustr, pDoc->GetString(ScAddress(12, 2, 0)));
+    CPPUNIT_ASSERT_EQUAL(u"Moore"_ustr, pDoc->GetString(ScAddress(12, 6, 0)));
+    // Its records selected, they sort as before (HasColHeader on the selection).
+    goToCell(u"M3:O7"_ustr);
+    dispatchCommand(mxComponent, u".uno:SortAscending"_ustr, {});
+    CPPUNIT_ASSERT_EQUAL(u"Q3 Client Roster"_ustr, pDoc->GetString(ScAddress(12, 0, 0)));
+    CPPUNIT_ASSERT_EQUAL(u"Name"_ustr, pDoc->GetString(ScAddress(12, 1, 0)));
+    CPPUNIT_ASSERT_EQUAL(u"Adams"_ustr, pDoc->GetString(ScAddress(12, 2, 0)));
+    CPPUNIT_ASSERT_EQUAL(u"Young"_ustr, pDoc->GetString(ScAddress(12, 6, 0)));
+
+    goToCell(u"Q3"_ustr);
+    dispatchCommand(mxComponent, u".uno:SortAscending"_ustr, {});
+    CPPUNIT_ASSERT_EQUAL(u"Name"_ustr, pDoc->GetString(ScAddress(16, 0, 0)));
+    CPPUNIT_ASSERT_EQUAL(u"Adams"_ustr, pDoc->GetString(ScAddress(16, 1, 0)));
+
+    goToCell(u"U2"_ustr);
+    dispatchCommand(mxComponent, u".uno:SortAscending"_ustr, {});
+    CPPUNIT_ASSERT_EQUAL(u"Adams"_ustr, pDoc->GetString(ScAddress(20, 0, 0)));
+    CPPUNIT_ASSERT_EQUAL(u"Young"_ustr, pDoc->GetString(ScAddress(20, 2, 0)));
+}
+
+CPPUNIT_TEST_FIXTURE(ScUiCalcTest2, testVulcanOneClickSortKeepsDeclaredHeader)
+{
+    // Vulcan an all-text table whose range declares its header keeps it on Sort
+    // Ascending/Descending from a record. A-C has filter buttons (the sheet's AutoFilter range,
+    // as an xlsx autoFilter imports); E-G is a named range (as an xlsx table imports).
+    createScDoc();
+    ScDocument* pDoc = getScDoc();
+    const OUString aCells[6][3] = { { u"Name"_ustr, u"City"_ustr, u"Status"_ustr },
+                                    { u"Walsh"_ustr, u"Boston"_ustr, u"Open"_ustr },
+                                    { u"Adams"_ustr, u"Denver"_ustr, u"Closed"_ustr },
+                                    { u"Young"_ustr, u"Austin"_ustr, u"Open"_ustr },
+                                    { u"Baker"_ustr, u"Chicago"_ustr, u"Pending"_ustr },
+                                    { u"Moore"_ustr, u"Seattle"_ustr, u"Open"_ustr } };
+    for (SCCOL nCol : { SCCOL(0), SCCOL(4) })
+        for (SCROW nRow = 0; nRow < 6; ++nRow)
+            for (SCCOL i = 0; i < 3; ++i)
+                pDoc->SetString(ScAddress(static_cast<SCCOL>(nCol + i), nRow, 0), aCells[nRow][i]);
+    ScDBData* pFilterRange = new ScDBData(STR_DB_LOCAL_NONAME, 0, 0, 0, 2, 5, true, true);
+    pFilterRange->SetAutoFilter(true);
+    pDoc->SetAnonymousDBData(0, std::unique_ptr<ScDBData>(pFilterRange));
+    ScDBData* pTableRange = new ScDBData(u"Clients"_ustr, 0, 4, 0, 6, 5, true, true);
+    CPPUNIT_ASSERT(
+        pDoc->GetDBCollection()->getNamedDBs().insert(std::unique_ptr<ScDBData>(pTableRange)));
+
+    goToCell(u"A3"_ustr);
+    dispatchCommand(mxComponent, u".uno:SortAscending"_ustr, {});
+    // Without the fix in place, this test would have failed with
+    // - Expected: Name
+    // - Actual  : Adams
+    // i.e. the header under the filter buttons was sorted in among the records.
+    CPPUNIT_ASSERT_EQUAL(u"Name"_ustr, pDoc->GetString(ScAddress(0, 0, 0)));
+    CPPUNIT_ASSERT_EQUAL(u"Adams"_ustr, pDoc->GetString(ScAddress(0, 1, 0)));
+    CPPUNIT_ASSERT_EQUAL(u"Young"_ustr, pDoc->GetString(ScAddress(0, 5, 0)));
+    goToCell(u"A4"_ustr);
+    dispatchCommand(mxComponent, u".uno:SortDescending"_ustr, {});
+    CPPUNIT_ASSERT_EQUAL(u"Name"_ustr, pDoc->GetString(ScAddress(0, 0, 0)));
+    CPPUNIT_ASSERT_EQUAL(u"Young"_ustr, pDoc->GetString(ScAddress(0, 1, 0)));
+    CPPUNIT_ASSERT_EQUAL(u"Adams"_ustr, pDoc->GetString(ScAddress(0, 5, 0)));
+    // Only the records selected: all five sort, as before (HasColHeader on the selection).
+    goToCell(u"A2:C6"_ustr);
+    dispatchCommand(mxComponent, u".uno:SortAscending"_ustr, {});
+    CPPUNIT_ASSERT_EQUAL(u"Name"_ustr, pDoc->GetString(ScAddress(0, 0, 0)));
+    CPPUNIT_ASSERT_EQUAL(u"Adams"_ustr, pDoc->GetString(ScAddress(0, 1, 0)));
+    CPPUNIT_ASSERT_EQUAL(u"Young"_ustr, pDoc->GetString(ScAddress(0, 5, 0)));
+
+    goToCell(u"E3"_ustr);
+    dispatchCommand(mxComponent, u".uno:SortAscending"_ustr, {});
+    CPPUNIT_ASSERT_EQUAL(u"Name"_ustr, pDoc->GetString(ScAddress(4, 0, 0)));
+    CPPUNIT_ASSERT_EQUAL(u"Status"_ustr, pDoc->GetString(ScAddress(6, 0, 0)));
+    CPPUNIT_ASSERT_EQUAL(u"Adams"_ustr, pDoc->GetString(ScAddress(4, 1, 0)));
+    CPPUNIT_ASSERT_EQUAL(u"Denver"_ustr, pDoc->GetString(ScAddress(5, 1, 0)));
 }
 
 CPPUNIT_TEST_FIXTURE(ScUiCalcTest2, testTdf123202)

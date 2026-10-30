@@ -23,6 +23,15 @@ class ContextToolbar extends JSDialogComponent {
 	// roughly twice the height(76px) of default context toolbar in each direction from boundary
 	disappearingBoundary: number = 150; // px
 	additionalContextButtons: Array<ToolItemWidgetJSON> = [];
+	// Its controls that open a list (getWriterTextContext). The list is a
+	// body-level popup reaching well past the fade boundary.
+	static readonly dropdownIds: string[] = [
+		'fontnamecombobox',
+		'fontsizecombobox',
+		'home-spacing',
+		'home-back-color',
+		'home-color',
+	];
 
 	constructor(map: MapInterface) {
 		super(map, 'ContextToolbar', 'notebookbar');
@@ -50,6 +59,28 @@ class ContextToolbar extends JSDialogComponent {
 		window.L.DomUtil.addClass(this.container, 'notebookbar horizontal');
 	}
 
+	// The !isDesktop() arm below is deliberate and must stay. It reads like a
+	// phone that was forgotten, and an audit filed it as exactly that; it is
+	// not.
+	//
+	// A phone text selection already has its floating toolbar: the Google-style
+	// selection pill in Control.MobileSelectionBar.ts (Cut/Copy/Paste/Comment,
+	// anchored above the text cursor, hidden while a mobile wizard is up),
+	// created for 'text' and 'spreadsheet' by Control.UIManager.ts under
+	// mode.isSmallScreenDevice(), styled at css/vulcan-theme.css §13.6 and
+	// specified at docs/mobile-redesign/01 §6. Switching this component on for
+	// phones would put a SECOND floating surface over the same selection.
+	//
+	// It would also break the rule of record in docs/mobile-redesign
+	// DOCS-THESIS "One surface per job": formatting lives behind the Format
+	// sheet and is "not duplicated onto a bar, not mirrored into the selection
+	// pill". Everything getWriterTextContext() builds below -- font name, font
+	// size, grow/shrink, B/I/U/S, sub/super, spacing, two colour pickers -- is
+	// formatting, and it is a good deal wider than a phone viewport, which
+	// showHideToolbar() answers by not showing it at all.
+	//
+	// So: desktop only. If a phone ever needs something here, it belongs in the
+	// pill.
 	showContextToolbar(): void {
 		const map = this.map;
 		if (
@@ -89,6 +120,14 @@ class ContextToolbar extends JSDialogComponent {
 			}
 
 			document.addEventListener('pointermove', this.pointerMove);
+			// The editor is an iframe, which gets no pointermove once the
+			// pointer has left it, so leaving or clicking out dismisses it
+			// On <html>: WebKit fires no pointerleave on Document.
+			document.documentElement.addEventListener(
+				'pointerleave',
+				this.pointerLeave,
+			);
+			window.addEventListener('blur', this.dismiss);
 			this.changeOpacity(1);
 			this.showHideToolbar(true);
 		});
@@ -96,6 +135,12 @@ class ContextToolbar extends JSDialogComponent {
 
 	hideContextToolbar(): void {
 		document.removeEventListener('pointermove', this.pointerMove);
+		document.documentElement.removeEventListener(
+			'pointerleave',
+			this.pointerLeave,
+		);
+		window.removeEventListener('blur', this.dismiss);
+		this.container.removeEventListener('pointerleave', this.resumeFade);
 
 		if (this.pendingTask)
 			app.layoutingService.cancelLayoutingTask(this.pendingTask);
@@ -130,11 +175,24 @@ class ContextToolbar extends JSDialogComponent {
 		window.L.DomUtil.removeClass(this.container, 'hidden');
 		app.layoutingService.appendLayoutingTask(() => {
 			const contextualMenu = this.container.getBoundingClientRect();
+			// Wider than the frame (a narrow side panel): it would hang off
+			// an edge with its first controls cut off. The top toolbar has
+			// the same controls, so hide it, without the 0.25s transition
+			// that would flash it at full opacity.
+			if (contextualMenu.width > window.innerWidth - 10) {
+				this.hideContextToolbar();
+				this.container.style.transition = 'none';
+				window.L.DomUtil.addClass(this.container, 'hidden');
+				// Apply it before the transition comes back.
+				this.container.getBoundingClientRect();
+				this.container.style.transition = '';
+				return;
+			}
 			if (contextualMenu.width + pos.x > window.innerWidth) {
 				pos.x -= contextualMenu.width + pos.x - window.innerWidth + 5;
 			}
 			this.container.style.top = pos.y + 'px';
-			this.container.style.left = pos.x + 'px';
+			this.container.style.left = Math.max(5, pos.x) + 'px';
 		});
 	}
 
@@ -398,6 +456,7 @@ class ContextToolbar extends JSDialogComponent {
 
 	pointerMove = (e: PointerEvent): void => {
 		app.layoutingService.appendLayoutingTask(() => {
+			if (this.inUse()) return;
 			const opacity: number = this.calculateOpacity(e);
 
 			if (opacity === 1) {
@@ -415,6 +474,43 @@ class ContextToolbar extends JSDialogComponent {
 	makeContextToolbarConstant(): void {
 		document.removeEventListener('pointermove', this.pointerMove);
 		this.changeOpacity(1);
+		// Held only while the pointer is on it.
+		this.container.addEventListener('pointerleave', this.resumeFade);
+	}
+
+	private resumeFade = (): void => {
+		this.container.removeEventListener('pointerleave', this.resumeFade);
+		document.addEventListener('pointermove', this.pointerMove);
+	};
+
+	// A touch fires pointerleave after every pointerup, including a tap on
+	// Bold, so only a mouse leaving the frame dismisses it.
+	private pointerLeave = (e: PointerEvent): void => {
+		if (e.pointerType === 'mouse' && !this.inUse())
+			this.hideContextToolbar();
+	};
+
+	// The window lost focus (a click in the chat): her typing has gone there
+	// too, so only an open list keeps it.
+	private dismiss = (): void => {
+		if (!this.ownDropdownOpen()) this.hideContextToolbar();
+	};
+
+	// One of its lists is open, or she is typing in its font or size box
+	// (hiding the toolbar would drop that focus, and the typed name with it).
+	// Not any focus: Escape on a list leaves it on the list's button.
+	private inUse(): boolean {
+		const focused = document.activeElement;
+		return (
+			this.ownDropdownOpen() ||
+			(focused?.tagName === 'INPUT' && this.container.contains(focused))
+		);
+	}
+
+	private ownDropdownOpen(): boolean {
+		return ContextToolbar.dropdownIds.some(
+			(id) => !!JSDialog.GetDropdown(id),
+		);
 	}
 
 	changeOpacity(opacity: number) {

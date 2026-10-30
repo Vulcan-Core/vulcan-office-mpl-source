@@ -76,6 +76,8 @@
 #include <detfunc.hxx>
 
 #include <memory>
+#include <set>
+#include <vector>
 
 using namespace ::com::sun::star;
 using ::com::sun::star::uno::Reference;
@@ -175,6 +177,12 @@ bool IsFormControlObject( const XclObj *rObj )
     }
 }
 
+/// An ActiveX control the xlsx import kept (xl/activeX), or null.
+XclExpOcxXmlControlObj* GetActiveXObject( XclObj* pObj )
+{
+    return dynamic_cast< XclExpOcxXmlControlObj* >( pObj );
+}
+
 bool IsVmlObject( const XclObj *rObj )
 {
     switch( rObj->GetObjType() )
@@ -189,7 +197,8 @@ bool IsVmlObject( const XclObj *rObj )
 sal_Int32 GetVmlObjectCount( XclExpObjList& rList )
 {
     return static_cast<sal_Int32>(std::count_if(rList.begin(), rList.end(),
-        [](const std::unique_ptr<XclObj>& rxObj) { return IsVmlObject( rxObj.get() ) || IsFormControlObject( rxObj.get() ); }));
+        [](const std::unique_ptr<XclObj>& rxObj) { return IsVmlObject( rxObj.get() ) || IsFormControlObject( rxObj.get() )
+                                                          || GetActiveXObject( rxObj.get() ) != nullptr; }));
 }
 
 bool IsValidObject( const XclObj& rObj )
@@ -289,6 +298,12 @@ void SaveDrawingMLObjects( XclExpObjList& rList, XclExpXmlStream& rStrm )
             FSNS(XML_xmlns, XML_r),   rStrm.getNamespaceURL(OOX_NS(officeRel)).toUtf8() );
 
     sal_Int32 nShapeId = 1000; // unique id of the shape inside one worksheet (not the whole document)
+    // upper case: Excel compares control names case-insensitively
+    std::set<OUString> aSheetNames; // every ActiveX control's name on the sheet: no suffix may take one
+    for (const auto& rxObj : rList)
+        if (XclExpOcxXmlControlObj* pActiveX = GetActiveXObject(rxObj.get()))
+            aSheetNames.insert(pActiveX->GetName().toAsciiUpperCase());
+    std::set<OUString> aWrittenNames; // the names given so far, in z-order
     for (const auto& rpObj : aList)
     {
         // validate shapeId
@@ -298,6 +313,29 @@ void SaveDrawingMLObjects( XclExpObjList& rList, XclExpXmlStream& rStrm )
             if (pXclExpTbxControlObj)
             {
                 pXclExpTbxControlObj->setShapeId(++nShapeId);
+            }
+        }
+        else if (XclExpOcxXmlControlObj* pActiveX = GetActiveXObject(rpObj))
+        {
+            pActiveX->setShapeId(++nShapeId);
+            // A copied control carries its original's name, but Excel and VBA need one per sheet
+            // (Sheet1.<name>). The first control in z-order keeps a name; a later one that carries
+            // it is written as <name>_N, the lowest N >= 2 whose name no control on the sheet has
+            // and none was given here, so a control that already owns <name>_2 keeps it and its
+            // event code. This runs before the VML and the <controls> entries are written
+            // (XclExpObjList::SaveXml).
+            const OUString aBaseName = pActiveX->GetName();
+            if (!aWrittenNames.insert(aBaseName.toAsciiUpperCase()).second)
+            {
+                OUString aName;
+                for (sal_Int32 n = 2;; ++n)
+                {
+                    aName = aBaseName + "_" + OUString::number(n);
+                    const OUString aUpper = aName.toAsciiUpperCase();
+                    if (aSheetNames.find(aUpper) == aSheetNames.end() && aWrittenNames.insert(aUpper).second)
+                        break;
+                }
+                pActiveX->SetName(aName);
             }
         }
 
@@ -312,21 +350,33 @@ void SaveDrawingMLObjects( XclExpObjList& rList, XclExpXmlStream& rStrm )
 void SaveFormControlObjects(XclExpObjList& rList, XclExpXmlStream& rStrm)
 {
     bool hasControls = false;
+    std::vector<XclExpOcxXmlControlObj*> aActiveX;
     for (const auto& rxObj : rList)
     {
         if (IsFormControlObject(rxObj.get()))
-        {
             hasControls = true;
-            break;
-        }
+        else if (XclExpOcxXmlControlObj* pActiveX = GetActiveXObject(rxObj.get()))
+            aActiveX.push_back(pActiveX);
     }
 
-    if (!hasControls)
+    if (!hasControls && aActiveX.empty())
     {
         return;
     }
 
     sax_fastparser::FSHelperPtr& rWorksheet = rStrm.GetCurrentStream();
+
+    if (!hasControls)
+    {
+        // ActiveX only, as Excel 2010+ writes it: each control's own mc:AlternateContent holds the
+        // x14 Choice Excel reads and the Fallback the engine's import reads (it skips every x14
+        // Choice)
+        rWorksheet->startElement(XML_controls);
+        for (XclExpOcxXmlControlObj* pActiveX : aActiveX)
+            pActiveX->SaveSheetXml(rStrm);
+        rWorksheet->endElement(XML_controls);
+        return;
+    }
 
     rWorksheet->startElement(FSNS(XML_mc, XML_AlternateContent),
         FSNS(XML_xmlns, XML_mc), rStrm.getNamespaceURL(OOX_NS(mce)).toUtf8());
@@ -344,10 +394,24 @@ void SaveFormControlObjects(XclExpObjList& rList, XclExpXmlStream& rStrm)
                 pXclExpTbxControlObj->SaveSheetXml(rStrm, aIdFormControlPr);
             }
         }
+        else if (XclExpOcxXmlControlObj* pActiveX = GetActiveXObject(rxObj.get()))
+            pActiveX->SaveSheetXml(rStrm);
     }
 
     rWorksheet->endElement(XML_controls);
     rWorksheet->endElement(FSNS(XML_mc, XML_Choice));
+    if (!aActiveX.empty())
+    {
+        // Excel's layout for a sheet with form and ActiveX controls. The engine's import reads only
+        // this Fallback (it skips the whole x14 Choice above): without it every ActiveX control
+        // would come back as a picture on the next load.
+        rWorksheet->startElement(FSNS(XML_mc, XML_Fallback));
+        rWorksheet->startElement(XML_controls);
+        for (const XclExpOcxXmlControlObj* pActiveX : aActiveX)
+            pActiveX->SaveFallbackXml(rStrm);
+        rWorksheet->endElement(XML_controls);
+        rWorksheet->endElement(FSNS(XML_mc, XML_Fallback));
+    }
     rWorksheet->endElement(FSNS(XML_mc, XML_AlternateContent));
 }
 
@@ -386,6 +450,8 @@ void SaveVmlObjects( XclExpObjList& rList, XclExpXmlStream& rStrm )
                 pFormControlObject->SaveVml(rStrm);
             }
         }
+        else if (XclExpOcxXmlControlObj* pActiveX = GetActiveXObject(rxObj.get()))
+            pActiveX->SaveVml(rStrm);
 
         if( !IsVmlObject( rxObj.get() ) )
             continue;

@@ -19,7 +19,7 @@ msgstr ""
 #. App name - 50 chars limit
 #: descriptions/google-play.html%2Bhtml.body.h3:5-1
 msgid "Collabora Office: LibreOffice, OpenOffice & more"
-msgstr "Collabora Office: LibreOffice, OpenOffice և ավելին"
+msgstr "Vulcan Office: Vulcan Office, OpenOffice և ավելին"
 
 #. Short description - 80 chars limit
 #: descriptions/google-play.html%2Bhtml.body.p:9-1
@@ -27,7 +27,7 @@ msgid ""
 "LibreOffice based editor for Microsoft Office, LibreOffice and OpenOffice "
 "docs."
 msgstr ""
-"LibreOffice-ի վրա հիմնված խմբագրիչ Microsoft Office-ի, LibreOffice-ի և "
+"Vulcan Office-ի վրա հիմնված խմբագրիչ Microsoft Office-ի, Vulcan Office-ի և "
 "OpenOffice փաստաթղթերի համար։"
 
 #. Long description
@@ -38,8 +38,8 @@ msgid ""
 "and now it's on Android, enhancing your possibilities to work on mobile and "
 "for collaboration."
 msgstr ""
-"Collabora Office-ը տեքստային խմբագրիչ, աղյուսակային և ներկայացումների ծրագիր "
-"է, որը հիմնված է LibreOffice-ի՝ աշխարհի ամենատարածված բաց կոդով "
+"Vulcan Office-ը տեքստային խմբագրիչ, աղյուսակային և ներկայացումների ծրագիր "
+"է, որը հիմնված է Vulcan Office-ի՝ աշխարհի ամենատարածված բաց կոդով "
 "գրասենյակային փաթեթի վրա, և այժմ այն հասանելի է Android-ի համար՝ ընդլայնելով "
 "ձեր հնարավորությունները բջջային հեռախոսներում աշխատելու և համագործակցելու "
 "համար։"
@@ -102,10 +102,10 @@ msgid ""
 "Windows, Mac, and Linux. This, combined with a new front-end based on "
 "Collabora Online, reads and saves documents similarly to LibreOffice desktop."
 msgstr ""
-"Android-ի համար նախատեսված Collabora Office-ը օգտագործում է նույն շարժիչը, "
-"ինչ LibreOffice-ը Windows-ի, Mac-ի և Linux-ի համար։ Սա, զուգորդված Collabora "
+"Android-ի համար նախատեսված Vulcan Office-ը օգտագործում է նույն շարժիչը, "
+"ինչ Vulcan Office-ը Windows-ի, Mac-ի և Linux-ի համար։ Սա, զուգորդված Vulcan Office "
 "Online-ի վրա հիմնված նոր միջերեսի հետ, կարդում և պահպանում է փաստաթղթերը "
-"LibreOffice-ի աշխատասեղանի նման։"
+"Vulcan Office-ի աշխատասեղանի նման։"
 
 #. Long description
 #: descriptions/google-play.html%2Bhtml.body.p:48-1
@@ -115,7 +115,7 @@ msgid ""
 "developing Android support since 2012, with the help of Google Summer of "
 "Code students Andrzej Hunt, Iain Billet and Kaishu Sahu."
 msgstr ""
-"Collabora-ի ճարտարագետներ Թոր Լիլքվիստը, Թոմաժ Վայնգերլը, Մայքլ Միքսը, "
+"Vulcan Office-ի ճարտարագետներ Թոր Լիլքվիստը, Թոմաժ Վայնգերլը, Մայքլ Միքսը, "
 "Միկլոշ Վայնան, Յան Հոլեշովսկին, Մերտ Թյումերը, Ռաշեշ Պադիան և Սքայլեր Գրեյը "
 "Android-ի աջակցություն են մշակում 2012 թվականից՝ Google Summer of Code-ի "
 "ուսանողներ Անջեյ Հանթի, Իեյն Բիլեթի և Կայշու Սահուի օգնությամբ։"

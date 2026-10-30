@@ -131,6 +131,14 @@ class SlideShowPresenter {
 	_canvasLoader: CanvasLoader | null = null;
 	_progressBarContainer: HTMLDivElement | null = null;
 	_slideNavContainer: HTMLDivElement | null = null;
+	// Phone only: the exit lives in its own upper-left box rather than in the
+	// bottom bar, so the escape hatch keeps the fixed position it has in the
+	// rest of the phone chrome. Null everywhere else.
+	_slideExitContainer: HTMLDivElement | null = null;
+	// Watches the editor root's inline style while an in-window show is up,
+	// so --vulcan-safe-bottom stays copied into the proxy document (see
+	// _syncSafeAreaRail). Null whenever no proxy window/iframe exists.
+	private _safeAreaRailObserver: MutationObserver | null = null;
 	_enableA11y: boolean = false;
 	_presentToAllInProgress: boolean = false;
 	_isWelcomePresentation: boolean = false;
@@ -158,6 +166,15 @@ class SlideShowPresenter {
 	private _followBtn: HTMLElement | null = null;
 	private _prevButton: HTMLImageElement | null = null;
 	private _nextButton: HTMLImageElement | null = null;
+
+	// The Vulcan phone chrome. isTablet() is defined as !isSmallScreenDevice(),
+	// so tablets are excluded by construction and desktop never matches.
+	private isVulcanPhone(): boolean {
+		return (
+			window.mode.isSmallScreenDevice() &&
+			document.documentElement.classList.contains('vulcan-mobile-chrome')
+		);
+	}
 
 	private showFollow(me: boolean) {
 		this._map.uiManager.showButton('slide-presentation-follow', !me);
@@ -438,6 +455,10 @@ class SlideShowPresenter {
 		if (this._fullscreen) {
 			// window.addEventListener('keydown', this._onCanvasKeyDown.bind(this));
 			window.addEventListener('keydown', this._onKeyDownHandler);
+			// Re-fit whenever the full-screen box changes: the viewport can
+			// settle after this event, and a page zoom change during the show
+			// resizes it. _stopFullScreen removes it.
+			window.addEventListener('resize', this.onSlideWindowResize);
 			this.centerCanvas();
 		} else {
 			// we need to cleanup current/prev slide
@@ -452,9 +473,16 @@ class SlideShowPresenter {
 		this._slideRenderer.deleteResources();
 
 		window.removeEventListener('keydown', this._onKeyDownHandler, true);
+		window.removeEventListener('resize', this.onSlideWindowResize);
 
 		window.L.DomUtil.remove(this._slideShowCanvas);
 		this._slideShowCanvas = null;
+		// The control containers went with the presenter container; drop the
+		// references too, or the auto-hide timer and the next show's
+		// _showSlideControls() both act on detached nodes.
+		this._slideNavContainer = null;
+		this._slideExitContainer = null;
+		clearTimeout(this._slideControlsTimer);
 		if (this._presenterContainer) {
 			window.L.DomUtil.remove(this._presenterContainer);
 			this._presenterContainer = null;
@@ -486,8 +514,13 @@ class SlideShowPresenter {
 					.clientHeight;
 			}
 		} else if (this.isFullscreen()) {
-			winWidth = window.screen.width;
-			winHeight = window.screen.height;
+			// The canvas is laid out inside the full-screen element, which the
+			// UA :fullscreen rule sizes to the full-screen viewport in CSS px.
+			// window.screen is not that box: it ignores page zoom and counts
+			// space kept for a menu bar or notch, so fitting to it pinned the
+			// slide left when zoomed out and cut it off when zoomed in.
+			winWidth = this._fullscreen.clientWidth;
+			winHeight = this._fullscreen.clientHeight;
 		}
 
 		if (!winWidth || !winHeight) return;
@@ -620,6 +653,16 @@ class SlideShowPresenter {
 		);
 		if (!this._isWelcomePresentation && !presenterConsoleActive) {
 			canvas.addEventListener('mousemove', this._showSlideControls.bind(this));
+			// mousemove is the only thing that re-armed the controls, and a
+			// touch device never produces one: once the bar auto-hid there was
+			// no gesture left that brought the exit back. A touch on the slide
+			// re-reveals it. Passive — this must not compete with the tap that
+			// advances the slide or with Hammer's swipe.
+			canvas.addEventListener(
+				'touchstart',
+				this._showSlideControls.bind(this),
+				{ passive: true },
+			);
 		}
 
 		if (this._hammer) {
@@ -706,14 +749,67 @@ class SlideShowPresenter {
 		);
 		slideNavContainer.tabIndex = -1;
 		this._configureSlideNavStyles(slideNavContainer);
+		if (this.isVulcanPhone())
+			this._slideExitContainer = this._createSlideExit(parent);
 		this._initializeSlideNavWidget(slideNavContainer, showSwitchMonitors);
 		return slideNavContainer;
+	}
+
+	// Phone only. Presenting is the deepest surface the phone chrome has, so it
+	// owes an exit in the upper left like every other one — Slides puts its own
+	// Close at the top of the screen too. Same parent as the bottom bar so both
+	// resolve against the same containing block.
+	private _createSlideExit(parent: Element): HTMLDivElement {
+		const exitContainer = window.L.DomUtil.create(
+			'div',
+			'slideshow-exit-container',
+			parent,
+		);
+		exitContainer.tabIndex = -1;
+		exitContainer.style.backgroundColor = 'rgba(0, 0, 0, 0.25)';
+		exitContainer.style.position = 'absolute';
+		// Notch clearance is the HOST's job here, not this box's. This code
+		// runs inside a nested iframe, where env(safe-area-inset-*) resolves
+		// against the top-level viewport and is 0 no matter what (Map.WOPI.js's
+		// Vulcan_HostSafeArea comment; vulcan-theme.css §13.3) — a
+		// `calc(8px + env(...))` pair used to follow these two lines claiming
+		// the notch policy while computing to exactly these plain values. The
+		// clearance actually in force comes from the host content wrapper's
+		// left/right safe-area padding (MobileLayout.tsx, pinned by
+		// MobileLayout.fullscreen-safe-area.test.ts) and from the host chrome
+		// above the iframe. There is no fork-side substitute to consume:
+		// the Vulcan_HostSafeArea rail carries BOTTOM only — top/left need a
+		// host-publish + receiver pair first (see ff807059bd's commit
+		// message: follow-up, not snuck in).
+		exitContainer.style.top = '8px';
+		exitContainer.style.left = '8px';
+		exitContainer.style.zIndex = '1000000000000';
+		exitContainer.style.display = 'flex';
+		exitContainer.style.padding = '2px';
+		exitContainer.style.borderRadius = '25px';
+		return exitContainer;
 	}
 
 	private _configureSlideNavStyles(container: HTMLDivElement): void {
 		container.style.backgroundColor = 'rgba(0, 0, 0, 0.25)';
 		container.style.position = 'absolute';
+		// The nav is the bottom-docked surface of the show, and on a phone the
+		// presentation surface reaches the physical bottom edge (the host
+		// dropped its pb-safe strip under office iframes), so a plain 8px
+		// parked prev/next dead-centre in the iPhone home-indicator gesture
+		// zone — a tap on the only navigation surface a phone presentation
+		// has raced the iOS home gesture. var(--vulcan-safe-bottom), NOT
+		// env(): env(safe-area-inset-*) resolves against the top-level
+		// viewport and is 0 in a nested iframe no matter what (Map.WOPI.js's
+		// Vulcan_HostSafeArea comment; vulcan-theme.css §13.3/13.4c), and the
+		// in-page show renders in exactly such an iframe. The host-published
+		// rail does not cross the document boundary by itself either —
+		// _syncSafeAreaRail copies it onto this document's root. Plain value
+		// first so an engine that drops the calc() as invalid still has a
+		// docked bar; the 0px fallback keeps desktop, host-old and
+		// indicator-less phones byte-identical to today.
 		container.style.bottom = '8px';
+		container.style.bottom = 'calc(8px + var(--vulcan-safe-bottom, 0px))';
 		container.style.left = '8px';
 		container.style.zIndex = '1000000000000';
 		container.style.display = 'flex';
@@ -763,20 +859,48 @@ class SlideShowPresenter {
 		this.endPresentation(true);
 	};
 
+	// Which containers the 3s idle timer is allowed to fade.
+	//
+	// On the Vulcan phone chrome the EXIT IS PINNED and never fades. Fading it
+	// looked symmetrical but was wrong: the only touch gesture that re-reveals
+	// the controls is a canvas touchstart, and that same tap also reaches the
+	// click handler and ADVANCES THE DECK. So a faded exit cost a slide to get
+	// back — in front of an audience. An escape hatch you have to pay for is
+	// not one, and the phone design makes the upper-left exit load-bearing
+	// precisely because it is always there.
+	//
+	// The nav bar still fades, which is the point of the timer: the slide is
+	// what the room is looking at. Desktop keeps fading both — it has a real
+	// pointer, mousemove re-arms without side effects, and nothing there is
+	// being held up in front of anyone.
+	private _slideControlContainers(): HTMLDivElement[] {
+		const containers: HTMLDivElement[] = [];
+		if (this._slideNavContainer) containers.push(this._slideNavContainer);
+		// The same both-halves gate as everywhere else in this class — call it,
+		// do not re-derive it. A gate re-inlined per site is a gate that drifts.
+		if (this._slideExitContainer && !this.isVulcanPhone())
+			containers.push(this._slideExitContainer);
+		return containers;
+	}
+
 	_hideSlideControls() {
-		if (!this._slideNavContainer) return;
-		this._slideNavContainer.style.visibility = 'hidden';
-		this._slideNavContainer.style.opacity = '0';
-		this._slideNavContainer.style.transition =
-			'visibility 0s 0.5s, opacity 0.5s ease-in-out';
+		for (const container of this._slideControlContainers()) {
+			container.style.visibility = 'hidden';
+			container.style.opacity = '0';
+			container.style.transition =
+				'visibility 0s 0.5s, opacity 0.5s ease-in-out';
+		}
 	}
 
 	_showSlideControls() {
-		if (!this._slideNavContainer) return;
+		const containers = this._slideControlContainers();
+		if (!containers.length) return;
 
-		this._slideNavContainer.style.visibility = 'visible';
-		this._slideNavContainer.style.opacity = '1';
-		this._slideNavContainer.style.transition = 'opacity 1s linear';
+		for (const container of containers) {
+			container.style.visibility = 'visible';
+			container.style.opacity = '1';
+			container.style.transition = 'opacity 1s linear';
+		}
 
 		clearTimeout(this._slideControlsTimer);
 		this._slideControlsTimer = setTimeout(
@@ -850,7 +974,14 @@ class SlideShowPresenter {
 		container: HTMLDivElement,
 		showSwitchMonitors: boolean,
 	): void {
-		const closeImg = window.L.DomUtil.create('img', 'left-img', container);
+		// On phone the exit is hoisted out of the bottom bar into its own
+		// upper-left box; everywhere else it stays where it has always been,
+		// first in the bar.
+		const closeImg = window.L.DomUtil.create(
+			'img',
+			'left-img',
+			this._slideExitContainer ?? container,
+		);
 		const setImgSize = (img: HTMLImageElement) => {
 			img.style.width = '48px';
 			img.style.height = '48px';
@@ -889,33 +1020,60 @@ class SlideShowPresenter {
 		app.LOUtil.setImage(rightImg, 'slideshow-slideNext.svg', this._map);
 		rightImg.addEventListener('click', this._onPrevNextSlide);
 
-		const animationsImage = window.L.DomUtil.create(
-			'img',
-			'animations-img skipTransition-false',
-			container,
-		);
-		animationsImage.id = 'disableanimation';
-		const slideshowAnimIniText = _('Disable Animations');
-		animationsImage.setAttribute('aria-label', slideshowAnimIniText);
-		animationsImage.setAttribute('data-cooltip', slideshowAnimIniText);
-		setImgSize(animationsImage);
-		window.L.control.attachTooltipEventListener(animationsImage, this._map);
-		app.LOUtil.setImage(animationsImage, 'slideshow-transition.svg', this._map);
-		animationsImage.addEventListener(
-			'click',
-			function (this: SlideShowPresenter, e: Event) {
-				this._onA11yString(e.target);
-				this._navigateSkipTransition = !this._navigateSkipTransition;
-				const slideshowAnimToggleText = this._navigateSkipTransition
-					? _('Enable Animations')
-					: _('Disable Animations');
-				animationsImage.setAttribute('aria-label', slideshowAnimToggleText);
-				animationsImage.setAttribute('data-cooltip', slideshowAnimToggleText);
+		// Animations/transitions are an AUTHORING concern, and Google is
+		// explicit that authoring them is not a phone capability: "To add or
+		// edit animations and slide transitions, use slides.google.com on a
+		// computer." (support.google.com/docs/answer/1689475, Android). What
+		// the phone DOES keep is playback — "Phone can play back existing
+		// transitions/animations during Present" — which is exactly what
+		// happens when this toggle is absent, because `_navigateSkipTransition`
+		// stays at its `false` initial value (`:149`) and the one place that
+		// reads it (`_onPrevNextSlide`, `:816`) then never calls skipEffect().
+		// So cutting the control does not disable anything; it removes the
+		// rehearsal-time OPTION, and the deck plays as authored.
+		//
+		// Desktop and tablet are untouched. `isVulcanPhone()` (`:168`) is the
+		// BOTH-HALVES gate — isSmallScreenDevice() AND the vulcan-mobile-chrome
+		// class — so ?vulcanChrome=desktop on a phone still gets the toggle,
+		// and substituting isVulcanPhone() === false reproduces HEAD exactly.
+		//
+		// It is also a third of the live presenting bar on the surface with the
+		// least room for it: once `_createSlideNav` hoists the exit into its
+		// own upper-left box, a phone bar holds prev, next and animations —
+		// now two. (A follower session adds a fourth, `follow`, below.)
+		if (!this.isVulcanPhone()) {
+			const animationsImage = window.L.DomUtil.create(
+				'img',
+				'animations-img skipTransition-false',
+				container,
+			);
+			animationsImage.id = 'disableanimation';
+			const slideshowAnimIniText = _('Disable Animations');
+			animationsImage.setAttribute('aria-label', slideshowAnimIniText);
+			animationsImage.setAttribute('data-cooltip', slideshowAnimIniText);
+			setImgSize(animationsImage);
+			window.L.control.attachTooltipEventListener(animationsImage, this._map);
+			app.LOUtil.setImage(
+				animationsImage,
+				'slideshow-transition.svg',
+				this._map,
+			);
+			animationsImage.addEventListener(
+				'click',
+				function (this: SlideShowPresenter, e: Event) {
+					this._onA11yString(e.target);
+					this._navigateSkipTransition = !this._navigateSkipTransition;
+					const slideshowAnimToggleText = this._navigateSkipTransition
+						? _('Enable Animations')
+						: _('Disable Animations');
+					animationsImage.setAttribute('aria-label', slideshowAnimToggleText);
+					animationsImage.setAttribute('data-cooltip', slideshowAnimToggleText);
 
-				animationsImage.className =
-					'animations-img skipTransition-' + this._navigateSkipTransition;
-			}.bind(this),
-		);
+					animationsImage.className =
+						'animations-img skipTransition-' + this._navigateSkipTransition;
+				}.bind(this),
+			);
+		}
 
 		if (showSwitchMonitors && window.mode.isCODesktop()) {
 			const ExchangeImg = window.L.DomUtil.create(
@@ -1113,6 +1271,37 @@ class SlideShowPresenter {
 		this._doInWindowPresentation(false);
 	}
 
+	// --vulcan-safe-bottom (the host-measured home-indicator inset,
+	// Vulcan_HostSafeArea) is written by Map.WOPI.js onto the EDITOR
+	// document's root, and custom properties do not cross a document
+	// boundary: an in-window show renders in its own iframe/window whose
+	// document starts with no custom properties at all, so a var() consumer
+	// in there would silently read its 0px fallback — the same
+	// inert-by-construction class as env(safe-area-inset-*) in a nested
+	// iframe. Copy the editor root's computed value onto the proxy document's
+	// root. Called once when the proxy document is built, then from a
+	// MutationObserver on the editor root's style attribute: the host
+	// re-measures on rotation and replays Vulcan_HostSafeArea, and observing
+	// the write itself is what makes the re-copy race-free against the
+	// resize event, which can land before the host's message does.
+	private _syncSafeAreaRail(): void {
+		if (!this._slideShowWindowProxy) return;
+		let proxyRoot: HTMLElement | null = null;
+		try {
+			proxyRoot = this._getProxyDocumentNode()?.documentElement ?? null;
+		} catch {
+			// A separate window the shell already closed throws on access;
+			// the close interval will run the cleanup shortly.
+			proxyRoot = null;
+		}
+		if (!proxyRoot) return;
+		const inset = getComputedStyle(document.documentElement)
+			.getPropertyValue('--vulcan-safe-bottom')
+			.trim();
+		if (inset) proxyRoot.style.setProperty('--vulcan-safe-bottom', inset);
+		else proxyRoot.style.removeProperty('--vulcan-safe-bottom');
+	}
+
 	_getProxyDocumentNode() {
 		if (this._slideShowInSeparateWindow)
 			return (this._slideShowWindowProxy as Window).document;
@@ -1175,6 +1364,18 @@ class SlideShowPresenter {
 		this._getProxyDocumentNode().body.style.padding = '0';
 		this._getProxyDocumentNode().body.style.height = '100%';
 		this._getProxyDocumentNode().body.style.overflow = 'hidden';
+
+		// Forward the safe-area rail into the proxy document before any
+		// bottom-docked control is styled against it, and keep it forwarded
+		// for as long as the show is up (rotation changes the inset).
+		this._syncSafeAreaRail();
+		this._safeAreaRailObserver = new MutationObserver(
+			this._syncSafeAreaRail.bind(this),
+		);
+		this._safeAreaRailObserver.observe(document.documentElement, {
+			attributeFilter: ['style'],
+			attributes: true,
+		});
 
 		const body = this._getProxyDocumentNode().querySelector('#root-in-window');
 		this._presenterContainer = this._createPresenterHTML(
@@ -1241,7 +1442,16 @@ class SlideShowPresenter {
 		app.timerRegistry.clearInterval(this._windowCloseInterval);
 		this._slideShowNavigator.quit();
 		this._map.uiManager.closeSnackbar();
+		if (this._safeAreaRailObserver) {
+			this._safeAreaRailObserver.disconnect();
+			this._safeAreaRailObserver = null;
+		}
 		this._slideShowCanvas = null;
+		// Same reason as _stopFullScreen: the containers lived in the window
+		// that just went away.
+		this._slideNavContainer = null;
+		this._slideExitContainer = null;
+		clearTimeout(this._slideControlsTimer);
 		if (this._presenterContainer) {
 			this._presenterContainer = null;
 			// Only the Windows shell took the document window full screen and
@@ -1342,15 +1552,38 @@ class SlideShowPresenter {
 				true,
 			);
 
-			if (this._presenterContainer.requestFullscreen) {
-				this._presenterContainer
-					.requestFullscreen()
-					.then(() => {
-						// success
-					})
-					.catch(() => {
-						this._doFallbackPresentation();
-					});
+			// Going full screen is the whole point of presenting on a phone, so
+			// this path has to be attempted and its failure has to be caught.
+			// An embedder whose iframe omits allow="fullscreen" rejects the
+			// promise; engines older than the promise-returning API return
+			// undefined instead; a few throw synchronously. All three used to
+			// leave a presenter container on the page with nothing driving it,
+			// which is the "presenting mode that cannot go full screen" the
+			// audit saw. Only a genuine failure reaches the in-page fallback.
+			if (typeof this._presenterContainer.requestFullscreen === 'function') {
+				const requestedFor = this._presenterContainer;
+				const fallBackToInPage = (reason: unknown) => {
+					// A rejection can land after the show was torn down, or
+					// after a second attempt replaced the container. Only the
+					// container we actually asked for is ours to replace.
+					if (this._presenterContainer !== requestedFor) return;
+					if (document.fullscreenElement === requestedFor) return;
+					app.console.debug(
+						'SlideShowPresenter: fullscreen refused, presenting in page instead: ' +
+							reason,
+					);
+					this._doFallbackPresentation();
+				};
+				try {
+					const request = this._presenterContainer.requestFullscreen();
+					if (request) Promise.resolve(request).catch(fallBackToInPage);
+					// No promise to await: the legacy API reports success only
+					// by firing fullscreenchange, so give that a moment before
+					// deciding we were refused.
+					else setTimeout(() => fallBackToInPage('no promise returned'), 250);
+				} catch (error) {
+					fallBackToInPage(error);
+				}
 				return true;
 			}
 		}
@@ -1540,12 +1773,15 @@ class SlideShowPresenter {
 		}
 
 		if (!this._slideCompositor) {
-			// When the document renders from vector primitives, draw the
-			// slides from the same primitive cache instead of the
-			// server-rendered bitmap layers.
-			this._slideCompositor = RenderManager.isVectorRendering()
-				? new SlideShow.VectorCompositor(this, this._metaPresentation)
-				: new SlideShow.LayersCompositor(this, this._metaPresentation);
+			// Draw the show from the engine's slide layers, also when the
+			// document renders from vector primitives: shape builds animate
+			// those per-shape layers. VectorCompositor draws whole slides
+			// only (no shape animation or video yet), so a vector-mode show
+			// played no build and a reveal press skipped ahead.
+			this._slideCompositor = new SlideShow.LayersCompositor(
+				this,
+				this._metaPresentation,
+			);
 		}
 
 		this._slideCompositor.onUpdatePresentationInfo();

@@ -365,6 +365,50 @@ CPPUNIT_TEST_FIXTURE(TestFormula2, testLambdaBuiltInValueFromOOXML)
     m_pDoc->DeleteTab(0);
 }
 
+CPPUNIT_TEST_FIXTURE(TestFormula2, testBareFutureFunctionFromOOXML)
+{
+    // Excel writes a function newer than Excel 2007 with the _xlfn. prefix
+    // (FILTER and SORT with _xlfn._xlws.). Other producers write the bare
+    // name (a workbook copied from Google Sheets held IFS(...)), and a save
+    // that could not resolve it stored it lowercased. Each spelling calls the
+    // function rather than evaluating to #NAME?, and is written back with the
+    // prefix.
+    sc::AutoCalcSwitch aACSwitch(*m_pDoc, true);
+    m_pDoc->InsertTab(0, u"Sheet1"_ustr);
+
+    m_pDoc->SetString(ScAddress(0, 0, 0), u"Done"_ustr);
+    m_pDoc->SetString(ScAddress(0, 1, 0), u"Open"_ustr);
+    m_pDoc->SetValue(ScAddress(1, 0, 0), 3.0);
+    m_pDoc->SetValue(ScAddress(1, 1, 0), 1.0);
+
+    // Column C holds the spelling Excel writes, column D the other one.
+    auto assertSameAsPrefixed = [&](SCROW nRow, const OUString& rPrefixed, const OUString& rBare,
+                                    const OUString& rResult) {
+        const ScAddress aPrefixedPos(2, nRow, 0), aBarePos(3, nRow, 0);
+        m_pDoc->SetFormula(aPrefixedPos, rPrefixed, formula::FormulaGrammar::GRAM_OOXML);
+        m_pDoc->SetFormula(aBarePos, rBare, formula::FormulaGrammar::GRAM_OOXML);
+        CPPUNIT_ASSERT_EQUAL(rResult, m_pDoc->GetString(aPrefixedPos));
+        CPPUNIT_ASSERT_EQUAL_MESSAGE(rBare.toUtf8().getStr(), rResult, m_pDoc->GetString(aBarePos));
+        const ScFormulaCell* pPrefixed = m_pDoc->GetFormulaCell(aPrefixedPos);
+        const ScFormulaCell* pBare = m_pDoc->GetFormulaCell(aBarePos);
+        CPPUNIT_ASSERT(pPrefixed);
+        CPPUNIT_ASSERT(pBare);
+        CPPUNIT_ASSERT_EQUAL(pPrefixed->GetFormula(formula::FormulaGrammar::GRAM_OOXML),
+                             pBare->GetFormula(formula::FormulaGrammar::GRAM_OOXML));
+    };
+
+    assertSameAsPrefixed(0, u"=_xlfn.IFS(A1=\"Done\",\"Closed\",TRUE,\"On track\")"_ustr,
+                         u"=IFS(A1=\"Done\",\"Closed\",TRUE,\"On track\")"_ustr, u"Closed"_ustr);
+    assertSameAsPrefixed(1, u"=_xlfn.IFS(A2=\"Done\",\"Closed\",TRUE(),\"On track\")"_ustr,
+                         u"=ifs(A2=\"Done\",\"Closed\",TRUE(),\"On track\")"_ustr, u"On track"_ustr);
+    assertSameAsPrefixed(2, u"=_xlfn.XLOOKUP(\"Open\",A1:A2,B1:B2)"_ustr,
+                         u"=XLOOKUP(\"Open\",A1:A2,B1:B2)"_ustr, u"1"_ustr);
+    assertSameAsPrefixed(3, u"=ROWS(_xlfn._xlws.SORT(B1:B2))"_ustr, u"=ROWS(SORT(B1:B2))"_ustr,
+                         u"2"_ustr);
+
+    m_pDoc->DeleteTab(0);
+}
+
 CPPUNIT_TEST_FIXTURE(TestFormula2, testMapPerElementErrorIsolation)
 {
     // MAP gives one result per element, so an element whose lambda errors holds

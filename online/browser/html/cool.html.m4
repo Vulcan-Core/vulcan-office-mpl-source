@@ -6,7 +6,7 @@ m4_define([m4_foreachq],[m4_ifelse([$2],[],[],[m4_pushdef([$1])_$0([$1],[$3],[],
 m4_define([_m4_foreachq],[m4_ifelse([$#],[3],[],[m4_define([$1],[$4])$2[]$0([$1],[$2],m4_shift(m4_shift(m4_shift($@))))])])m4_dnl
 m4_define(_YEAR_,m4_esyscmd(date +%Y|tr -d '\n'))m4_dnl
 m4_dnl------------------------------------------------------------------------
-m4_dnl# Define MOBILEAPP as true if this is either for the iOS/Android app or for the Collabora Office apps
+m4_dnl# Define MOBILEAPP as true if this is either for the iOS/Android app or for the desktop office apps
 m4_define([MOBILEAPP],[])m4_dnl
 m4_ifelse(IOSAPP,[true],[m4_define([MOBILEAPP],[true])])m4_dnl
 m4_ifelse(MACOSAPP,[true],[m4_define([MOBILEAPP],[true])])m4_dnl
@@ -67,9 +67,6 @@ m4_ifelse(MOBILEAPP, [true],
   <style>
     .mobileAppAndCODAOnly { display: none }
   </style>
-  <input type="hidden" id="init-welcome-url" value="%WELCOME_URL%" />
-  <input type="hidden" id="init-feedback-url" value="%FEEDBACK_URL%" />
-  <input type="hidden" id="init-buy-product-url" value="%BUYPRODUCT_URL%" />
   <input type="hidden" id="init-app-type" value="browser" />
   <input type="hidden" id="init-css-vars" value="<!--%CSS_VARIABLES%-->" />
   <input type="hidden" id="init-product-branding-url" value="%PRODUCT_BRANDING_URL%" />
@@ -191,10 +188,57 @@ m4_ifelse(MOBILEAPP,[true],
         <progress id="mobile-progress-bar" class="progress-bar" value="0" max="99"></progress>
       </div>
 
-      <input id="insertgraphic" aria-labelledby="menu-insertgraphic" type="file" accept="image/*" tabindex="-1">
-      <input id="insertmultimedia" aria-labelledby="menu-insertmultimedia" type="file" accept="audio/*, video/*" tabindex="-1">
-      <input id="selectbackground" aria-labelledby="menu-selectbackground" type="file" accept="image/*" tabindex="-1">
-      <input id="comparedocuments" aria-labelledby="menu-comparedocuments" type="file" accept="application/*" tabindex="-1">
+      <!--
+        These file inputs are programmatic click targets, never visible UI.
+        Their parking (off-screen via position:fixed/top:-100em — NOT
+        display:none, to preserve the stock picker behaviour) is applied three
+        ways, and only the FIRST is load-bearing:
+
+        1. js/global.js vulcanParkChromeFileInputs — a boot-time CSSOM write,
+           made in the load handler before these inputs leave this closed
+           (unrendered) dialog. This is the mechanism that holds: coolwsd
+           serves this page with CSP style-src 'self', under which the
+           browser DROPS every inline style attribute (no 'unsafe-inline'),
+           while CSSOM writes have no CSP hook at all.
+        2. The cool.css id-list — belt. It is an id LIST, and lists drift:
+           when #insertgraphiccamera shipped without its id in the list,
+           phones painted a raw "Choose File / No file chosen" strip across
+           the document whenever a reconnect relayout left the flow row
+           uncovered (prod 8/24: tanner-05 calc, andrew-02 writer).
+        3. The inline style attributes below — belt, INERT under the served
+           CSP (verified live 8/24: they computed to nothing on every build).
+           Kept because they cost nothing and still cover an embedding that
+           serves this page without that CSP.
+
+        A new file input MUST be added inside this dialog — that is the scope
+        the boot re-park covers. Mocha lint: ChromeFileInputsParked.test.ts.
+      -->
+      <input id="insertgraphic" aria-labelledby="menu-insertgraphic" type="file" accept="image/*" tabindex="-1" style="position: fixed; top: -100em;">
+      <!--
+        The camera source for Google Slides' image sheet, which names two device
+        sources: "camera (take a picture now)" and "device photos".
+
+        It is a SECOND input, not a capture attribute added to the one above,
+        because capture is not a per-tap mode. With capture present, iOS Safari
+        opens the camera DIRECTLY instead of raising its Photo Library / Take
+        Photo / Choose File action sheet, and Android Chrome likewise skips the
+        chooser. Putting it on #insertgraphic would therefore take the photo
+        library away from every caller of that element at once - and it is a
+        shared element: Writer, Calc, Impress and Draw insert menus, the desktop
+        top toolbar, and ContentControlSection's picture picker all click it.
+
+        accept stays image/* rather than the graphicMimeFilter list that
+        Control.Toolbar.js assigns to #insertgraphic: image/* is the form
+        capture is specified against, and a camera cannot produce the vector
+        types in that filter. The label reference is shared with the row above
+        on purpose - both are the same "insert an image" control, and these four
+        inputs live in a dialog that is never opened, so they are programmatic
+        click targets rather than reachable form controls.
+      -->
+      <input id="insertgraphiccamera" aria-labelledby="menu-insertgraphic" type="file" accept="image/*" capture="environment" tabindex="-1" style="position: fixed; top: -100em;">
+      <input id="insertmultimedia" aria-labelledby="menu-insertmultimedia" type="file" accept="audio/*, video/*" tabindex="-1" style="position: fixed; top: -100em;">
+      <input id="selectbackground" aria-labelledby="menu-selectbackground" type="file" accept="image/*" tabindex="-1" style="position: fixed; top: -100em;">
+      <input id="comparedocuments" aria-labelledby="menu-comparedocuments" type="file" accept="application/*" tabindex="-1" style="position: fixed; top: -100em;">
     </dialog>
 
     <div id="main-document-content">
@@ -246,7 +290,7 @@ m4_ifelse(MOBILEAPP,[true],
       <div id="about-dialog" tabIndex="0">
         <div id="about-dialog-header">
           <fig id="integrator-logo"></fig>
-          <h1 id="product-name">Collabora Online</h1>
+          <h1 id="product-name">Vulcan Office</h1>
         </div>
         <hr/>
         <div id="about-dialog-container">
@@ -283,8 +327,6 @@ m4_ifelse(MOBILEAPP, [true],
       data-access-token = "%ACCESS_TOKEN%"
       data-access-token-ttl = "%ACCESS_TOKEN_TTL%"
       data-allow-update-notification = "%ENABLE_UPDATE_NOTIFICATION%"
-      data-auto-show-feedback = "%AUTO_SHOW_FEEDBACK%"
-      data-auto-show-welcome = "%AUTO_SHOW_WELCOME%"
       data-canvas-slideshow-enabled = "%CANVAS_SLIDESHOW_ENABLED%"
       data-check-file-info-override = "%CHECK_FILE_INFO_OVERRIDE%"
       data-cool-logging = "%BROWSER_LOGGING%"
@@ -296,7 +338,6 @@ m4_ifelse(MOBILEAPP, [true],
       data-enable-debug = "%ENABLE_DEBUG%"
       data-enable-experimental-features = "%EXPERIMENTAL_FEATURES%"
       data-enable-macros-execution = "%ENABLE_MACROS_EXECUTION%"
-      data-enable-welcome-message = "%ENABLE_WELCOME_MSG%"
       data-extra-export-formats = "%EXTRA_EXPORT_FORMATS%"
       data-frame-ancestors = "%FRAME_ANCESTORS%"
       data-geolocation-setup = "%GEOLOCATION_SETUP%"

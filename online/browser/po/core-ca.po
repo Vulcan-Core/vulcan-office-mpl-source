@@ -40,8 +40,8 @@ msgid ""
 "Technology, provided by Collabora Productivity. See "
 "https://collaboraoffice.com"
 msgstr ""
-"Collabora Office, el paquet ofimàtic basat en la tecnologia de LibreOffice, "
-"proporcionat per Collabora Productivity. Visiteu https://collaboraoffice.com"
+"Vulcan Office, el paquet ofimàtic basat en la tecnologia de Vulcan Office, "
+"proporcionat per Vulcan AI. Visiteu https://collaboraoffice.com"
 
 #. 4rBwc
 #: include/svx/strings.hrc:1040
@@ -164,7 +164,7 @@ msgid ""
 "href=\"https://collaboraoffice.com\">https://CollaboraOffice.com/</a>."
 msgstr ""
 "Per a més informació, visiteu la pàgina de ${PRODUCTNAME} en <a "
-"href=\"https://collaboraoffice.com\">https://CollaboraOffice.com/</a>."
+"href=\"https://collaboraoffice.com\">https://Vulcan OfficeOffice.com/</a>."
 
 #. SbQew
 #: chart2/inc/strings.hrc:51

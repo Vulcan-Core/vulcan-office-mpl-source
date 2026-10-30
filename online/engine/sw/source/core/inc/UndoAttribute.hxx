@@ -61,6 +61,9 @@ public:
 
     SwHistory& GetHistory() { return *m_pHistory; }
     void dumpAsXml(xmlTextWriterPtr pWriter) const override;
+
+    /// Vulcan fork: character/paragraph formatting of a range adds no nodes.
+    std::optional<sw::UndoFootprint> GetFootprint() const override;
 };
 
 class SwUndoResetAttr final : public SwUndo, private SwUndRng
@@ -82,6 +85,9 @@ public:
     void SetAttrs( o3tl::sorted_vector<sal_uInt16> && rAttrs );
 
     SwHistory& GetHistory() { return *m_pHistory; }
+
+    /// Vulcan fork: resetting formatting of a range adds no nodes.
+    std::optional<sw::UndoFootprint> GetFootprint() const override;
 };
 
 class SwUndoFormatAttr final : public SwUndo

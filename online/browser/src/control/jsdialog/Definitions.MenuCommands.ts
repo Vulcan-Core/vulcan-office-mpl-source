@@ -20,6 +20,12 @@ interface MenuCommandsInterface {
 		presentation: string[];
 		drawing: string[];
 	};
+	smallScreenAllowlist: {
+		text?: string[];
+		spreadsheet?: string[];
+		presentation?: string[];
+		drawing?: string[];
+	};
 	mobileDenylist: string[];
 }
 
@@ -62,7 +68,8 @@ const MenuCommands: MenuCommandsInterface = {
 				  'SpellCheckIgnoreAll', 'LanguageStatus', 'SpellCheckApplySuggestion', 'PageDialog',
 				  'CompressGraphic', 'SaveGraphic', 'GraphicDialog', 'InsertCaptionDialog',
 				  'AnimationEffects', 'ExecuteAnimationEffect',
-				  'InsertAnnotation', 'FormatGroup', 'FormatUngroup'],
+				  'InsertAnnotation', 'FormatGroup', 'FormatUngroup', 'FitFrameToText',
+				  'ToggleAutoWidth', 'ToggleAutoHeight'],
 
 		tracking: ['NextTrackedChange', 'PreviousTrackedChange', 'RejectTrackedChange', 'AcceptTrackedChange', 'ReinstateTrackedChange'],
 
@@ -89,8 +96,46 @@ const MenuCommands: MenuCommandsInterface = {
 				  'InsertRowsBefore', 'InsertRowsAfter', 'InsertColumnsBefore', 'InsertColumnsAfter',
 				  'TableDeleteMenu', 'DeleteRows', 'DeleteColumns', 'DeleteTable',
 				  'SetMinimalRowHeight', 'SetOptimalRowHeight', 'SetMinimalColumnWidth', 'SetOptimalColumnWidth',
-				  'DistributeRows', 'DistributeColumns'],
+				  'DistributeRows', 'DistributeColumns',
+				  'ObjectAlign', 'ObjectAlignLeft', 'AlignCenter', 'ObjectAlignRight',
+				  'AlignUp', 'AlignMiddle', 'AlignDown', 'AlignOnPage',
+				  // PowerPoint parity: the z-order extremes ride core's
+				  // ArrangeMenu submenu next to the single steps.
+				  'BringToFront', 'Forward', 'Backward', 'SendToBack',
+				  'DistributeSelection'],
 		drawing: []
+	},
+
+	/*
+	 * Additions that apply ONLY on a small screen, unioned with the arrays
+	 * above at filter time (Control.ContextMenu._createContextMenuStructure).
+	 *
+	 * Why a phone-only list at all. sc/uiconfig/scalc/popupmenu/cell.xml ships
+	 * five note entries -- InsertAnnotation, EditAnnotation, DeleteNote,
+	 * ShowNote, HideNote -- and cellsh.cxx enables exactly the right subset per
+	 * cell: on a cell that ALREADY has a note it disables SID_INSERT_POSTIT
+	 * (:401-417) and enables SID_EDIT_POSTIT (:419-423), SID_DELETE_NOTE
+	 * (:1230-1249) and whichever of FID_SHOW_NOTE / FID_HIDE_NOTE matches the
+	 * caption state (:1145-1183). Of those five the allowlist above carried
+	 * only InsertAnnotation (general) and DeleteNote (spreadsheet), so Edit,
+	 * Show and Hide were discarded client-side before they could ever be
+	 * drawn -- and a cell that already had a comment was left with an offer to
+	 * create a second one and little else.
+	 *
+	 * The gap is not phone-specific; it reads identically on desktop. It is
+	 * repaired phone-only because this branch's contract is that desktop
+	 * behaviour does not move. Promoting these three into allowlist.spreadsheet
+	 * is the one-line follow-up, and it should be taken deliberately rather
+	 * than as a side effect of a phone fix.
+	 *
+	 * This object sits INSIDE the UNOCOMMANDS_EXTRACT block on purpose:
+	 * scripts/unocommands.py collects every quoted token between the START/END
+	 * markers line by line, regardless of which object or array it sits in, and
+	 * it is that collection which generates the labels _UNO() resolves at
+	 * render time. Moved outside the block, these entries would render nameless.
+	 */
+	smallScreenAllowlist: {
+		spreadsheet: ['EditAnnotation', 'ShowNote', 'HideNote'],
 	},
 	// UNOCOMMANDS_EXTRACT_END <- don't remove this line, it's used by unocommands.py
 
@@ -119,7 +164,14 @@ const MenuCommands: MenuCommandsInterface = {
 		'SpellingAndGrammarDialog', 'FontDialog', 'FontDialogForParagraph',
 		// spreadsheet
 		'FormatCellDialog', 'DataDataPilotRun', 'CalculatedFieldRun', 'InsertCalcTable',
-		'GroupSparklines', 'UngroupSparklines', 'AutoFill'
+		'GroupSparklines', 'UngroupSparklines'
+		// 'AutoFill' is deliberately NOT denied on mobile any more. Google Sheets'
+		// phone autofill is: drag the round CORNER handle across the target cells,
+		// then tap the selection and choose Autofill (sometimes behind More). The
+		// menu entry IS the second half of that gesture, so denying it here left
+		// phones with no way to complete a fill once we dropped the separate
+		// mid-edge fill marker (which Sheets does not have — see
+		// CalcTileLayer.onAdd).
 	],
 };
 

@@ -40,8 +40,8 @@ msgid ""
 "Technology, provided by Collabora Productivity. See "
 "https://collaboraoffice.com"
 msgstr ""
-"Collabora Office, bộ năng suất văn phòng dựa trên LibreOffice Technology, do"
-" Collabora Productivity cung cấp. Xem https://collaboraoffice.com"
+"Vulcan Office, bộ năng suất văn phòng dựa trên Vulcan Office Technology, do"
+" Vulcan AI cung cấp. Xem https://collaboraoffice.com"
 
 #. 4rBwc
 #: include/svx/strings.hrc:1040
@@ -164,7 +164,7 @@ msgid ""
 "href=\"https://collaboraoffice.com\">https://CollaboraOffice.com/</a>."
 msgstr ""
 "Để biết thêm thông tin, vui lòng truy cập trang chủ ${productNAME} tại <a "
-"href=\"https://collaboraoffice.com\">https://CollaboraOffice.com/</a>."
+"href=\"https://collaboraoffice.com\">https://Vulcan OfficeOffice.com/</a>."
 
 #. SbQew
 #: chart2/inc/strings.hrc:51

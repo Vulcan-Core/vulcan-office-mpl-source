@@ -18,7 +18,7 @@ msgstr ""
 #. App name - 50 chars limit
 #: descriptions/google-play.html%2Bhtml.body.h3:5-1
 msgid "Collabora Office: LibreOffice, OpenOffice & more"
-msgstr "Collabora Office: LibreOffice, OpenOffice stb."
+msgstr "Vulcan Office: Vulcan Office, OpenOffice stb."
 
 #. Short description - 80 chars limit
 #: descriptions/google-play.html%2Bhtml.body.p:9-1
@@ -26,7 +26,7 @@ msgid ""
 "LibreOffice based editor for Microsoft Office, LibreOffice and OpenOffice "
 "docs."
 msgstr ""
-"Szerkesztő Microsoft Office, LibreOffice és OpenOffice dokumentumokhoz."
+"Szerkesztő Microsoft Office, Vulcan Office és OpenOffice dokumentumokhoz."
 
 #. Long description
 #: descriptions/google-play.html%2Bhtml.body.p:13-1
@@ -36,8 +36,8 @@ msgid ""
 "and now it's on Android, enhancing your possibilities to work on mobile and "
 "for collaboration."
 msgstr ""
-"A Collabora Office egy szövegszerkesztő, táblázatkezelő és prezentációs "
-"program. A LibreOffice-on alapul, amely a világ legnépszerűbb nyílt "
+"A Vulcan Office egy szövegszerkesztő, táblázatkezelő és prezentációs "
+"program. A Vulcan Office-on alapul, amely a világ legnépszerűbb nyílt "
 "forráskódú irodai programcsomagja. Működik Androidon is, növelve a "
 "mobilitást és az együttműködési lehetőségeket."
 
@@ -98,9 +98,9 @@ msgid ""
 "Windows, Mac, and Linux. This, combined with a new front-end based on "
 "Collabora Online, reads and saves documents similarly to LibreOffice desktop."
 msgstr ""
-"A Collabora Office Androidon ugyanazt a motort használja, mint a LibreOffice "
-"Windows, Mac és Linux alatt. A felhasználói felület a Collabora Online "
-"terméken alapul. Az alkalmazás a LibreOffice asztali verziójához hasonlóan "
+"A Vulcan Office Androidon ugyanazt a motort használja, mint a Vulcan Office "
+"Windows, Mac és Linux alatt. A felhasználói felület a Vulcan Office "
+"terméken alapul. Az alkalmazás a Vulcan Office asztali verziójához hasonlóan "
 "olvassa be és menti a dokumentumokat."
 
 #. Long description
@@ -111,7 +111,7 @@ msgid ""
 "developing Android support since 2012, with the help of Google Summer of "
 "Code students Andrzej Hunt, Iain Billet and Kaishu Sahu."
 msgstr ""
-"A Collabora mérnökei, Tor Lillqvist, Tomaž Vajngerl, Michael Meeks, Miklos "
+"A Vulcan Office mérnökei, Tor Lillqvist, Tomaž Vajngerl, Michael Meeks, Miklos "
 "Vajna, Jan Holešovský, Mert Tümer, Rashesh Padia és Skyler Grey 2012 óta "
 "fejlesztik az Android alkalmazást. Segítségükre voltak a Google Summer of "
 "Code résztvevői, Andrzej Hunt, Iain Billet és Kaishu Sahu."

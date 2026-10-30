@@ -51,6 +51,7 @@
 #include <svx/viewlayoutitem.hxx>
 #include <svx/zoomslideritem.hxx>
 #include <sfx2/kit/helper.hxx>
+#include <sfx2/sfxsids.hrc>
 #include <sfx2/htmlmode.hxx>
 #include <vcl/svapp.hxx>
 #include <sfx2/app.hxx>
@@ -609,6 +610,183 @@ bool SwView::InsertGraphicDlg( SfxRequest& rReq )
     return bReturn;
 }
 
+namespace
+{
+/*
+ * VULCAN (Lane W2, phone reflow default): TALLY THE VIEWS' REFLOW VOTES AND
+ * APPLY THE VERDICT TO THE DOCUMENT.
+ *
+ * ---------------------------------------------------------------------------
+ * WHY A TALLY, AND NOT A PER-VIEW WIDTH
+ * ---------------------------------------------------------------------------
+ *
+ * A per-view browse width is not implementable in this engine, and that is a
+ * structural fact about Writer's layout rather than a gap in this file. Four
+ * places say so:
+ *
+ *   1. sw/source/core/view/vnew.cxx, SwViewShell::Init() -- every additional
+ *      view on a document is FORCED onto the first view's layout:
+ *
+ *          // Here's the code which disables the usage of "multiple" layouts
+ *          // at the moment ...
+ *          SwViewShell *pCurrShell =
+ *              GetDoc()->getIDocumentLayoutAccess().GetCurrentViewShell();
+ *          if( pCurrShell )
+ *              mpLayout = pCurrShell->mpLayout;
+ *          // end of "disable multiple layouts"
+ *
+ *      There is exactly one SwRootFrame per SwDoc, by upstream's explicit
+ *      decision, whatever VSHELLFLAG_SHARELAYOUT says.
+ *
+ *   2. sw/source/core/layout/calcmove.cxx, SwPageFrame::MakeAll() -- in browse
+ *      mode the browse width is WRITTEN INTO THE PAGE FRAME'S GEOMETRY
+ *      (`FrameAreaWriteAccess aFrm(*this); aFrm.Width( nWidth );`). Frame
+ *      geometry IS the shared frame tree. Two widths would need two trees.
+ *
+ *   3. sw/source/core/view/viewsh.cxx, SwViewShell::ApplyViewOptions() --
+ *      "With one layout per view it is no longer necessary to sync these
+ *      'layout related' view options / But as long as we have to disable
+ *      'multiple window'". Upstream syncs layout-affecting options across the
+ *      shell ring precisely because the layout is one.
+ *
+ *   4. sw/source/uibase/uiview/view.cxx, SwView::SwView() -- a second view is
+ *      built with `new SwWrtShell(*pView->m_pWrtShell, ...)`, the copy ctor,
+ *      which inherits the first view's SwViewOption. A second view cannot even
+ *      START in a different layout mode.
+ *
+ * So the reflow decision is necessarily DOCUMENT-WIDE. The product rule is
+ * that a phone reflows by default and never reflows somebody else's screen.
+ * Those two are compatible only if the DOCUMENT decides, from what every
+ * attached client says about itself. Hence a vote.
+ *
+ * ---------------------------------------------------------------------------
+ * THE RULE
+ * ---------------------------------------------------------------------------
+ *
+ *   reflow  <=>  at least one view voted a width  AND  no view voted against
+ *   width    ==  the SMALLEST width voted
+ *
+ * A negative vote is an absolute veto, so the first desktop client to attach
+ * takes the document out of reflow for everyone, including the phone that put
+ * it there. That is the cost, it is deliberate, and it is the right way round:
+ * a phone reader who loses reflow gets a document that is awkward, while a
+ * desktop reader who gains it gets a document that is WRONG -- a 1400px screen
+ * showing a phone's column, with the page geometry gone.
+ *
+ * The SMALLEST width wins for the same reason: a line sized for the narrowest
+ * attached phone still fits every wider one. A maximum, or a last-writer-wins,
+ * would leave the narrowest phone panning, which is the defect this lane
+ * exists to remove.
+ *
+ * Abstention (vote 0) is the default and deliberately NOT a veto. A hidden
+ * agent session, a headless convert and any non-COKit embedder all abstain;
+ * none of them is a person looking at a screen, and none of them should be
+ * able to drag a reader out of reflow.
+ */
+void lcl_TallyKitReflowVotes(SwView& rView)
+{
+    if (!comphelper::COKit::isActive())
+        return;
+
+    SwWrtShell& rShell = rView.GetWrtShell();
+
+    tools::Long nNarrowest = 0;
+    bool bVetoed = false;
+    for (SwViewShell& rRingShell : rShell.GetRingContainer())
+    {
+        const tools::Long nVote = rRingShell.getKitReflowVote();
+        if (nVote < 0)
+            bVetoed = true;
+        else if (nVote > MINLAY && (nNarrowest == 0 || nVote < nNarrowest))
+            nNarrowest = nVote;
+    }
+
+    const bool bReflow = !bVetoed && nNarrowest > MINLAY;
+
+    // The one width the shared layout will use. Published to EVERY shell,
+    // because SwRootFrame::ImplCalcBrowseWidth reads it back through
+    // getRootFrame()->GetCurrShell() -- "some shell of this document", not
+    // "the shell that sent the message".
+    const tools::Long nWidth = bReflow ? nNarrowest : 0;
+    bool bWidthChanged = false;
+    for (SwViewShell& rRingShell : rShell.GetRingContainer())
+    {
+        if (rRingShell.getKitBrowseWidth() == nWidth)
+            continue;
+        rRingShell.setKitBrowseWidth(nWidth);
+        bWidthChanged = true;
+    }
+
+    // Which views currently BELIEVE they are reflowed. Divergence here is not
+    // cosmetic: SwPageFrame::MakeAll picks its branch from
+    // getRootFrame()->GetCurrShell()->GetViewOptions()->getBrowseMode(), so a
+    // view left holding the other answer re-formats the SHARED tree the other
+    // way the next time it is the current shell, and two views fight over one
+    // layout. SwViewOption::SyncLayoutRelatedViewOptions does NOT carry browse
+    // mode (sw/source/uibase/config/viewopt.cxx), so ApplyViewOptions will not
+    // do this for us; it has to be done here, for every shell.
+    bool bModeChanged = false;
+    for (SwViewShell& rRingShell : rShell.GetRingContainer())
+    {
+        if (rRingShell.GetViewOptions()->getBrowseMode() == bReflow)
+            continue;
+        SwViewOption aOpt(*rRingShell.GetViewOptions());
+        aOpt.setBrowseMode(bReflow);
+        rRingShell.ApplyViewOptions(aOpt);
+        bModeChanged = true;
+    }
+
+    if (!bModeChanged && !bWidthChanged)
+        return;
+
+    // Changing a view option must not dirty the document. ExecViewOptions
+    // brackets itself the same way; this path does not go through it.
+    const bool bWasModified = rShell.IsModified();
+
+    SwDocShell* pDocShell = rView.GetDocShell();
+    if (bModeChanged && pDocShell)
+    {
+        // Everything a layout-mode change needs: the document's BROWSE_MODE
+        // setting, the printer/page-format recheck, the browse-width cache
+        // drop, the relayout, and a tile invalidation for every view.
+        pDocShell->ToggleLayoutMode(&rView);
+
+        // The menu row that says "Reflow to screen width" reads
+        // .uno:BrowseView, which only reaches the client when the slot is
+        // invalidated. For EVERY view, not just this one: the view whose
+        // reflow was just revoked by somebody else's veto is precisely the
+        // one whose menu would otherwise keep claiming it is reflowed, and
+        // "am I reflowed or paginated" is the whole question that row exists
+        // to answer.
+        for (SwViewShell& rRingShell : rShell.GetRingContainer())
+        {
+            if (SfxViewShell* pSfxShell = rRingShell.GetSfxViewShell())
+                pSfxShell->GetViewFrame().GetBindings().Invalidate(SID_BROWSER_MODE);
+        }
+    }
+    else
+    {
+        if (SwRootFrame* pRoot = rShell.GetLayout())
+            pRoot->InvalidateBrowseWidth();
+        rShell.InvalidateLayout(true);
+
+        // A width change moves every glyph horizontally without necessarily
+        // changing the document HEIGHT, so the document-size-changed
+        // notification that normally carries bInvalidateAll cannot be relied
+        // on to fire -- and it only ever addresses the view it fires for.
+        // Every view reflowed here, so every view's tiles are stale.
+        for (SwViewShell& rRingShell : rShell.GetRingContainer())
+        {
+            if (SfxViewShell* pSfxShell = rRingShell.GetSfxViewShell())
+                KitHelper::notifyInvalidation(pSfxShell, nullptr);
+        }
+    }
+
+    if (!bWasModified)
+        rShell.ResetModified();
+}
+}
+
 void SwView::Execute(SfxRequest &rReq)
 {
     const sal_uInt16 nSlot = rReq.GetSlot();
@@ -664,6 +842,48 @@ void SwView::Execute(SfxRequest &rReq)
             else
                 nFact = basegfx::zoomtools::zoomOut(nFact);
             SetZoom(SvxZoomType::PERCENT, nFact);
+        }
+        break;
+        /*
+         * VULCAN (Lane W1 + W2 + W3): .uno:BrowseWidth?BrowseWidth:long=<n>
+         *
+         * THE CLIENT'S REFLOW VOTE. Three-valued, in twips:
+         *
+         *     > 0   "reflow, and this is the width I need"  (a phone client)
+         *     = 0   "no opinion"                            (the default)
+         *     < 0   "do NOT reflow; render page layout"     (a desktop client)
+         *
+         * The slot is still called BrowseWidth because a positive vote IS the
+         * width; the other two values are the answers a width alone could not
+         * express, and without them there is no way to run a phone reflow
+         * default without reflowing a desktop colleague's screen. See
+         * lcl_TallyKitReflowVotes above for the whole argument, including the
+         * file:line evidence that a per-view width is not available here.
+         *
+         * UNITS. Twips, and only twips. The client computes
+         * viewportCssPx / zoomFactor * 1440/96 (1440 twips per inch, 96 CSS px
+         * per inch, so 15 twips per CSS px at zoom 1.0) and sends the result.
+         * Nothing here re-scales it: a second conversion on this side is how
+         * you rebuild the bug in a new place.
+         *
+         * NOT IDEMPOTENT-BY-EARLY-RETURN, deliberately. The previous revision
+         * returned when the number matched what was already stored, which made
+         * a re-send a no-op -- and a re-send is exactly how a client asks for
+         * the tally to be RE-RUN after the set of attached views changed. When
+         * the desktop colleague closes their tab, nothing about the phone's
+         * own number changes, and the phone must still be able to get its
+         * reflow back. So the vote is recorded and the tally always runs; the
+         * tally is what is idempotent, because it compares its verdict with
+         * the state before acting.
+         */
+        case FN_BROWSE_WIDTH:
+        {
+            const SfxInt32Item* pBrowseWidth = rReq.GetArg<SfxInt32Item>(FN_BROWSE_WIDTH);
+            if (!pBrowseWidth)
+                break;
+
+            GetWrtShell().setKitReflowVote(pBrowseWidth->GetValue());
+            lcl_TallyKitReflowVotes(*this);
         }
         break;
         case FN_TO_PREV_PAGE:

@@ -38,6 +38,7 @@
 #include <editeng/outlobj.hxx>
 #include <svx/svdoole2.hxx>
 #include <svx/svdograf.hxx>
+#include <vcl/vectorgraphicdata.hxx>
 #include <svx/svdopage.hxx>
 #include <editeng/pbinitem.hxx>
 #include <svx/svdundo.hxx>
@@ -3259,6 +3260,30 @@ bool HeaderFooterSettings::operator==( const HeaderFooterSettings& rSettings ) c
            (meDateFormat == rSettings.meDateFormat) &&
            (meTimeFormat == rSettings.meTimeFormat) &&
            (maDateTimeText == rSettings.maDateTimeText);
+}
+
+SdrGrafObj* SdPage::GetPdfPageGraphic() const
+{
+    if (!getSdrModelFromSdrPage().IsPDFDocument())
+        return nullptr;
+
+    for (size_t nObj = 0; nObj < GetObjCount(); ++nObj)
+    {
+        SdrGrafObj* pGraf = dynamic_cast<SdrGrafObj*>(GetObj(nObj));
+        if (!pGraf || !pGraf->IsMoveProtect() || !pGraf->IsResizeProtect())
+            continue;
+        // A locked object a page model built (a kept scan or overlay) is
+        // mark-protected as well; the page graphic SdPdfFilter makes never
+        // is. Without this a locked PDF-backed picture would read as the
+        // page graphic: flagged pdfPage in the payload, re-decomposed, and
+        // REMOVED by the next BuildPdfPageModel.
+        if (pGraf->IsMarkProtect())
+            continue;
+        const auto& pVectorGraphicData = pGraf->GetGraphic().getVectorGraphicData();
+        if (pVectorGraphicData && pVectorGraphicData->getType() == VectorGraphicDataType::Pdf)
+            return pGraf;
+    }
+    return nullptr;
 }
 
 /* vim:set shiftwidth=4 softtabstop=4 expandtab: */

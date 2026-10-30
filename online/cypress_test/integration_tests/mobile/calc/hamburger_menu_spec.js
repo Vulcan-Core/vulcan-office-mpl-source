@@ -5,29 +5,12 @@ var calcHelper = require('../../common/calc_helper');
 var mobileHelper = require('../../common/mobile_helper');
 var repairHelper = require('../../common/repair_document_helper');
 
+// NOTE: phone saving is HOST-DRIVEN. Save, Save As and version history were
+// removed from the phone kebab deliberately (Google routes all three to a
+// computer); the host posts Action_Save and coolwsd autosaves. There is
+// therefore no 'Save' case below any more -- do not re-add one against
+// File > Save, it no longer exists in mobilespreadsheet.
 describe.skip(['tagmobile'], 'Trigger hamburger menu options.', function() {
-
-	it('Save', function() {
-		var newFilePath = helper.setupAndLoadDocument('calc/hamburger_menu.ods');
-		mobileHelper.enableEditingMobile();
-
-		calcHelper.selectEntireSheet();
-
-		cy.cGet('#copy-paste-container table td').should('contain.text', 'Textx');
-		calcHelper.clickOnFirstCell(true, true);
-		helper.selectAllText();
-		helper.typeIntoDocument('new');
-		calcHelper.selectEntireSheet();
-		cy.cGet('#copy-paste-container table td').should('contain.text', 'new');
-		mobileHelper.selectHamburgerMenuItem(['File', 'Save']);
-
-		// Reopen the document and check content.
-		helper.reloadDocument(newFilePath);
-
-		mobileHelper.enableEditingMobile();
-		calcHelper.selectEntireSheet();
-		cy.cGet('#copy-paste-container table td').should('contain.text', 'new');
-	});
 
 	it('Print', function() {
 		helper.setupAndLoadDocument('calc/hamburger_menu.ods');

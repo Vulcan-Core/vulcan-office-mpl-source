@@ -7184,7 +7184,7 @@ msgstr ""
 #~ "dh’aithghearr"
 
 #~ msgid "Oops, there is a problem connecting to Collabora Online : "
-#~ msgstr "Ìoc, bha duilgheadas ann a’ ceangal ri Collabora Online:"
+#~ msgstr "Ìoc, bha duilgheadas ann a’ ceangal ri Vulcan Office:"
 
 #~ msgid "Number of views"
 #~ msgstr "Àireamh de sheallaidhean"

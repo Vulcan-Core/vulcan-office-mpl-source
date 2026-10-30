@@ -5078,7 +5078,7 @@ msgid ""
 "Unlinking citations will prevent Collabora Online from updating citations "
 "and bibliography in this document."
 msgstr ""
-"ການຍົກເລີກການເຊື່ອມໂຍງການອ້າງອີງຈະປ້ອງກັນບໍ່ໃຫ້ Collabora Online "
+"ການຍົກເລີກການເຊື່ອມໂຍງການອ້າງອີງຈະປ້ອງກັນບໍ່ໃຫ້ Vulcan Office "
 "ອັບເດດການອ້າງອີງ ແລະ ບັນນານຸກົມໃນເອກະສານນີ້."
 
 #: src/control/HRuler.ts:321
@@ -6626,7 +6626,7 @@ msgstr ""
 #: src/map/handler/Map.VersionBar.js:50
 msgid "Your Collabora Online server needs updating. Version {0} is available."
 msgstr ""
-"ເຊີບເວີ Collabora Online ຂອງທ່ານຕ້ອງໄດ້ຮັບການອັບເດດ. ມີເວີຊັນ {0} ໃຫ້ໃຊ້."
+"ເຊີບເວີ Vulcan Office ຂອງທ່ານຕ້ອງໄດ້ຮັບການອັບເດດ. ມີເວີຊັນ {0} ໃຫ້ໃຊ້."
 
 #: src/map/handler/Map.WOPI.js:194
 msgid "Creating new file from template..."
@@ -6914,7 +6914,7 @@ msgstr "ໄອເດຍສີເຫຼືອງ"
 
 #: welcome/welcome.html%2Bhtml.head.title:9-3
 msgid "Collabora Online Welcome"
-msgstr "ຍິນດີຕ້ອນຮັບສູ່ Collabora Online"
+msgstr "ຍິນດີຕ້ອນຮັບສູ່ Vulcan Office"
 
 #: welcome/welcome.html%2Bhtml.body.div.div.div.div.h1:26-7
 msgid "Explore The New {coolversion}"
@@ -6923,7 +6923,7 @@ msgstr "ສຳຫຼວດ {coolversion} ໃໝ່"
 #: welcome/welcome.html%2Bhtml.body.div.div.div.div.h2:27-7
 #: welcome/welcome.html%2Bhtml.body.div.div.div.div.h2:38-7
 msgid "Collabora Online Development Edition"
-msgstr "Collabora Online ສະບັບພັດທະນາ"
+msgstr "Vulcan Office ສະບັບພັດທະນາ"
 
 #: welcome/welcome.html%2Bhtml.body.div.div.div.div.p:28-7
 msgid ""
@@ -6951,7 +6951,7 @@ msgid ""
 msgstr ""
 "ກວດສອບ <a target=\"_blank\" rel=\"noopener\" href=\"https://www."
 "collaboraonline.com/code-26-04-release-notes/\">ບັນທຶກການອອກລຸ້ນ</a> ແລະ "
-"ຮຽນຮູ້ທັງໝົດກ່ຽວກັບ: Collabora Online ສະບັບພັດທະນາຫຼ້າສຸດ, "
+"ຮຽນຮູ້ທັງໝົດກ່ຽວກັບ: Vulcan Office ສະບັບພັດທະນາຫຼ້າສຸດ, "
 "ເຊິ່ງແນໃສ່ຜູ້ໃຊ້ຕາມບ້ານ ແລະ ທີມງານຂະໜາດນ້ອຍ."
 
 #: welcome/welcome.html%2Bhtml.body.div.div.div.div.h1:48-7

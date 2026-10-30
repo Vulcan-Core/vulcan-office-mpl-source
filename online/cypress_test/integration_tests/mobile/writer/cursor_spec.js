@@ -51,5 +51,11 @@ describe(['tagmobile', 'tagnextcloud', 'tagproxy'], 'Text cursor tests.', functi
 		for (var j = 0; j < 5; j++) {
 			helper.moveCursor('up');
 		}
+
+		cy.getFrameWindow().then(function(win) {
+			helper.processToIdle(win);
+		});
+		cy.cGet('.table-column-resize-marker, .table-row-resize-marker, .table-select-marker, .table-add-col-row-marker')
+			.should('not.exist');
 	});
 });

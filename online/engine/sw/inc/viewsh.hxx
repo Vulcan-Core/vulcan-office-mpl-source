@@ -214,6 +214,11 @@ protected:
 
     SwRect                  maVisArea;       ///< The modern version of VisArea.
     tools::Rectangle        maKitVisibleArea;///< The visible area in the COKit client.
+    /// VULCAN: the browse-mode reflow width the CLIENT asked for, in twips.
+    /// 0 means "the client has not stated one" -- see setKitBrowseWidth().
+    tools::Long             mnKitBrowseWidth = 0;
+    /// VULCAN: THIS view's vote on reflow -- see setKitReflowVote().
+    tools::Long             mnKitReflowVote = 0;
     rtl::Reference<SwDoc>   mxDoc;          ///< The document; never 0.
 
     sal_uInt16 mnStartAction; ///< != 0 if at least one Action is active.
@@ -300,6 +305,66 @@ public:
     /// The visible area in the client (set by setClientVisibleArea).
     const tools::Rectangle & getKitVisibleArea() const { return maKitVisibleArea; }
     void setKitVisibleArea(const tools::Rectangle& rArea) { maKitVisibleArea = rArea; }
+
+    /** VULCAN: the browse-mode (web view) reflow width, STATED BY THE CLIENT.
+     *
+     *  In twips, and it is the width the client wants a line of text to
+     *  occupy -- not a viewport, not a scroll window, not anything the layout
+     *  produced. The client computes it as
+     *
+     *      viewportCssPx / zoomFactor * 1440/96
+     *
+     *  and sends it with .uno:BrowseWidth; see SwView::Execute() and
+     *  SwRootFrame::ImplCalcBrowseWidth(), which is the only consumer.
+     *
+     *  0 means the client has not stated one yet (initial layout, headless
+     *  convert, any non-COKit embedder). ImplCalcBrowseWidth falls back to
+     *  MIN_BROWSE_WIDTH in that case, which is the case that fallback was
+     *  always for.
+     */
+    tools::Long getKitBrowseWidth() const { return mnKitBrowseWidth; }
+    void setKitBrowseWidth(tools::Long nTwips) { mnKitBrowseWidth = nTwips; }
+
+    /** VULCAN: "a COKit client has STATED a browse width", i.e. this document
+     *  is in client-driven reflow.
+     *
+     *  `comphelper::COKit::isActive() && getKitBrowseWidth() > MINLAY` -- the
+     *  same predicate SwRootFrame::ImplCalcBrowseWidth and
+     *  SwViewShell::GetBrowseWidth already tested by hand. It is here so the
+     *  three of them cannot drift: they are the entry points of one decision,
+     *  and a fourth caller (SwTabFrame::Format) now depends on agreeing with
+     *  them exactly.
+     *
+     *  THIS IS NOT getViewOptions()->getBrowseMode(). Browse mode is also on
+     *  for a desktop Web View and for some headless converts, neither of which
+     *  stated a width and neither of which should be reflowed to a phone.
+     *  Gate on this, never on browse mode alone.
+     */
+    bool hasKitBrowseWidth() const;
+
+    /** VULCAN: THIS view's VOTE on whether the document should reflow, and to
+     *  what width. Three-valued, in twips:
+     *
+     *      > 0   "reflow, and this is the width I need"  (a phone client)
+     *      = 0   "no opinion"                            (the default)
+     *      < 0   "do NOT reflow; render page layout"     (a desktop client)
+     *
+     *  A VOTE IS NOT A WIDTH, and the two must not be conflated. The width
+     *  above (mnBrowseWidth's source) is a property of the DOCUMENT LAYOUT,
+     *  which is shared by every view -- see the evidence block on
+     *  SwRootFrame::ImplCalcBrowseWidth. The vote is a property of one
+     *  CLIENT. SwView::Execute (FN_BROWSE_WIDTH) tallies the votes of every
+     *  shell in the ring and derives the single document-wide width from
+     *  them; that tally is the only writer of setKitBrowseWidth().
+     *
+     *  A view that never votes abstains. That is deliberate and is the safe
+     *  default: a hidden 0x0 agent session, a headless convert and any
+     *  non-COKit embedder all abstain, and none of them should be able to
+     *  drag a phone reader back into page layout. Only an explicit negative
+     *  vote does that.
+     */
+    tools::Long getKitReflowVote() const { return mnKitReflowVote; }
+    void setKitReflowVote(tools::Long nVote) { mnKitReflowVote = nVote; }
 
     // If necessary scroll until passed Rect is situated in visible sector.
     void MakeVisible( const SwRect &, ScrollSizeMode eScrollSizeMode = ScrollSizeMode::ScrollSizeDefault );
@@ -566,6 +631,13 @@ public:
     void InvalidateLayout(bool bSizeChanged);
 
     const Size& GetBrowseBorder() const;
+    /** VULCAN (R6-15): the browse border converted against the FORMATTING
+     *  reference device (GetRefDev()) -- see the definition. Layout consumers
+     *  of the border must use this, never PixelToLogic against whatever
+     *  output device happens to be current (under COKit that is the tile
+     *  VirtualDevice for the duration of a PaintTile, and its rasterisation
+     *  scale would reach the formatted page and paragraph widths). */
+    Size GetBrowseBorderTwips() const;
     sal_Int32 GetBrowseWidth() const;
     void SetBrowseBorder( const Size& rNew );
 

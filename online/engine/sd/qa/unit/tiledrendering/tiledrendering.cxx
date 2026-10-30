@@ -19,11 +19,15 @@
 #include <vector>
 #include <COKit/COKitEnums.h>
 #include <sal/log.hxx>
+#include <comphelper/dispatchcommand.hxx>
 #include <comphelper/propertysequence.hxx>
 #include <comphelper/propertyvalue.hxx>
+#include <comphelper/scopeguard.hxx>
 #include <comphelper/string.hxx>
 #include <comphelper/hash.hxx>
 #include <cppuhelper/implbase.hxx>
+#include <com/sun/star/frame/DispatchResultEvent.hpp>
+#include <com/sun/star/frame/XDispatchResultListener.hpp>
 #include <editeng/eeitem.hxx>
 #include <editeng/editids.hrc>
 #include <editeng/editeng.hxx>
@@ -41,10 +45,14 @@
 #include <svl/intitem.hxx>
 #include <svx/unoapi.hxx>
 #include <svx/svdotable.hxx>
+#include <svx/svdundo.hxx>
+#include <svx/svdorect.hxx>
+#include <svx/svdogrp.hxx>
 #include <svx/svdoutl.hxx>
 #include <unotools/datetime.hxx>
 
 #include <DrawDocShell.hxx>
+#include <DrawViewShell.hxx>
 #include <ViewShellBase.hxx>
 #include <ViewShell.hxx>
 #include <SlideshowLayerRenderer.hxx>
@@ -72,6 +80,7 @@
 
 #include <chrono>
 #include <cstdlib>
+#include <limits>
 #include <string_view>
 
 using namespace css;
@@ -93,6 +102,35 @@ CPPUNIT_TEST_FIXTURE(SdTiledRenderingTest, testCreateView)
     createDoc("dummy.odp");
 
     KitHelper::createView();
+}
+
+CPPUNIT_TEST_FIXTURE(SdTiledRenderingTest, testPartInvalidationReachesAllDocumentViews)
+{
+    SdXImpressDocument* pXImpressDocument = createDoc("dummy.odp");
+    SdTestViewCallback aView1;
+    KitHelper::createView();
+    pXImpressDocument->initializeForTiledRendering({});
+    SdTestViewCallback aView2;
+
+    const bool bOldPartInInvalidation = comphelper::COKit::isPartInInvalidation();
+    comphelper::COKit::setPartInInvalidation(true);
+    comphelper::ScopeGuard aRestorePartInInvalidation(
+        [bOldPartInInvalidation]() {
+            comphelper::COKit::setPartInInvalidation(bOldPartInInvalidation);
+        });
+
+    aView1.m_bTilesInvalidated = false;
+    aView1.invalidatedAll = false;
+    aView2.m_bTilesInvalidated = false;
+    aView2.invalidatedAll = false;
+    KitHelper::notifyPartInvalidationAllViews(pXImpressDocument, 3);
+
+    CPPUNIT_ASSERT(aView1.m_bTilesInvalidated);
+    CPPUNIT_ASSERT(aView1.invalidatedAll);
+    CPPUNIT_ASSERT_EQUAL(3, aView1.partOfInvalidation);
+    CPPUNIT_ASSERT(aView2.m_bTilesInvalidated);
+    CPPUNIT_ASSERT(aView2.invalidatedAll);
+    CPPUNIT_ASSERT_EQUAL(3, aView2.partOfInvalidation);
 }
 
 CPPUNIT_TEST_FIXTURE(SdTiledRenderingTest, testRegisterCallback)
@@ -441,6 +479,39 @@ CPPUNIT_TEST_FIXTURE(SdTiledRenderingTest, testInsertTable)
 
     CPPUNIT_ASSERT(aPos.X() != 0);
     CPPUNIT_ASSERT(aPos.Y() != 0);
+}
+
+CPPUNIT_TEST_FIXTURE(SdTiledRenderingTest, testHideSlideUndoRedoNotifiesStatus)
+{
+    SdXImpressDocument* pXImpressDocument = createDoc("dummy.odp");
+    sd::ViewShell* pViewShell = pXImpressDocument->GetDocShell()->GetViewShell();
+    setupCOKitViewCallback(pViewShell->GetViewShellBase());
+
+    SdPage* pPage = pXImpressDocument->GetDoc()->GetSdPage(0, PageKind::Standard);
+    CPPUNIT_ASSERT(pPage);
+    CPPUNIT_ASSERT(!pPage->IsExcluded());
+    Scheduler::ProcessEventsToIdle();
+
+    auto assertDocumentStatusNotification = [this]() {
+        const osl::Condition::Result aResult
+            = m_aDocumentSizeCondition.wait(std::chrono::seconds(2));
+        CPPUNIT_ASSERT_EQUAL(osl::Condition::result_ok, aResult);
+    };
+
+    m_aDocumentSizeCondition.reset();
+    dispatchCommand(mxComponent, u".uno:HideSlide"_ustr, {});
+    CPPUNIT_ASSERT(pPage->IsExcluded());
+    assertDocumentStatusNotification();
+
+    m_aDocumentSizeCondition.reset();
+    dispatchCommand(mxComponent, u".uno:Undo"_ustr, {});
+    CPPUNIT_ASSERT(!pPage->IsExcluded());
+    assertDocumentStatusNotification();
+
+    m_aDocumentSizeCondition.reset();
+    dispatchCommand(mxComponent, u".uno:Redo"_ustr, {});
+    CPPUNIT_ASSERT(pPage->IsExcluded());
+    assertDocumentStatusNotification();
 }
 
 CPPUNIT_TEST_FIXTURE(SdTiledRenderingTest, testDeleteTable)
@@ -956,9 +1027,15 @@ CPPUNIT_TEST_FIXTURE(SdTiledRenderingTest, testUndoLimiting)
         SfxRequest aReq2(SID_UNDO, SfxCallMode::SLOT, pXImpressDocument->GetDocShell()->GetDoc()->GetPool());
         aReq2.AppendItem(SfxUInt16Item(SID_UNDO, 1));
         pViewShell2->ExecuteSlot(aReq2);
-        const SfxUInt32Item* pUInt32Item = dynamic_cast<const SfxUInt32Item*>(aReq2.GetReturnValue().getItem());
-        CPPUNIT_ASSERT(pUInt32Item);
-        CPPUNIT_ASSERT_EQUAL(static_cast< sal_uInt32 >(SID_REPAIRPACKAGE), pUInt32Item->GetValue());
+        // Vulcan fork: answered with JSON (nothing of view2's own to undo), never the numeric
+        // SID_REPAIRPACKAGE value the browser turned into the stock conflict dialog.
+        CPPUNIT_ASSERT(!dynamic_cast<const SfxUInt32Item*>(aReq2.GetReturnValue().getItem()));
+        const SfxStringItem* pJson = dynamic_cast<const SfxStringItem*>(aReq2.GetReturnValue().getItem());
+        CPPUNIT_ASSERT(pJson);
+        const OUString aExpected
+            = OUString::Concat(u"{\"vulcanUndo\":{\"status\":\"nothing_own\",\"otherViewId\":")
+              + OUString::number(nView1) + u",\"command\":\"undo\"}}";
+        CPPUNIT_ASSERT_EQUAL(aExpected, pJson->GetValue());
     }
 
     // Now check view1 can undo action
@@ -968,6 +1045,164 @@ CPPUNIT_TEST_FIXTURE(SdTiledRenderingTest, testUndoLimiting)
         pViewShell1->ExecuteSlot(aReq1);
         CPPUNIT_ASSERT(aReq1.IsDone());
     }
+}
+
+namespace
+{
+/// Vulcan fork: captures an undo's answer as it reaches the browser (unocommandresult).
+class VulcanUndoResultListener : public cppu::WeakImplHelper<css::frame::XDispatchResultListener>
+{
+public:
+    OUString m_aResult;
+    bool m_bNumeric = false;
+    bool m_bFinished = false;
+
+    virtual void SAL_CALL dispatchFinished(const css::frame::DispatchResultEvent& rEvent) override
+    {
+        m_bFinished = true;
+        m_aResult.clear();
+        sal_uInt32 nNumber = 0;
+        m_bNumeric = (rEvent.Result >>= nNumber);
+        if (!m_bNumeric)
+            rEvent.Result >>= m_aResult;
+    }
+
+    virtual void SAL_CALL disposing(const css::lang::EventObject&) override {}
+};
+}
+
+CPPUNIT_TEST_FIXTURE(SdTiledRenderingTest, testVulcanUndoRefusalThroughDispatcher)
+{
+    // Given two views, and only view 1 changed the slide (typed into the title shape):
+    SdXImpressDocument* pXImpressDocument = createDoc("title-shape.odp");
+    sd::ViewShell* pViewShell1 = pXImpressDocument->GetDocShell()->GetViewShell();
+    int nView1 = KitHelper::getCurrentView();
+    KitHelper::createView();
+    SfxViewShell* pView2 = SfxViewShell::Current();
+    int nView2 = KitHelper::getCurrentView();
+    KitHelper::setView(nView1);
+    pXImpressDocument->postKeyEvent(KIT_KEYEVENT_KEYINPUT, 0, awt::Key::TAB);
+    pXImpressDocument->postKeyEvent(KIT_KEYEVENT_KEYUP, 0, awt::Key::TAB);
+    pXImpressDocument->postKeyEvent(KIT_KEYEVENT_KEYINPUT, 'x', 0);
+    pXImpressDocument->postKeyEvent(KIT_KEYEVENT_KEYUP, 'x', 0);
+    pXImpressDocument->postKeyEvent(KIT_KEYEVENT_KEYINPUT, 0, awt::Key::ESCAPE);
+    pXImpressDocument->postKeyEvent(KIT_KEYEVENT_KEYUP, 0, awt::Key::ESCAPE);
+    Scheduler::ProcessEventsToIdle();
+    CPPUNIT_ASSERT(!pViewShell1->GetView()->IsTextEdit());
+    SfxUndoManager* pUndoManager = pXImpressDocument->GetDocShell()->GetUndoManager();
+    const size_t nActions = pUndoManager->GetUndoActionCount();
+    CPPUNIT_ASSERT(nActions > 0);
+
+    // Then view 2's Undo button is disabled (nothing of its own to undo):
+    KitHelper::setView(nView2);
+    {
+        std::unique_ptr<SfxPoolItem> xItem;
+        CPPUNIT_ASSERT_EQUAL(SfxItemState::DISABLED,
+                             pView2->GetViewFrame().GetBindings().QueryState(SID_UNDO, xItem));
+    }
+
+    // When view 2 presses Ctrl+Z anyway -- a plain .uno:Undo through the dispatcher, the way
+    // the browser sends it, not a direct ExecuteSlot that skips the dispatcher's state check:
+    rtl::Reference<VulcanUndoResultListener> pResult = new VulcanUndoResultListener();
+    comphelper::dispatchCommand(u".uno:Undo"_ustr, {}, pResult);
+    Scheduler::ProcessEventsToIdle();
+
+    // Then nothing is undone, and the disabled state did not swallow the request: the undo
+    // handler still ran and answered why as JSON, so the browser can say so (and point to
+    // "Revert AI changes" when the change on top is the AI's).
+    CPPUNIT_ASSERT_EQUAL(nActions, pUndoManager->GetUndoActionCount());
+    CPPUNIT_ASSERT(pResult->m_bFinished);
+    CPPUNIT_ASSERT(!pResult->m_bNumeric);
+    const OUString aExpected
+        = OUString::Concat(u"{\"vulcanUndo\":{\"status\":\"nothing_own\",\"otherViewId\":")
+          + OUString::number(nView1) + u",\"command\":\"undo\"}}";
+    CPPUNIT_ASSERT_EQUAL(aExpected, pResult->m_aResult);
+}
+
+namespace
+{
+/// Vulcan fork: a group holding one rectangle, and a loose rectangle, on the current slide.
+struct VulcanGroupedShapes
+{
+    rtl::Reference<SdrObjGroup> m_pGroup;
+    rtl::Reference<SdrRectObj> m_pMember;
+    rtl::Reference<SdrRectObj> m_pLoose;
+};
+
+VulcanGroupedShapes lcl_VulcanInsertGroupedShapes(SdXImpressDocument* pXImpressDocument)
+{
+    SdPage* pPage = pXImpressDocument->GetDocShell()->GetViewShell()->GetActualPage();
+    SdrModel& rModel = pPage->getSdrModelFromSdrPage();
+    VulcanGroupedShapes aShapes;
+    aShapes.m_pGroup = new SdrObjGroup(rModel);
+    aShapes.m_pMember = new SdrRectObj(rModel, tools::Rectangle(Point(1000, 1000), Size(2000, 1000)));
+    aShapes.m_pGroup->InsertObject(aShapes.m_pMember.get());
+    pPage->InsertObject(aShapes.m_pGroup.get());
+    aShapes.m_pLoose = new SdrRectObj(rModel, tools::Rectangle(Point(8000, 6000), Size(2000, 1000)));
+    pPage->InsertObject(aShapes.m_pLoose.get());
+    return aShapes;
+}
+
+OUString lcl_VulcanUndoJson(std::u16string_view aStatus, int nOtherView)
+{
+    return OUString::Concat(u"{\"vulcanUndo\":{\"status\":\"") + aStatus + u"\",\"otherViewId\":"
+           + OUString::number(nOtherView) + u",\"command\":\"undo\"}}";
+}
+}
+
+CPPUNIT_TEST_FIXTURE(SdTiledRenderingTest, testVulcanUndoGroupMemberNotOutOfOrder)
+{
+    // Given view 1 changed a shape inside a group, and then view 2 changed another shape:
+    SdXImpressDocument* pXImpressDocument = createDoc("dummy.odp");
+    int nView1 = KitHelper::getCurrentView();
+    KitHelper::createView();
+    int nView2 = KitHelper::getCurrentView();
+    VulcanGroupedShapes aShapes = lcl_VulcanInsertGroupedShapes(pXImpressDocument);
+    SfxUndoManager* pUndoManager = pXImpressDocument->GetDocShell()->GetUndoManager();
+    KitHelper::setView(nView1);
+    pUndoManager->AddUndoAction(std::make_unique<SdrUndoAttrObj>(*aShapes.m_pMember));
+    KitHelper::setView(nView2);
+    pUndoManager->AddUndoAction(std::make_unique<SdrUndoAttrObj>(*aShapes.m_pLoose));
+    const size_t nActions = pUndoManager->GetUndoActionCount();
+    CPPUNIT_ASSERT(ViewShellId(nView2) == pUndoManager->GetUndoAction()->GetViewShellId());
+
+    // When view 1 presses undo:
+    KitHelper::setView(nView1);
+    rtl::Reference<VulcanUndoResultListener> pResult = new VulcanUndoResultListener();
+    comphelper::dispatchCommand(u".uno:Undo"_ustr, {}, pResult);
+    Scheduler::ProcessEventsToIdle();
+
+    // Then it is not undone out of order (a member's change can resize its group), and the
+    // answer blames that, not view 2:
+    CPPUNIT_ASSERT_EQUAL(nActions, pUndoManager->GetUndoActionCount());
+    CPPUNIT_ASSERT_EQUAL(lcl_VulcanUndoJson(u"not_movable", -1), pResult->m_aResult);
+}
+
+CPPUNIT_TEST_FIXTURE(SdTiledRenderingTest, testVulcanUndoBlockedByOtherViewsGroup)
+{
+    // Given view 1 changed a loose shape, and then view 2 changed a whole group (a group
+    // stores and restores all of its members):
+    SdXImpressDocument* pXImpressDocument = createDoc("dummy.odp");
+    int nView1 = KitHelper::getCurrentView();
+    KitHelper::createView();
+    int nView2 = KitHelper::getCurrentView();
+    VulcanGroupedShapes aShapes = lcl_VulcanInsertGroupedShapes(pXImpressDocument);
+    SfxUndoManager* pUndoManager = pXImpressDocument->GetDocShell()->GetUndoManager();
+    KitHelper::setView(nView1);
+    pUndoManager->AddUndoAction(std::make_unique<SdrUndoAttrObj>(*aShapes.m_pLoose));
+    KitHelper::setView(nView2);
+    pUndoManager->AddUndoAction(std::make_unique<SdrUndoGeoObj>(*aShapes.m_pGroup));
+    const size_t nActions = pUndoManager->GetUndoActionCount();
+
+    // When view 1 presses undo:
+    KitHelper::setView(nView1);
+    rtl::Reference<VulcanUndoResultListener> pResult = new VulcanUndoResultListener();
+    comphelper::dispatchCommand(u".uno:Undo"_ustr, {}, pResult);
+    Scheduler::ProcessEventsToIdle();
+
+    // Then nothing is undone: a group is never "a different shape".
+    CPPUNIT_ASSERT_EQUAL(nActions, pUndoManager->GetUndoActionCount());
+    CPPUNIT_ASSERT_EQUAL(lcl_VulcanUndoJson(u"blocked", nView2), pResult->m_aResult);
 }
 
 CPPUNIT_TEST_FIXTURE(SdTiledRenderingTest, testCreateViewGraphicSelection)
@@ -1201,6 +1436,57 @@ CPPUNIT_TEST_FIXTURE(SdTiledRenderingTest, testKeepTextSelectionAcrossTransientP
     CPPUNIT_ASSERT_EQUAL("First slide"_ostr,
                          apitest::helper::transferable::getTextSelection(
                              xClipboard->getContents(), "text/plain;charset=utf-8"_ostr));
+}
+
+CPPUNIT_TEST_FIXTURE(SdTiledRenderingTest, testSelectPartPreservesCurrentSlide)
+{
+    SdXImpressDocument* pXImpressDocument = createDoc("dummy.odp");
+    constexpr int nCurrentPart = 2;
+    constexpr int nLowerPart = 0;
+
+    pXImpressDocument->setPart(nCurrentPart);
+    Scheduler::ProcessEventsToIdle();
+    CPPUNIT_ASSERT_EQUAL(nCurrentPart, pXImpressDocument->getPart());
+
+    pXImpressDocument->selectPart(nLowerPart, /*nSelect=*/1);
+    Scheduler::ProcessEventsToIdle();
+
+    CPPUNIT_ASSERT(pXImpressDocument->GetDoc()
+                       ->GetSdPage(nLowerPart, PageKind::Standard)
+                       ->IsSelected());
+    CPPUNIT_ASSERT(pXImpressDocument->GetDoc()
+                       ->GetSdPage(nCurrentPart, PageKind::Standard)
+                       ->IsSelected());
+    CPPUNIT_ASSERT_EQUAL(nCurrentPart, pXImpressDocument->getPart());
+
+    pXImpressDocument->selectPart(nLowerPart, /*nSelect=*/0);
+    Scheduler::ProcessEventsToIdle();
+
+    CPPUNIT_ASSERT(!pXImpressDocument->GetDoc()
+                        ->GetSdPage(nLowerPart, PageKind::Standard)
+                        ->IsSelected());
+    CPPUNIT_ASSERT_EQUAL(nCurrentPart, pXImpressDocument->getPart());
+}
+
+CPPUNIT_TEST_FIXTURE(SdTiledRenderingTest, testDeleteSelectedPartsIsOneUndo)
+{
+    SdXImpressDocument* pXImpressDocument = createDoc("dummy.odp");
+    const std::vector<OUString> aBefore = getCurrentParts(pXImpressDocument);
+    CPPUNIT_ASSERT_EQUAL(size_t(8), aBefore.size());
+
+    constexpr int nCurrentPart = 2;
+    constexpr int nAdditionalPart = 0;
+    pXImpressDocument->setPart(nCurrentPart);
+    pXImpressDocument->selectPart(nAdditionalPart, /*nSelect=*/1);
+    Scheduler::ProcessEventsToIdle();
+
+    dispatchCommand(mxComponent, u".uno:DeletePage"_ustr, {});
+    Scheduler::ProcessEventsToIdle();
+    CPPUNIT_ASSERT_EQUAL(size_t(6), getCurrentParts(pXImpressDocument).size());
+
+    dispatchCommand(mxComponent, u".uno:Undo"_ustr, {});
+    Scheduler::ProcessEventsToIdle();
+    CPPUNIT_ASSERT(aBefore == getCurrentParts(pXImpressDocument));
 }
 
 /**
@@ -1768,11 +2054,10 @@ CPPUNIT_TEST_FIXTURE(SdTiledRenderingTest, testDisableUndoRepair)
         const auto* pUInt32Item1 = dynamic_cast<const SfxUInt32Item*>(xItem1.get());
         CPPUNIT_ASSERT(!pUInt32Item1);
 
+        // Vulcan fork: view2 has nothing of its own to undo: disabled, not "conflict".
         std::unique_ptr<SfxPoolItem> xItem2;
-        pView2->GetViewFrame().GetBindings().QueryState(SID_UNDO, xItem2);
-        const auto* pUInt32Item2 = dynamic_cast<const SfxUInt32Item*>(xItem2.get());
-        CPPUNIT_ASSERT(pUInt32Item2);
-        CPPUNIT_ASSERT_EQUAL(static_cast<sal_uInt32>(SID_REPAIRPACKAGE), pUInt32Item2->GetValue());
+        CPPUNIT_ASSERT_EQUAL(SfxItemState::DISABLED,
+                             pView2->GetViewFrame().GetBindings().QueryState(SID_UNDO, xItem2));
     }
 
     // Insert a character in the second view.
@@ -1791,11 +2076,12 @@ CPPUNIT_TEST_FIXTURE(SdTiledRenderingTest, testDisableUndoRepair)
 
     // Check
     {
+        // Vulcan fork: per-view undo. View1's own text edit is under view2's, but the two
+        // changed different shapes on different slides, so view1 can still take its own back.
         std::unique_ptr<SfxPoolItem> xItem1;
         pView1->GetViewFrame().GetBindings().QueryState(SID_UNDO, xItem1);
-        const SfxUInt32Item* pUInt32Item = dynamic_cast<const SfxUInt32Item*>(xItem1.get());
-        CPPUNIT_ASSERT(pUInt32Item);
-        CPPUNIT_ASSERT_EQUAL(static_cast<sal_uInt32>(SID_REPAIRPACKAGE), pUInt32Item->GetValue());
+        CPPUNIT_ASSERT(!dynamic_cast<const SfxUInt32Item*>(xItem1.get()));
+        CPPUNIT_ASSERT(dynamic_cast<const SfxStringItem*>(xItem1.get()));
 
         std::unique_ptr<SfxPoolItem> xItem2;
         pView2->GetViewFrame().GetBindings().QueryState(SID_UNDO, xItem2);
@@ -2990,6 +3276,341 @@ CPPUNIT_TEST_FIXTURE(SdTiledRenderingTest, testPresentationInfo)
     }
 }
 
+CPPUNIT_TEST_FIXTURE(SdTiledRenderingTest, testSpeakerNotesTransform)
+{
+    SdXImpressDocument* pXImpressDocument = createDoc("PresentationInfoTest.odp");
+    pXImpressDocument->initializeForTiledRendering({});
+    Scheduler::ProcessEventsToIdle();
+
+    auto* pDrawViewShell
+        = dynamic_cast<sd::DrawViewShell*>(pXImpressDocument->GetDocShell()->GetViewShell());
+    CPPUNIT_ASSERT(pDrawViewShell);
+    SdDrawDocument* pDocument = pXImpressDocument->GetDoc();
+    CPPUNIT_ASSERT(pDocument);
+
+    SdPage* pVisiblePage = pDocument->GetSdPage(0, PageKind::Standard);
+    SdPage* pHiddenPage = pDocument->GetSdPage(3, PageKind::Standard);
+    CPPUNIT_ASSERT(pVisiblePage);
+    CPPUNIT_ASSERT(pHiddenPage);
+    CPPUNIT_ASSERT(pHiddenPage->IsExcluded());
+    const sal_uInt64 nVisibleSlideId = pVisiblePage->GetUniqueID();
+    const sal_uInt64 nHiddenSlideId = pHiddenPage->GetUniqueID();
+
+    SdPage* pVisibleNotesPage = pDocument->GetSdPage(0, PageKind::Notes);
+    SdPage* pHiddenNotesPage = pDocument->GetSdPage(3, PageKind::Notes);
+    CPPUNIT_ASSERT(pVisibleNotesPage);
+    CPPUNIT_ASSERT(pHiddenNotesPage);
+    auto* pVisibleNotes = DynCastSdrTextObj(
+        pVisibleNotesPage->GetPresObj(PresObjKind::Notes));
+    auto* pHiddenNotes = DynCastSdrTextObj(
+        pHiddenNotesPage->GetPresObj(PresObjKind::Notes));
+    CPPUNIT_ASSERT(pVisibleNotes);
+    CPPUNIT_ASSERT(pHiddenNotes);
+
+    auto getNotesText = [](const SdrTextObj& rNotes) {
+        if (rNotes.IsEmptyPresObj())
+            return OUString();
+        const OutlinerParaObject* pParagraphs = rNotes.GetOutlinerParaObject();
+        if (!pParagraphs)
+            return OUString();
+
+        OUStringBuffer aText;
+        const EditTextObject& rText = pParagraphs->GetTextObject();
+        for (sal_Int32 nParagraph = 0; nParagraph < rText.GetParagraphCount(); ++nParagraph)
+        {
+            if (nParagraph > 0)
+                aText.append('\n');
+            aText.append(rText.GetText(nParagraph));
+        }
+        return aText.makeStringAndClear();
+    };
+
+    auto executeTransform = [pDrawViewShell](sal_uInt64 nSlideId, const OUString& rNotes,
+                                              std::string_view rRequestId) {
+        tools::JsonWriter aCommand;
+        aCommand.put("RequestId", rRequestId);
+        aCommand.put("ResponseChannel", "unit-test-response-channel");
+        {
+            auto aTransforms = aCommand.startNode("Transforms");
+            auto aSlideCommands = aCommand.startArray("SlideCommands");
+            auto aSetNotes = aCommand.startStruct();
+            const std::string aCommandName
+                = "SetSpeakerNotes." + std::to_string(nSlideId);
+            aCommand.put(aCommandName, rNotes);
+        }
+
+        SfxRequest aRequest(*pDrawViewShell->GetViewFrame(),
+                            FN_TRANSFORM_DOCUMENT_STRUCTURE);
+        aRequest.AppendItem(SfxStringItem(
+            FN_PARAM_1, OUString::fromUtf8(aCommand.finishAndGetAsOString())));
+        pDrawViewShell->FuTransformDocumentStructure(aRequest);
+
+        const auto* pResult
+            = dynamic_cast<const SfxStringItem*>(aRequest.GetReturnValue().getItem());
+        CPPUNIT_ASSERT(pResult);
+        boost::property_tree::ptree aResult;
+        readJSON(aResult, pResult->GetValue());
+        return aResult;
+    };
+
+    auto readPresentationInfo = [pXImpressDocument]() {
+        boost::property_tree::ptree aInfo;
+        std::stringstream aStream(std::string(pXImpressDocument->getPresentationInfo()));
+        boost::property_tree::read_json(aStream, aInfo);
+        return aInfo;
+    };
+
+    const OUString aOriginalVisibleText = getNotesText(*pVisibleNotes);
+    const bool bOriginalVisibleEmpty = pVisibleNotes->IsEmptyPresObj();
+    sd::UndoManager* pUndoManager = pDocument->GetUndoManager();
+    CPPUNIT_ASSERT(pUndoManager);
+    pUndoManager->Clear();
+    pXImpressDocument->GetDocShell()->SetModified(false);
+    SdTestViewCallback aView;
+
+    const int nPartBefore = pXImpressDocument->getPart();
+    SdPage* pActualPageBefore = pDrawViewShell->GetActualPage();
+    const OUString aVisibleText = u"First paragraph\nSecond & <literal>"_ustr;
+    boost::property_tree::ptree aResult
+        = executeTransform(nVisibleSlideId, aVisibleText, "visible-write");
+    CPPUNIT_ASSERT(aResult.get<bool>("success"));
+    CPPUNIT_ASSERT_EQUAL(std::string("visible-write"),
+                         aResult.get<std::string>("requestId"));
+    CPPUNIT_ASSERT_EQUAL(nVisibleSlideId, aResult.get<sal_uInt64>("slideId"));
+    CPPUNIT_ASSERT_EQUAL(std::string("unit-test-response-channel"),
+                         aResult.get<std::string>("responseChannel"));
+    CPPUNIT_ASSERT_EQUAL(nPartBefore, pXImpressDocument->getPart());
+    CPPUNIT_ASSERT(pActualPageBefore == pDrawViewShell->GetActualPage());
+    CPPUNIT_ASSERT(pXImpressDocument->GetDocShell()->IsModified());
+    CPPUNIT_ASSERT_EQUAL(size_t(1), pUndoManager->GetUndoActionCount());
+    CPPUNIT_ASSERT_EQUAL(aVisibleText, getNotesText(*pVisibleNotes));
+    CPPUNIT_ASSERT(!pVisibleNotes->IsEmptyPresObj());
+
+    boost::property_tree::ptree aInfo = readPresentationInfo();
+    CPPUNIT_ASSERT_EQUAL(std::string("First paragraph\nSecond & <literal>"),
+                         child_at(aInfo, "slides", 0).get<std::string>("notes"));
+
+    auto aStateIt = aView.m_aStateChanges.find(".uno:KitSpeakerNotesChanged");
+    CPPUNIT_ASSERT(aStateIt != aView.m_aStateChanges.end());
+    boost::property_tree::ptree aState;
+    readJSON(aState, OUString::fromUtf8(aStateIt->second.get<std::string>("state")));
+    CPPUNIT_ASSERT_EQUAL(nVisibleSlideId, aState.get<sal_uInt64>("slideId"));
+    CPPUNIT_ASSERT_EQUAL(std::string("visible-write"),
+                         aState.get<std::string>("requestId"));
+
+    // An identical blur/navigation flush succeeds without changing modified
+    // state or adding another Undo entry.
+    pXImpressDocument->GetDocShell()->SetModified(false);
+    aView.m_aStateChanges.clear();
+    aResult = executeTransform(nVisibleSlideId, aVisibleText, "duplicate-write");
+    CPPUNIT_ASSERT(aResult.get<bool>("success"));
+    CPPUNIT_ASSERT_EQUAL(size_t(1), pUndoManager->GetUndoActionCount());
+    CPPUNIT_ASSERT(!pXImpressDocument->GetDocShell()->IsModified());
+    CPPUNIT_ASSERT(aView.m_aStateChanges.find(".uno:KitSpeakerNotesChanged")
+                   == aView.m_aStateChanges.end());
+
+    aView.m_aStateChanges.clear();
+    pXImpressDocument->GetDocShell()->GetUndoManager()->Undo();
+    CPPUNIT_ASSERT_EQUAL(aOriginalVisibleText, getNotesText(*pVisibleNotes));
+    CPPUNIT_ASSERT_EQUAL(bOriginalVisibleEmpty, pVisibleNotes->IsEmptyPresObj());
+    aStateIt = aView.m_aStateChanges.find(".uno:KitSpeakerNotesChanged");
+    CPPUNIT_ASSERT(aStateIt != aView.m_aStateChanges.end());
+    readJSON(aState, OUString::fromUtf8(aStateIt->second.get<std::string>("state")));
+    CPPUNIT_ASSERT_EQUAL(nVisibleSlideId, aState.get<sal_uInt64>("slideId"));
+    CPPUNIT_ASSERT_EQUAL(std::string(), aState.get<std::string>("requestId"));
+
+    pXImpressDocument->GetDocShell()->GetUndoManager()->Redo();
+    CPPUNIT_ASSERT_EQUAL(aVisibleText, getNotesText(*pVisibleNotes));
+    CPPUNIT_ASSERT(!pVisibleNotes->IsEmptyPresObj());
+
+    // Target a hidden, non-current slide by stable ID. The view must not
+    // navigate, and presentation-info must retain both hidden and notes.
+    const size_t nUndoCountBeforeHidden = pUndoManager->GetUndoActionCount();
+    const OUString aHiddenText = u"Hidden first\nHidden second"_ustr;
+    aResult = executeTransform(nHiddenSlideId, aHiddenText, "hidden-write");
+    CPPUNIT_ASSERT(aResult.get<bool>("success"));
+    CPPUNIT_ASSERT_EQUAL(nUndoCountBeforeHidden + 1,
+                         pUndoManager->GetUndoActionCount());
+    CPPUNIT_ASSERT_EQUAL(nPartBefore, pXImpressDocument->getPart());
+    CPPUNIT_ASSERT(pActualPageBefore == pDrawViewShell->GetActualPage());
+    CPPUNIT_ASSERT_EQUAL(aHiddenText, getNotesText(*pHiddenNotes));
+
+    aInfo = readPresentationInfo();
+    const boost::property_tree::ptree& rHiddenInfo = child_at(aInfo, "slides", 3);
+    CPPUNIT_ASSERT(rHiddenInfo.get<bool>("hidden"));
+    CPPUNIT_ASSERT_EQUAL(std::string("Hidden first\nHidden second"),
+                         rHiddenInfo.get<std::string>("notes"));
+
+    // Clearing notes restores the placeholder state, but presentation-info
+    // must omit the localized prompt. Undo/Redo preserve that empty state.
+    const size_t nUndoCountBeforeEmpty = pUndoManager->GetUndoActionCount();
+    aResult = executeTransform(nHiddenSlideId, OUString(), "hidden-empty");
+    CPPUNIT_ASSERT(aResult.get<bool>("success"));
+    CPPUNIT_ASSERT_EQUAL(nUndoCountBeforeEmpty + 1,
+                         pUndoManager->GetUndoActionCount());
+    CPPUNIT_ASSERT(pHiddenNotes->IsEmptyPresObj());
+    aInfo = readPresentationInfo();
+    CPPUNIT_ASSERT(!has_child(child_at(aInfo, "slides", 3), "notes"));
+
+    aView.m_aStateChanges.clear();
+    pXImpressDocument->GetDocShell()->GetUndoManager()->Undo();
+    CPPUNIT_ASSERT_EQUAL(aHiddenText, getNotesText(*pHiddenNotes));
+    CPPUNIT_ASSERT(!pHiddenNotes->IsEmptyPresObj());
+    aStateIt = aView.m_aStateChanges.find(".uno:KitSpeakerNotesChanged");
+    CPPUNIT_ASSERT(aStateIt != aView.m_aStateChanges.end());
+    readJSON(aState, OUString::fromUtf8(aStateIt->second.get<std::string>("state")));
+    CPPUNIT_ASSERT_EQUAL(nHiddenSlideId, aState.get<sal_uInt64>("slideId"));
+    CPPUNIT_ASSERT_EQUAL(std::string(), aState.get<std::string>("requestId"));
+
+    pXImpressDocument->GetDocShell()->GetUndoManager()->Redo();
+    CPPUNIT_ASSERT(pHiddenNotes->IsEmptyPresObj());
+    aInfo = readPresentationInfo();
+    CPPUNIT_ASSERT(!has_child(child_at(aInfo, "slides", 3), "notes"));
+
+    pXImpressDocument->GetDocShell()->SetModified(false);
+    const size_t nUndoCountBeforeDuplicateEmpty = pUndoManager->GetUndoActionCount();
+    aResult = executeTransform(nHiddenSlideId, OUString(), "duplicate-empty");
+    CPPUNIT_ASSERT(aResult.get<bool>("success"));
+    CPPUNIT_ASSERT_EQUAL(nUndoCountBeforeDuplicateEmpty,
+                         pUndoManager->GetUndoActionCount());
+    CPPUNIT_ASSERT(!pXImpressDocument->GetDocShell()->IsModified());
+
+    const sal_uInt64 nMissingSlideId = std::numeric_limits<sal_uInt64>::max();
+    const size_t nUndoCountBeforeFailure = pUndoManager->GetUndoActionCount();
+    aResult = executeTransform(nMissingSlideId, u"must not be written"_ustr,
+                               "missing-slide");
+    CPPUNIT_ASSERT(!aResult.get<bool>("success"));
+    CPPUNIT_ASSERT_EQUAL(std::string("missing-slide"),
+                         aResult.get<std::string>("requestId"));
+    CPPUNIT_ASSERT_EQUAL(nMissingSlideId, aResult.get<sal_uInt64>("slideId"));
+    CPPUNIT_ASSERT_EQUAL(nUndoCountBeforeFailure, pUndoManager->GetUndoActionCount());
+    CPPUNIT_ASSERT_EQUAL(nPartBefore, pXImpressDocument->getPart());
+    CPPUNIT_ASSERT(pActualPageBefore == pDrawViewShell->GetActualPage());
+
+    // A valid broker marker must survive a post-parse transform exception so
+    // ChildSession can consume its pending channel instead of stranding it.
+    static constexpr OUString aFailingBrokerTransform = uR"json(
+{
+    "RequestId": "exception-request",
+    "ResponseChannel": "unit-test-exception-channel",
+    "UnoCommand": {}
+}
+)json"_ustr;
+    SfxRequest aFailingBrokerRequest(*pDrawViewShell->GetViewFrame(),
+                                     FN_TRANSFORM_DOCUMENT_STRUCTURE);
+    aFailingBrokerRequest.AppendItem(
+        SfxStringItem(FN_PARAM_1, aFailingBrokerTransform));
+    pDrawViewShell->FuTransformDocumentStructure(aFailingBrokerRequest);
+    const auto* pFailingBrokerResult = dynamic_cast<const SfxStringItem*>(
+        aFailingBrokerRequest.GetReturnValue().getItem());
+    CPPUNIT_ASSERT(pFailingBrokerResult);
+    boost::property_tree::ptree aFailingResult;
+    readJSON(aFailingResult, pFailingBrokerResult->GetValue());
+    CPPUNIT_ASSERT(!aFailingResult.get<bool>("success"));
+    CPPUNIT_ASSERT_EQUAL(std::string("exception-request"),
+                         aFailingResult.get<std::string>("requestId"));
+    CPPUNIT_ASSERT_EQUAL(std::string("unit-test-exception-channel"),
+                         aFailingResult.get<std::string>("responseChannel"));
+    CPPUNIT_ASSERT_EQUAL(nUndoCountBeforeFailure, pUndoManager->GetUndoActionCount());
+    CPPUNIT_ASSERT_EQUAL(nPartBefore, pXImpressDocument->getPart());
+    CPPUNIT_ASSERT(pActualPageBefore == pDrawViewShell->GetActualPage());
+
+    static constexpr OUString aUnmarkedFailingTransform = uR"json(
+{
+    "UnoCommand": {}
+}
+)json"_ustr;
+    SfxRequest aUnmarkedFailingRequest(*pDrawViewShell->GetViewFrame(),
+                                       FN_TRANSFORM_DOCUMENT_STRUCTURE);
+    aUnmarkedFailingRequest.AppendItem(
+        SfxStringItem(FN_PARAM_1, aUnmarkedFailingTransform));
+    CPPUNIT_ASSERT_THROW(
+        pDrawViewShell->FuTransformDocumentStructure(aUnmarkedFailingRequest),
+        boost::property_tree::ptree_bad_path);
+
+    // Imported decks can have a notes text object which is not registered as
+    // PresObjKind::Notes. Write the exact fallback exposed by presentation-
+    // info, without replacing it or navigating to its slide.
+    pVisibleNotesPage->RemovePresObj(pVisibleNotes);
+    CPPUNIT_ASSERT(!pVisibleNotesPage->GetPresObj(PresObjKind::Notes));
+
+    // A registered text presentation object is not an imported notes fallback.
+    // In particular, never reclassify a date/footer/page-label decoy as Notes.
+    pVisibleNotesPage->InsertPresObj(pVisibleNotes, PresObjKind::DateTime);
+    CPPUNIT_ASSERT(pVisibleNotesPage->IsPresObj(pVisibleNotes));
+    CPPUNIT_ASSERT(pVisibleNotesPage->GetPresObjKind(pVisibleNotes)
+                   == PresObjKind::DateTime);
+    const OUString aDecoyText = getNotesText(*pVisibleNotes);
+    const size_t nUndoCountBeforeDecoy = pUndoManager->GetUndoActionCount();
+    pXImpressDocument->GetDocShell()->SetModified(false);
+    aInfo = readPresentationInfo();
+    CPPUNIT_ASSERT(!has_child(child_at(aInfo, "slides", 0), "notes"));
+    aResult = executeTransform(nVisibleSlideId, u"must not replace the date"_ustr,
+                               "registered-decoy");
+    CPPUNIT_ASSERT(!aResult.get<bool>("success"));
+    CPPUNIT_ASSERT_EQUAL(nUndoCountBeforeDecoy, pUndoManager->GetUndoActionCount());
+    CPPUNIT_ASSERT_EQUAL(aDecoyText, getNotesText(*pVisibleNotes));
+    CPPUNIT_ASSERT(!pXImpressDocument->GetDocShell()->IsModified());
+    CPPUNIT_ASSERT(pVisibleNotesPage->GetPresObjKind(pVisibleNotes)
+                   == PresObjKind::DateTime);
+
+    pVisibleNotesPage->RemovePresObj(pVisibleNotes);
+    CPPUNIT_ASSERT(!pVisibleNotesPage->IsPresObj(pVisibleNotes));
+    const size_t nUndoCountBeforeFallback = pUndoManager->GetUndoActionCount();
+    const OUString aFallbackText = u"Imported fallback\nSecond paragraph"_ustr;
+    aResult = executeTransform(nVisibleSlideId, aFallbackText, "fallback-write");
+    CPPUNIT_ASSERT(aResult.get<bool>("success"));
+    CPPUNIT_ASSERT_EQUAL(nUndoCountBeforeFallback + 1,
+                         pUndoManager->GetUndoActionCount());
+    CPPUNIT_ASSERT(pVisibleNotesPage->GetPresObj(PresObjKind::Notes) == pVisibleNotes);
+    CPPUNIT_ASSERT_EQUAL(aFallbackText, getNotesText(*pVisibleNotes));
+    CPPUNIT_ASSERT(!pVisibleNotes->IsEmptyPresObj());
+    CPPUNIT_ASSERT_EQUAL(nPartBefore, pXImpressDocument->getPart());
+    CPPUNIT_ASSERT(pActualPageBefore == pDrawViewShell->GetActualPage());
+
+    aInfo = readPresentationInfo();
+    CPPUNIT_ASSERT_EQUAL(std::string("Imported fallback\nSecond paragraph"),
+                         child_at(aInfo, "slides", 0).get<std::string>("notes"));
+
+    // Repairing the semantic registration gives the fallback normal safe
+    // placeholder behavior for clear, Undo/Redo, and later writes.
+    const size_t nUndoCountBeforeFallbackEmpty = pUndoManager->GetUndoActionCount();
+    aResult = executeTransform(nVisibleSlideId, OUString(), "fallback-empty");
+    CPPUNIT_ASSERT(aResult.get<bool>("success"));
+    CPPUNIT_ASSERT_EQUAL(nUndoCountBeforeFallbackEmpty + 1,
+                         pUndoManager->GetUndoActionCount());
+    CPPUNIT_ASSERT_EQUAL(OUString(), getNotesText(*pVisibleNotes));
+    CPPUNIT_ASSERT(pVisibleNotes->IsEmptyPresObj());
+    aInfo = readPresentationInfo();
+    CPPUNIT_ASSERT(!has_child(child_at(aInfo, "slides", 0), "notes"));
+
+    pUndoManager->Undo();
+    CPPUNIT_ASSERT_EQUAL(aFallbackText, getNotesText(*pVisibleNotes));
+    CPPUNIT_ASSERT(!pVisibleNotes->IsEmptyPresObj());
+    pUndoManager->Redo();
+    CPPUNIT_ASSERT_EQUAL(OUString(), getNotesText(*pVisibleNotes));
+    CPPUNIT_ASSERT(pVisibleNotes->IsEmptyPresObj());
+
+    const size_t nUndoCountBeforeFallbackNoOp = pUndoManager->GetUndoActionCount();
+    aResult = executeTransform(nVisibleSlideId, OUString(), "fallback-empty-noop");
+    CPPUNIT_ASSERT(aResult.get<bool>("success"));
+    CPPUNIT_ASSERT_EQUAL(nUndoCountBeforeFallbackNoOp,
+                         pUndoManager->GetUndoActionCount());
+
+    const size_t nUndoCountBeforeFallbackRewrite = pUndoManager->GetUndoActionCount();
+    const OUString aFallbackRewrite = u"Written again after clear"_ustr;
+    aResult = executeTransform(nVisibleSlideId, aFallbackRewrite, "fallback-rewrite");
+    CPPUNIT_ASSERT(aResult.get<bool>("success"));
+    CPPUNIT_ASSERT_EQUAL(nUndoCountBeforeFallbackRewrite + 1,
+                         pUndoManager->GetUndoActionCount());
+    CPPUNIT_ASSERT(pVisibleNotesPage->GetPresObj(PresObjKind::Notes) == pVisibleNotes);
+    CPPUNIT_ASSERT_EQUAL(aFallbackRewrite, getNotesText(*pVisibleNotes));
+    CPPUNIT_ASSERT(!pVisibleNotes->IsEmptyPresObj());
+    aInfo = readPresentationInfo();
+    CPPUNIT_ASSERT_EQUAL(std::string("Written again after clear"),
+                         child_at(aInfo, "slides", 0).get<std::string>("notes"));
+}
+
 CPPUNIT_TEST_FIXTURE(SdTiledRenderingTest, testA11yPresentationInfo)
 {
     SdXImpressDocument* pXImpressDocument = createDoc("PresentationInfoTest.odp");
@@ -2997,11 +3618,28 @@ CPPUNIT_TEST_FIXTURE(SdTiledRenderingTest, testA11yPresentationInfo)
 
     Scheduler::ProcessEventsToIdle();
 
-    OString aPresentInfo = pXImpressDocument->getPresentationInfo(true);
+    SdPage* pHiddenPage = pXImpressDocument->GetDoc()->GetSdPage(3, PageKind::Standard);
+    CPPUNIT_ASSERT(pHiddenPage);
+    CPPUNIT_ASSERT(pHiddenPage->IsExcluded());
+    SdrObject* pHiddenObject = pHiddenPage->GetObj(0);
+    CPPUNIT_ASSERT(pHiddenObject);
+    pHiddenObject->SetTitle(u"Hostile <script>alert(\"title\")</script> & title"_ustr);
+    pHiddenObject->SetDescription(
+        u"Description <img src=\"x\" onerror=\"bad()\"> & details"_ustr);
 
-    boost::property_tree::ptree aTree;
-    std::stringstream aStream((std::string(aPresentInfo)));
-    boost::property_tree::read_json(aStream, aTree);
+    auto readPresentationInfo = [pXImpressDocument](bool bAllyState) {
+        boost::property_tree::ptree aResult;
+        std::stringstream aStream(
+            (std::string(pXImpressDocument->getPresentationInfo(bAllyState))));
+        boost::property_tree::read_json(aStream, aResult);
+        return aResult;
+    };
+
+    const boost::property_tree::ptree aNoA11yTree = readPresentationInfo(false);
+    for (const auto& rSlide : aNoA11yTree.get_child("slides"))
+        CPPUNIT_ASSERT(!has_child(rSlide.second, "a11y"));
+
+    const boost::property_tree::ptree aTree = readPresentationInfo(true);
 
     CPPUNIT_ASSERT_EQUAL(size_t(5),  aTree.get_child("slides").size());
 
@@ -3013,6 +3651,24 @@ CPPUNIT_TEST_FIXTURE(SdTiledRenderingTest, testA11yPresentationInfo)
 
         CPPUNIT_ASSERT(rChild.get_child("a11y").get_value<std::string>().length() > 0);
         CPPUNIT_ASSERT(rChild.get_child("transitionLabel").get_value<std::string>().length() > 0);
+    }
+
+    // Slide Index 3 - Hidden
+    {
+        const boost::property_tree::ptree& rChild = child_at(aTree, "slides", 3);
+        CPPUNIT_ASSERT_EQUAL(3, rChild.get_child("index").get_value<int>());
+        CPPUNIT_ASSERT_EQUAL(true, rChild.get_child("hidden").get_value<bool>());
+
+        const std::string aA11y = rChild.get_child("a11y").get_value<std::string>();
+        CPPUNIT_ASSERT(!aA11y.empty());
+        CPPUNIT_ASSERT(aA11y.find("<h2>Hostile &lt;script&gt;alert(&quot;title&quot;)"
+                                  "&lt;/script&gt; &amp; title</h2>")
+                       != std::string::npos);
+        CPPUNIT_ASSERT(aA11y.find("<p>Description &lt;img src=&quot;x&quot; "
+                                  "onerror=&quot;bad()&quot;&gt; &amp; details</p>")
+                       != std::string::npos);
+        CPPUNIT_ASSERT_EQUAL(std::string::npos, aA11y.find("<script>"));
+        CPPUNIT_ASSERT_EQUAL(std::string::npos, aA11y.find("<img src=\"x\""));
     }
 }
 
@@ -4855,6 +5511,51 @@ CPPUNIT_TEST_FIXTURE(SdTiledRenderingTest, testPaintVectorPrimitivesMasterPagePl
 
     // The slide itself should still contain its rectangle.
     CPPUNIT_ASSERT_EQUAL(size_t(1), aJson.getSize("/objects").value_or(0));
+}
+
+CPPUNIT_TEST_FIXTURE(SdTiledRenderingTest, testPaintVectorPrimitivesEmptyPlaceholders)
+{
+    // Empty presentation placeholders ride in the payload with their
+    // edit-view prompt text (the payload is an edit view) and are flagged,
+    // so the client can paint the prompt in the editor, skip it in previews,
+    // and let a press select or a click start typing in the placeholder.
+    SdXImpressDocument* pXImpressDocument = createDoc("dummy.odp");
+    CPPUNIT_ASSERT(pXImpressDocument);
+    SdPage* pPage = pXImpressDocument->GetDoc()->GetSdPage(0, PageKind::Standard);
+    CPPUNIT_ASSERT(pPage);
+    pPage->SetAutoLayout(AUTOLAYOUT_TITLE_CONTENT, true);
+    Scheduler::ProcessEventsToIdle();
+
+    tools::JsonWriter aJsonWriter;
+    pXImpressDocument->getCommandValues(aJsonWriter, ".uno:VectorPrimitives");
+    OString aResult = aJsonWriter.finishAndGetAsOString();
+    auto aJson = JsonTestTools::parseJson(std::string_view(aResult.getStr(), aResult.getLength()));
+
+    auto oObjects = aJson.at("/objects");
+    CPPUNIT_ASSERT(oObjects.has_value());
+    size_t nEmptyPlaceholders = 0;
+    for (const auto& rObject : oObjects->tree())
+    {
+        tools::JsonPath aObject = oObjects->sub(rObject.second);
+        if (!aObject.has("emptyPresObj"))
+            continue;
+        ++nEmptyPlaceholders;
+        CPPUNIT_ASSERT(aObject.has("bounds"));
+        // The prompt text is present, under the edit-view-only wrapper.
+        bool bSawWrapper = false;
+        std::vector<OString> aTexts;
+        forEachPrimitive(aObject, [&bSawWrapper, &aTexts](const tools::JsonPath& rNode)
+        {
+            if (rNode.getString("type").value_or(OString()) == "exclusiveEditView")
+                bSawWrapper = true;
+            if (auto sText = rNode.getString("text"))
+                aTexts.push_back(*sText);
+        });
+        CPPUNIT_ASSERT_MESSAGE("placeholder prompt rides under exclusiveEditView", bSawWrapper);
+        CPPUNIT_ASSERT_MESSAGE("placeholder prompt text is in the payload", !aTexts.empty());
+    }
+    // Title + content placeholders of the layout.
+    CPPUNIT_ASSERT_EQUAL(size_t(2), nEmptyPlaceholders);
 }
 
 CPPUNIT_PLUGIN_IMPLEMENT();

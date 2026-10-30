@@ -27,6 +27,10 @@ class StatusBar extends JSDialog.Toolbar {
 		map.on('zoomend', this.onZoomEnd, this);
 		map.on('initmodificationindicator', this.onInitModificationIndicator, this);
 		map.on('updatemodificationindicator', this.onUpdateModificationIndicator, this);
+
+		// One-shot guard for upgrading core's stock selection-aggregate
+		// default (see the '.uno:StatusBarFunc' state handler).
+		this._statusBarFuncDefaultChecked = false;
 	}
 
 	isSaveIndicatorActive() {
@@ -125,6 +129,10 @@ class StatusBar extends JSDialog.Toolbar {
 	}
 
 	onSearch(e) {
+		// The Writer agent bridge's own counts are not the reader's search
+		// (CanvasTileLayer._claimBridgeSearch).
+		if (e && e.vulcanBridge)
+			return;
 		var searchInput = window.L.DomUtil.get('search-input');
 		if (e.count === 0) {
 			this.enableItem('searchprev', false);
@@ -205,7 +213,12 @@ class StatusBar extends JSDialog.Toolbar {
 	}
 
 	_generateStateMenuEntry(id, text, selection) {
-		return {id: id, text: text, selected: !!(selection & parseInt(id))};
+		// VULCAN: the functions are a multi-select, so each is a
+		// check-mark row (checked / notchecked) rather than a 'selected' one.
+		// 'selected' is a dropdown's single highlighted row: with Average,
+		// CountA and Sum all selected the desktop kit filled three rows that
+		// ran together into one slab, with no mark saying which were on.
+		return {id: id, text: text, checked: !!(selection & parseInt(id))};
 	}
 
 	_generateStateTableCellMenuItem(selection, visible) {
@@ -220,7 +233,7 @@ class StatusBar extends JSDialog.Toolbar {
 			this._generateStateMenuEntry('1', _('None'), selection)
 		];
 		var selected = submenu
-			.filter((item) => { return item.selected; })
+			.filter((item) => { return item.checked; })
 			.map((item) => { return item.text; });
 		var text = selected.length ? selected.join('; ') : _('None');
 		return {type: 'menubutton', id: 'StateTableCellMenu', text: text, image: false, menu: submenu, visible: visible, dataPriority: 5};
@@ -265,7 +278,10 @@ class StatusBar extends JSDialog.Toolbar {
 				configLabel: _('Language'), configId: 'languagestatus', configTargetId: 'languagestatus', configPeers: ['languagestatusbreak']},
 			{type: 'separator', id: 'languagestatusbreak', orientation: 'vertical', visible: false, dataPriority: 3}, // spreadsheet
 			this._generateHtmlItem('statetablecell', 4, ['StateTableCellMenu', 'statetablebreak']),
-			this._generateStateTableCellMenuItem(2, false),			// spreadsheet
+			// Excel-parity default: Average + CountA + Sum (2|8|512). Only a
+			// placeholder until core pushes '.uno:StatusBarFunc' state — see
+			// the state handler for the matching one-time default upgrade.
+			this._generateStateTableCellMenuItem(2 | 8 | 512, false),			// spreadsheet
 			{type: 'separator', id: 'statetablebreak', orientation: 'vertical', visible: false, dataPriority: 7}, // spreadsheet
 			this._generateHtmlItem('permissionmode'),					// spreadsheet, text, presentation
 			{type: 'toolitem', id: 'signstatus', command: '.uno:Signature', w2icon: '', text: _UNO('.uno:Signature'), visible: false},
@@ -277,7 +293,7 @@ class StatusBar extends JSDialog.Toolbar {
 				configLabel: JSDialog.getStatusbarItemConfigLabel('prevpage'), configPeers: ['nextpage', 'prevnextbreak']},
 			{type: 'customtoolitem',  id: 'nextpage', command: 'next', text: _UNO('.uno:PageDown', 'text'), pressAndHold: true, dataPriority: 9},
 			{type: 'separator', id: 'prevnextbreak', orientation: 'vertical', dataPriority: 9},
-			{type: 'customtoolitem',  id: 'overview', command: '.uno:InsertCanvasSlide', text: _('Overview'), dataPriority: 9, visible: !app.isReadOnly(),
+			{type: 'customtoolitem',  id: 'overview', command: 'overview', text: _('Overview'), dataPriority: 9, visible: !app.isReadOnly(),
 				configLabel: _('Overview'), configPeers: ['overviewbreak']},
 			{type: 'separator', id: 'overviewbreak', orientation: 'vertical', dataPriority: 9, visible: !app.isReadOnly()},
 		].concat(window.mode.isTablet() ? [] : [
@@ -412,8 +428,13 @@ class StatusBar extends JSDialog.Toolbar {
 				continue;
 			visible[configId] = true;
 
+			// VULCAN: desktop Calc starts a few items switched off
+			// (VulcanCalcDesktopChrome.STATUS_OFF_BY_DEFAULT); the user's own
+			// choice in this menu still wins once made.
 			const hide = this.map.uiManager.getBooleanDocTypePref(
-				'StatusbarUserHidden.' + configId, false);
+				'StatusbarUserHidden.' + configId,
+				!!(window.VulcanCalcDesktopChrome &&
+					window.VulcanCalcDesktopChrome.statusItemOffByDefault(configId, this.map.getDocType())));
 			if (!hide)
 				continue;
 
@@ -674,6 +695,29 @@ class StatusBar extends JSDialog.Toolbar {
 			try {
 				state = parseInt(state);
 			} catch (e) { console.error(e); state = 1; }
+
+			// Excel parity: Excel shows Average, Count and Sum for a
+			// selection. Stock LO persists Average+Sum as its multi default
+			// (514; 512 = the pre-config constructor default, engine
+			// sc/source/core/tool/appoptio.cxx). If the FIRST state core
+			// reports is that untouched default, upgrade it once to
+			// Average+CountA+Sum (2|8|512 = 522). Any other first value means
+			// the user picked their own set — never touch it, and never
+			// re-send within the session.
+			if (!this._statusBarFuncDefaultChecked) {
+				this._statusBarFuncDefaultChecked = true;
+				if (state === 514 || state === 512) {
+					state = 2 | 8 | 512;
+					this.map.sendUnoCommand('.uno:StatusBarFunc', {
+						'StatusBarFunc': {
+							type: 'unsigned short',
+							value: state
+						}
+					});
+					// Fall through and render 522 immediately; core echoes
+					// the same value back afterwards.
+				}
+			}
 
 			this.builder.updateWidget(this.parentContainer, this._generateStateTableCellMenuItem(state, true));
 			JSDialog.RefreshScrollables();

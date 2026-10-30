@@ -76,11 +76,6 @@ class FormulaErrorHelpSection extends HTMLObjectSection {
 		sep.className = 'formula-error-menu-separator';
 		menu.appendChild(sep);
 
-		// Help on this error
-		this.addMenuItem(menu, _('Help on this error'), () => {
-			window.open('https://help.collaboraoffice.com/', '_blank', 'noopener');
-		});
-
 		// Inspect with Function Wizard
 		this.addMenuItem(menu, _('Inspect with Function Wizard'), () => {
 			app.map.sendUnoCommand('.uno:FunctionDialog');
@@ -104,15 +99,17 @@ class FormulaErrorHelpSection extends HTMLObjectSection {
 		objectDiv.appendChild(menu);
 		this.menuDiv = menu;
 
-		// Close menu when clicking outside
+		// Close menu when pressing outside. Pointer rather than mouse: this
+		// section carries no mobile gate, so a phone reaches the menu too and
+		// a finger never produces mousedown.
 		const closeHandler = (ev: MouseEvent) => {
 			if (!objectDiv.contains(ev.target as Node)) {
 				this.closeMenu();
-				document.removeEventListener('mousedown', closeHandler);
+				document.removeEventListener('pointerdown', closeHandler);
 			}
 		};
 		setTimeout(() => {
-			document.addEventListener('mousedown', closeHandler);
+			document.addEventListener('pointerdown', closeHandler);
 		}, 0);
 	}
 

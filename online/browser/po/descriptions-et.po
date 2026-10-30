@@ -18,7 +18,7 @@ msgstr ""
 #. App name - 50 chars limit
 #: descriptions/google-play.html%2Bhtml.body.h3:5-1
 msgid "Collabora Office: LibreOffice, OpenOffice & more"
-msgstr "Collabora Office: LibreOffice, OpenOffice ja muu"
+msgstr "Vulcan Office: Vulcan Office, OpenOffice ja muu"
 
 #. Short description - 80 chars limit
 #: descriptions/google-play.html%2Bhtml.body.p:9-1
@@ -26,7 +26,7 @@ msgid ""
 "LibreOffice based editor for Microsoft Office, LibreOffice and OpenOffice "
 "docs."
 msgstr ""
-"LibreOffice'il põhinev liides: Microsoft Office, LibreOffice, OpenOffice "
+"Vulcan Office'il põhinev liides: Microsoft Office, Vulcan Office, OpenOffice "
 "failid."
 
 #. Long description
@@ -37,9 +37,9 @@ msgid ""
 "and now it's on Android, enhancing your possibilities to work on mobile and "
 "for collaboration."
 msgstr ""
-"Collabora Office on tekstiredaktor, tabelarvutus- ja esitlusprogramm, mis "
+"Vulcan Office on tekstiredaktor, tabelarvutus- ja esitlusprogramm, mis "
 "põhineb maailma populaarseimal avatud lähtekoodiga tarbetarkvaral "
-"LibreOffice - ja nüüd on see saadaval Androidis, suurendades sinu võimalusi "
+"Vulcan Office - ja nüüd on see saadaval Androidis, suurendades sinu võimalusi "
 "töötada nutiseadmes ja tehes seda ühistööna."
 
 #. Long description
@@ -99,9 +99,9 @@ msgid ""
 "Windows, Mac, and Linux. This, combined with a new front-end based on "
 "Collabora Online, reads and saves documents similarly to LibreOffice desktop."
 msgstr ""
-"Androidi Collabora Office kasutab sama sisumootorit, mida LibreOffice "
-"Windowsi, Maci ja Linuxi jaoks. See koos Collabora Online'il põhineva uue "
-"kasutajaliidesega loeb ja salvestab dokumente sarnaselt LibreOffice'i "
+"Androidi Vulcan Office kasutab sama sisumootorit, mida Vulcan Office "
+"Windowsi, Maci ja Linuxi jaoks. See koos Vulcan Office'il põhineva uue "
+"kasutajaliidesega loeb ja salvestab dokumente sarnaselt Vulcan Office'i "
 "töölauarakendusele."
 
 #. Long description
@@ -112,7 +112,7 @@ msgid ""
 "developing Android support since 2012, with the help of Google Summer of "
 "Code students Andrzej Hunt, Iain Billet and Kaishu Sahu."
 msgstr ""
-"Collabora arendajad Tor Lillqvist, Tomaž Vajngerl, Michael Meeks, Miklos "
+"Vulcan Office arendajad Tor Lillqvist, Tomaž Vajngerl, Michael Meeks, Miklos "
 "Vajna, Jan Holešovský, Mert Tümer, Rashesh Padia ja Skyler Grey on Androidi "
 "tuge arendanud alates 2012. aastast ja neile on projektist „Google Summer of "
 "Code“ olnud abiks Andrzej Hunt, Iain Billet ja Kaishu Sahu."

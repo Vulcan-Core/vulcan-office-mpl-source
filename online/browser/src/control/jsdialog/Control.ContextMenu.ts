@@ -30,6 +30,12 @@ interface CtxtCommandEntry {
 	icon?: string;
 	command?: string;
 	items?: Record<string, CtxtValueType>;
+	// Small-screen only. JSDialogBuilder.getMenuStructureForMobileWizard turns
+	// a `callback` into executionType 'callback', and the wizard's click
+	// handler calls it INSTEAD of sendUnoCommand(data.command). This is how the
+	// phone path reaches the client-side handlers the desktop path already has
+	// in _addMenu's callback; nothing sets it on the desktop structure.
+	callback?: () => void;
 }
 
 type CtxtValueType = CtxtCommandEntry | string;
@@ -52,6 +58,8 @@ class ContextMenuControl extends JSControl {
 	constructor(options?: Record<string, any>) {
 		super(options);
 		this.options.allowlist = JSDialog.MenuCommands.allowlist;
+		this.options.smallScreenAllowlist =
+			JSDialog.MenuCommands.smallScreenAllowlist;
 		this.options.mobileDenylist = JSDialog.MenuCommands.mobileDenylist;
 	}
 
@@ -137,8 +145,42 @@ class ContextMenuControl extends JSControl {
 			}
 		}
 
+		// ESCAPE-HATCH MEASUREMENT, recorded because three separate audit passes
+		// reported "the canvas context menu has no measured back/close control"
+		// and left it as the one open ❓ in the phone escape-hatch list. It is
+		// NOT missing, and the reason it kept reading as missing is that on a
+		// phone THERE IS NO CONTEXT MENU: this branch never builds the desktop
+		// `.context-menu-list` popup at all (that is the else at :149-152), it
+		// hands the same items to the mobile wizard, so anyone looking for an
+		// exit on a context-menu widget was looking at a surface that does not
+		// exist on the device.
+		//
+		// What the wizard actually gives it, measured rather than assumed:
+		//   - the control is `#mobile-wizard-back`, the FIRST cell of
+		//     #mobile-wizard-titlebar (html/cool.html.m4:232-236), i.e. upper
+		//     left, which is the invariant the direction fixes.
+		//   - it is shown, not merely present: _softReset() calls
+		//     _setupBackButton() (Control.MobileWizardWindow.js:105-110), which
+		//     is `backButton.show()` plus the 'close-button' class (:129-131),
+		//     and titleBar.show() on the same path. The two places the titlebar
+		//     is hidden do not apply here -- setTabs() (:218, tab mode) and the
+		//     isPopup branch (:606).
+		//   - the box is 48x44 on a presentation: css/mobilewizard.css:264-270
+		//     gives .mobile-wizard-back width 48px / height 20px, and
+		//     css/vulcan-theme.css:2242-2245 raises height and min-height to
+		//     44px under body[data-doctype='presentation']. So it clears the
+		//     >=44px hit box on phone Impress. ⚠ On phone WRITER and CALC it is
+		//     still 48x20, because that override is doctype-scoped -- that is a
+		//     Calc/Writer finding, not an Impress one, and it is not fixed here.
+		//   - one tap exits one layer: at root depth goLevelUp() takes the
+		//     `window.contextMenuWizard` arm (:310-312) and fires
+		//     'closemobilewizard', returning to the canvas.
+		//
+		// ⚠ Still device-only: whether the wizard sheet actually opens on a
+		// long-press over the canvas. This measures the exit, not the entry.
 		if (window.mode.isSmallScreenDevice()) {
 			window.contextMenuWizard = true;
+			this._attachPhoneCommentCallbacks(contextMenu);
 			const menuData =
 				window.L.Control.JSDialogBuilder.getMenuStructureForMobileWizard(
 					contextMenu,
@@ -291,6 +333,13 @@ class ContextMenuControl extends JSControl {
 	}
 
 	private _amendContextMenuData(obj: any): void {
+		// The in-canvas "Ask AI" context-menu entry is RETRACTED for
+		// now (per design review, 2026-08-30): its current behavior — a toast plus
+		// a scope preamble dropped into the chat input — is not worth the
+		// menu slot. The host flow (Vulcan_AIAction/ask_ai in
+		// VulcanOfficeEditor → handleEditorAIAction) stays for a better
+		// entry point later.
+
 		// Add a 'delete' entry  for graphic selection on desktop and mobile device (in browser or app).
 		if (GraphicSelection.hasActiveSelection()) {
 			const menu: MenuEntry[] = obj.menu;
@@ -330,6 +379,88 @@ class ContextMenuControl extends JSControl {
 				}
 			}
 		}
+	}
+
+	// Small-screen-only allowlist additions (JSDialog.MenuCommands
+	// .smallScreenAllowlist). Returning false on a desktop or a tablet is what
+	// keeps those menus byte-identical to before.
+	private _isSmallScreenAllowed(docType: string, commandName: string): boolean {
+		if (!window.mode.isSmallScreenDevice()) return false;
+		const extra = this.options.smallScreenAllowlist;
+		if (!extra) return false;
+		const commands = extra[docType];
+		return !!commands && commands.indexOf(commandName) !== -1;
+	}
+
+	/*
+		Phone: give the comment entries of the canvas context menu the same
+		client-side handlers the desktop menu already has, and route the two
+		Calc note commands that core cannot usefully serve a tiled phone client.
+
+		The desktop menu does this in _addMenu's dropdown callback, which
+		intercepts '.uno:InsertAnnotation' and calls map.insertComment()
+		instead of sending the command. The phone branch has no equivalent
+		hook: JSDialogBuilder's mobile-wizard menu entry ends in
+		`builder.map.sendUnoCommand(data.command)`. So "Insert Comment" tapped
+		from a phone context menu asked CORE to insert an annotation, skipping
+		the client composer that every other insertion path in the tree goes
+		through (docdispatcher, Control.MobileSelectionBar, VulcanCalcBridge).
+		A `callback` on the entry is the documented way to override that.
+
+		The two Calc redirections:
+		  - EditAnnotation raw runs ScViewFunc::EditNote, i.e. shows the note's
+		    SdrObject caption and starts an in-place edit inside it. That is a
+		    desktop interaction; on a phone it produces an editable object the
+		    touch stack cannot drive. modify() is the phone editor the comment
+		    wizard already uses for exactly this.
+		  - ShowNote raw pins the caption on the sheet at its authored size,
+		    which on a 393 px viewport is a box the reader still cannot read.
+		    "Show" on a phone means the comment sheet.
+		HideNote is left alone: it un-pins a caption that a desktop or tablet
+		collaborator pinned, and that is the same act on any device.
+
+		Every redirection falls back to sending the command when the comment
+		cannot be resolved, so a miss degrades to today's behaviour instead of
+		to nothing happening.
+	*/
+	private _attachPhoneCommentCallbacks(
+		contextMenu: Record<string, CtxtValueType>,
+	): void {
+		const attach = (key: string, fn: () => void): void => {
+			const entry = contextMenu[key];
+			if (entry && typeof entry !== 'string') entry.callback = fn;
+		};
+
+		const listSection = (): any =>
+			app.sectionContainer.getSectionWithName(app.CSections.CommentList.name);
+
+		attach('.uno:InsertAnnotation', () => {
+			app.map.insertComment();
+		});
+
+		Util.ensureValue(this._map);
+		if (this._map.getDocType() !== 'spreadsheet') return;
+
+		attach('.uno:EditAnnotation', () => {
+			const section = listSection();
+			const comment = section ? section.getCalcCommentAtCursor() : null;
+			// CommentListSection.modify() opens nothing for a comment the
+			// current view did not author (`if (!annotation.isAuthor()) return`),
+			// while cellsh.cxx enables SID_EDIT_POSTIT for any editable cell
+			// carrying a note. Without the isAuthor() test here, tapping Edit
+			// Comment on a colleague's note would be a silent no-op. Fall back
+			// to the read route, which is the most the viewer can do with it.
+			if (comment && comment.isAuthor()) section.modify(comment);
+			else if (!comment || !section.openCommentOnPhone(comment))
+				app.map.sendUnoCommand('.uno:EditAnnotation');
+		});
+
+		attach('.uno:ShowNote', () => {
+			const section = listSection();
+			const comment = section ? section.getCalcCommentAtCursor() : null;
+			if (!comment || !section.openCommentOnPhone(comment))
+				app.map.sendUnoCommand('.uno:ShowNote');
+		});
 	}
 
 	private _createContextMenuStructure(obj: any): Record<string, CtxtValueType> {
@@ -420,6 +551,7 @@ class ContextMenuControl extends JSControl {
 				Util.ensureValue(this.options.mobileDenylist);
 				if (
 					commandName !== 'None' &&
+					!this._isSmallScreenAllowed(docType, commandName) &&
 					this.options.allowlist.general.indexOf(commandName) === -1 &&
 					(this._map['wopi'].HideChangeTrackingControls ||
 						this.options.allowlist.tracking.indexOf(commandName) === -1) &&

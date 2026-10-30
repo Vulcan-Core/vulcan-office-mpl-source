@@ -40,6 +40,7 @@
 #include <comphelper/sequence.hxx>
 
 #include <ooxml/OOXMLPropertySet.hxx>
+#include <ooxml/resourceids.hxx>
 #include "ConversionHelper.hxx"
 #include "DomainMapper.hxx"
 #include "util.hxx"
@@ -76,6 +77,44 @@ sal_Int16 lcl_GetZoomType(Id nType)
 
     return sal_Int16(SvxZoomType::PERCENT);
 }
+
+OUString lcl_GetViewValue(Id nType)
+{
+    switch (nType)
+    {
+        case NS_ooxml::LN_Value_doc_ST_View_none:
+            return u"none"_ustr;
+        case NS_ooxml::LN_Value_doc_ST_View_print:
+            return u"print"_ustr;
+        case NS_ooxml::LN_Value_doc_ST_View_outline:
+            return u"outline"_ustr;
+        case NS_ooxml::LN_Value_doc_ST_View_masterPages:
+            return u"masterPages"_ustr;
+        case NS_ooxml::LN_Value_doc_ST_View_normal:
+            return u"normal"_ustr;
+        case NS_ooxml::LN_Value_doc_ST_View_web:
+            return u"web"_ustr;
+    }
+
+    return OUString();
+}
+
+OUString lcl_GetZoomValue(Id nType)
+{
+    switch (nType)
+    {
+        case NS_ooxml::LN_Value_doc_ST_Zoom_none:
+            return u"none"_ustr;
+        case NS_ooxml::LN_Value_doc_ST_Zoom_fullPage:
+            return u"fullPage"_ustr;
+        case NS_ooxml::LN_Value_doc_ST_Zoom_bestFit:
+            return u"bestFit"_ustr;
+        case NS_ooxml::LN_Value_doc_ST_Zoom_textFit:
+            return u"textFit"_ustr;
+    }
+
+    return OUString();
+}
 }
 
 namespace dmapper
@@ -89,6 +128,7 @@ SettingsTable::SettingsTable(const DomainMapper& rDomainMapper)
 , m_bShowInsDelChanges(true)
 , m_bShowFormattingChanges(false)
 , m_bShowMarkupChanges(true)
+, m_bIsOOXMLImport(rDomainMapper.IsOOXMLImport())
 , m_nZoomFactor(0)
 , m_nWordCompatibilityMode(-1)
 , m_nView(0)
@@ -141,9 +181,13 @@ void SettingsTable::lcl_attribute(Id nName, const Value & val)
     {
     case NS_ooxml::LN_CT_Zoom_percent:
         m_nZoomFactor = nIntValue;
+        if (m_bIsOOXMLImport)
+            m_oOOXMLZoomPercent = nIntValue;
     break;
     case NS_ooxml::LN_CT_Zoom_val:
         m_nZoomType = lcl_GetZoomType(nIntValue);
+        if (m_bIsOOXMLImport)
+            m_oOOXMLZoomValue = static_cast<Id>(nIntValue);
         break;
     case NS_ooxml::LN_CT_Language_val:
         m_pThemeFontLangProps.getArray()[0]
@@ -195,6 +239,8 @@ void SettingsTable::lcl_attribute(Id nName, const Value & val)
         break;
     case NS_ooxml::LN_CT_View_val:
         m_nView = nIntValue;
+        if (m_bIsOOXMLImport)
+            m_oOOXMLViewValue = static_cast<Id>(nIntValue);
         break;
     case NS_ooxml::LN_CT_DocVar_name:
         m_aDocVars.back().first = sStringValue;
@@ -259,6 +305,13 @@ void SettingsTable::lcl_sprm(Sprm& rSprm)
     case NS_ooxml::LN_CT_Settings_view:
     //PropertySetValues - need to be resolved
     {
+        if (m_bIsOOXMLImport)
+        {
+            if (nSprmId == NS_ooxml::LN_CT_Settings_zoom)
+                m_bOOXMLZoomPresent = true;
+            else if (nSprmId == NS_ooxml::LN_CT_Settings_view)
+                m_bOOXMLViewPresent = true;
+        }
         resolveSprmProps(*this, rSprm);
 
         // If attached template cannot be located or is not a valid file, silently ignore linkStyles
@@ -445,6 +498,9 @@ void SettingsTable::lcl_sprm(Sprm& rSprm)
     case NS_ooxml::LN_CT_Settings_gutterAtTop:
         m_bGutterAtTop = nIntValue != 0;
         break;
+    case NS_ooxml::LN_CT_Settings_updateFields:
+        m_bUpdateFields = nIntValue != 0;
+        break;
     case NS_ooxml::LN_CT_Compat_doNotBreakWrappedTables:
         m_bDoNotBreakWrappedTables = nIntValue != 0;
         break;
@@ -498,6 +554,46 @@ sal_Int16 SettingsTable::GetZoomType() const { return m_nZoomType; }
 Id SettingsTable::GetView() const
 {
     return m_nView;
+}
+
+bool SettingsTable::IsOOXMLImport() const { return m_bIsOOXMLImport; }
+
+cpo::uno::Sequence<beans::PropertyValue> SettingsTable::GetOOXMLViewSettings() const
+{
+    std::vector<beans::PropertyValue> aSettings;
+
+    if (m_bOOXMLViewPresent)
+    {
+        std::vector<beans::PropertyValue> aView;
+        if (m_oOOXMLViewValue)
+        {
+            OUString aValue = lcl_GetViewValue(*m_oOOXMLViewValue);
+            if (!aValue.isEmpty())
+                aView.push_back(comphelper::makePropertyValue(u"val"_ustr, aValue));
+        }
+        aSettings.push_back(comphelper::makePropertyValue(
+            u"view"_ustr, comphelper::containerToSequence(aView)));
+    }
+
+    if (m_bOOXMLZoomPresent)
+    {
+        std::vector<beans::PropertyValue> aZoom;
+        if (m_oOOXMLZoomValue)
+        {
+            OUString aValue = lcl_GetZoomValue(*m_oOOXMLZoomValue);
+            if (!aValue.isEmpty())
+                aZoom.push_back(comphelper::makePropertyValue(u"val"_ustr, aValue));
+        }
+        if (m_oOOXMLZoomPercent)
+        {
+            aZoom.push_back(
+                comphelper::makePropertyValue(u"percent"_ustr, *m_oOOXMLZoomPercent));
+        }
+        aSettings.push_back(comphelper::makePropertyValue(
+            u"zoom"_ustr, comphelper::containerToSequence(aZoom)));
+    }
+
+    return comphelper::containerToSequence(aSettings);
 }
 
 bool SettingsTable::GetUsePrinterMetrics() const
@@ -864,6 +960,8 @@ bool SettingsTable::GetNoLeading() const
 bool SettingsTable::GetGutterAtTop() const { return m_bGutterAtTop; }
 
 bool SettingsTable::GetRecordChanges() const { return m_bRecordChanges; }
+
+bool SettingsTable::GetUpdateFields() const { return m_bUpdateFields; }
 
 bool SettingsTable::GetEndnoteIsCollectAtSectionEnd() const
 {

@@ -14,6 +14,9 @@ namespace cool {
 	export interface VectorPrimitivesResponse {
 		part?: number;
 		slideWidth?: number;
+		/// Page borders, twips (see VectorPrimitivesData).
+		borderLeft?: number;
+		borderTop?: number;
 		slideHeight?: number;
 		masterPage?: SlideObject;
 		objects?: SlideObject[];

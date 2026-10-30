@@ -270,6 +270,10 @@ namespace drawinglayer::primitive2d
 
             /// create transformation from UnitGrandient to ObjectTransform
             virtual basegfx::B2DHomMatrix createUnitGradientToObjectTransformation() const override;
+
+            /// the focal point in unit gradient coordinates (centre at the origin,
+            /// radius 1); the origin when no focal point is set
+            basegfx::B2DPoint createUnitGradientFocal() const;
         };
 
         // SvgLinearAtomPrimitive2D class

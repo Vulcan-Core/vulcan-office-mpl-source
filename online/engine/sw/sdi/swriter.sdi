@@ -5260,6 +5260,36 @@ SfxUInt16Item PreviewZoom FN_PREVIEW_ZOOM
     GroupId = SfxGroupId::View;
 ]
 
+// VULCAN: .uno:BrowseWidth?BrowseWidth:long=<twips>
+//
+// The browse-mode (web view) reflow width, STATED BY THE CLIENT. Same
+// self-referential "value slot" shape as PreviewZoom above: the parameter
+// carries the slot's own id, so SwView::Execute reads it straight back out of
+// the request with rReq.GetArg<SfxInt32Item>(FN_BROWSE_WIDTH).
+//
+// Write-only on purpose -- there is no StateMethod, because the client is the
+// authority for this number and has nothing to learn by being told it back.
+// Not in any menu, toolbar or accelerator: it is a machine-to-machine value,
+// not a command a person invokes. FastCall so it applies without a shell
+// activation round trip; the client sends it on the same beat as a zoom or a
+// resize and the reflow has to land in that frame.
+SfxInt32Item BrowseWidth FN_BROWSE_WIDTH
+( SfxInt32Item BrowseWidth FN_BROWSE_WIDTH )
+[
+    AutoUpdate = FALSE,
+    FastCall = TRUE,
+    ReadOnlyDoc = TRUE,
+    Toggle = FALSE,
+    Container = FALSE,
+    RecordAbsolute = FALSE,
+    RecordPerSet;
+
+    AccelConfig = FALSE,
+    MenuConfig = FALSE,
+    ToolBoxConfig = FALSE,
+    GroupId = SfxGroupId::View;
+]
+
 SfxBoolItem PrintLayout FN_PRINT_LAYOUT
 
 [

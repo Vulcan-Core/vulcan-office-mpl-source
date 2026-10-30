@@ -13,6 +13,7 @@
 #include <comphelper/anytostring.hxx>
 #include <comphelper/propertyvalue.hxx>
 #include <comphelper/sequence.hxx>
+#include <comphelper/sequenceashashmap.hxx>
 
 #include <tools/color.hxx>
 
@@ -31,10 +32,12 @@ public:
 
     void testJsonToPropertyValues();
     void testJsonToPropertyValuesBorder();
+    void testPdfSourceSaveFilterData();
 
     CPPUNIT_TEST_SUITE(KitInitTest);
     CPPUNIT_TEST(testJsonToPropertyValues);
     CPPUNIT_TEST(testJsonToPropertyValuesBorder);
+    CPPUNIT_TEST(testPdfSourceSaveFilterData);
     CPPUNIT_TEST_SUITE_END();
 };
 
@@ -152,6 +155,49 @@ void KitInitTest::testJsonToPropertyValuesBorder()
 
     assertSequencesEqual(
         aArgs, comphelper::containerToSequence(desktop::jsonToPropertyValuesVector(arguments)));
+}
+
+void KitInitTest::testPdfSourceSaveFilterData()
+{
+    // A .uno:Save of a PDF opened into Draw (the PDF canvas) exports with
+    // its form fields, images kept at full resolution and lossless, and its
+    // comments. PDFExport's own defaults flatten the fields, downsample
+    // images to 300 DPI and re-encode them as JPEG on every save.
+    comphelper::SequenceAsHashMap aCanvas;
+    CPPUNIT_ASSERT(desktop::setPdfSourceSaveFilterData(u"draw_pdf_import", aCanvas));
+    CPPUNIT_ASSERT_EQUAL(size_t(5), aCanvas.size());
+    CPPUNIT_ASSERT(aCanvas.getUnpackedValueOrDefault(u"ExportFormFields"_ustr, false));
+    CPPUNIT_ASSERT(!aCanvas.getUnpackedValueOrDefault(u"ReduceImageResolution"_ustr, true));
+    CPPUNIT_ASSERT(aCanvas.getUnpackedValueOrDefault(u"UseLosslessCompression"_ustr, false));
+    CPPUNIT_ASSERT(aCanvas.getUnpackedValueOrDefault(u"ExportNotes"_ustr, false));
+    // Hidden-ink OCR lines go out as invisible (render mode 3) text.
+    CPPUNIT_ASSERT(aCanvas.getUnpackedValueOrDefault(u"ExportInvisibleText"_ustr, false));
+
+    // A value the caller already chose wins; only missing keys are added.
+    comphelper::SequenceAsHashMap aExplicit;
+    aExplicit[u"ExportFormFields"_ustr] <<= false;
+    aExplicit[u"UseLosslessCompression"_ustr] <<= false;
+    aExplicit[u"Quality"_ustr] <<= sal_Int32(75);
+    CPPUNIT_ASSERT(desktop::setPdfSourceSaveFilterData(u"draw_pdf_import", aExplicit));
+    CPPUNIT_ASSERT_EQUAL(size_t(6), aExplicit.size());
+    CPPUNIT_ASSERT(!aExplicit.getUnpackedValueOrDefault(u"ExportFormFields"_ustr, true));
+    CPPUNIT_ASSERT(!aExplicit.getUnpackedValueOrDefault(u"UseLosslessCompression"_ustr, true));
+    CPPUNIT_ASSERT_EQUAL(sal_Int32(75),
+                         aExplicit.getUnpackedValueOrDefault(u"Quality"_ustr, sal_Int32(0)));
+    CPPUNIT_ASSERT(!aExplicit.getUnpackedValueOrDefault(u"ReduceImageResolution"_ustr, true));
+    CPPUNIT_ASSERT(aExplicit.getUnpackedValueOrDefault(u"ExportNotes"_ustr, false));
+
+    // Any other document keeps the PDF export defaults: a hybrid PDF opened
+    // into Writer, Calc or Impress, a native drawing, an unknown filter.
+    static constexpr std::u16string_view aOtherFilters[]
+        = { u"writer_pdf_addstream_import", u"calc_pdf_addstream_import",
+            u"impress_pdf_addstream_import", u"draw8", u"" };
+    for (std::u16string_view aFilter : aOtherFilters)
+    {
+        comphelper::SequenceAsHashMap aOther;
+        CPPUNIT_ASSERT(!desktop::setPdfSourceSaveFilterData(aFilter, aOther));
+        CPPUNIT_ASSERT(aOther.empty());
+    }
 }
 
 CPPUNIT_TEST_SUITE_REGISTRATION(KitInitTest);

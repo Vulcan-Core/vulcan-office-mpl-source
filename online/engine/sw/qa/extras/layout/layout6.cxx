@@ -2311,6 +2311,21 @@ CPPUNIT_TEST_FIXTURE(SwLayoutWriter6, testCenterInlineTableBesideFloatingTable)
     CPPUNIT_ASSERT_GREATEREQUAL(nFlyRight, nTabFrameLeft + nTabPrtLeft);
 }
 
+CPPUNIT_TEST_FIXTURE(SwLayoutWriter6, testTableCantSplitRowInBottomMargin)
+{
+    // a keep-with-next paragraph, then a table with 3 pt borders, a repeated header row
+    // and three rows that may not split. The first of those rows ends inside the table's 60-twip
+    // bottom border at the page bottom, then a paragraph that cannot share a page with the table.
+    createSwDoc("table-cantsplit-row-in-bottom-margin.docx");
+    xmlDocUniquePtr pXmlDoc = parseLayoutDump();
+
+    // Without the fix, the table was neither split nor moved: page 1 held all 4 rows, the last two
+    // laid out below the page body and shown nowhere, and the document had 2 pages.
+    assertXPath(pXmlDoc, "/root/page", 3);
+    assertXPath(pXmlDoc, "/root/page[1]/body/tab", 0);
+    assertXPath(pXmlDoc, "/root/page[2]/body/tab/row", 4);
+}
+
 } // end of anonymous namespace
 
 CPPUNIT_PLUGIN_IMPLEMENT();

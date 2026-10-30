@@ -62,10 +62,13 @@ public:
     void FillAsHeaderBinary( ExcBoundsheetList& rBoundsheetList );
     void FillAsHeaderXml( ExcBoundsheetList& rBoundsheetList );
 
-    void FillAsTableBinary( SCTAB nCodeNameIdx );
-    void FillAsTableXml();
+    /** @param rCodeName  the CODENAME record, empty = none */
+    void FillAsTableBinary( const OUString& rCodeName );
+    /** @param rCodeName  the sheetPr codeName attribute, empty = none */
+    void FillAsTableXml( const OUString& rCodeName );
 
-    void                        FillAsEmptyTable( SCTAB nCodeNameIdx );
+    /** @param rCodeName  the CODENAME record of an appended __VBA__N sheet */
+    void                        FillAsEmptyTable( const OUString& rCodeName );
 
     void                        Write( XclExpStream& );
     void                        WriteXml( XclExpXmlStream& );

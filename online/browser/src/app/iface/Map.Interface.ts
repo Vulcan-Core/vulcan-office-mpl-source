@@ -55,7 +55,10 @@ interface MapInterface extends Evented {
 		setItemValue(unoCmd: string, value: any): void;
 	};
 
-	sendUnoCommand(unoCmd: string, json?: any, force?: boolean): void;
+	// Returns true when the command was put on the wire, false when a silent
+	// gate (read posture off the allowlist, blocking dialog, blocked UI)
+	// dropped it. The agent bridges read this; UI callers may ignore it.
+	sendUnoCommand(unoCmd: string, json?: any, force?: boolean): boolean;
 
 	getDocType(): 'text' | 'presentation' | 'spreadsheet' | 'drawing';
 	isText(): boolean;
@@ -89,6 +92,9 @@ interface MapInterface extends Evented {
 		previousWopiSrc: string;
 		zoom: number;
 		defaultZoom: number;
+		// undefined until a 'lockfailed:' arrives; true while a lock retry is
+		// allowed; false once the lock is held (see Permission.js).
+		canTryLock?: boolean;
 	};
 
 	wopi: {
@@ -123,7 +129,6 @@ interface MapInterface extends Evented {
 	isReadOnlyMode(): boolean;
 	remove(): MapInterface;
 
-	welcome: WelcomeInterface;
 	_setLockProps(lockInfo: ParsedJSONResult): void;
 	_setRestrictions(restrictionInfo: ParsedJSONResult): void;
 	hideRestrictedItems(it: any, item: any, button: any): void;
@@ -135,6 +140,9 @@ interface MapInterface extends Evented {
 
 	focus(acceptInput?: boolean): void;
 	editorHasFocus(): boolean;
+	// The one global "which window has focus" id; 0 is the document.
+	// Map.js:1101 — declared here because callers in .ts need it.
+	setWinId(id: number | string): void;
 
 	_fireInitComplete(condition: string): void;
 	sendInitUNOCommands(): void;
@@ -182,6 +190,10 @@ interface MapInterface extends Evented {
 		calledFromSetPartHandler?: boolean,
 	): void;
 	mouseEventToIntern(e: any): InternPointLike;
+	// CSS-pixel document point → intern; pure in (point, zoom), independent
+	// of the current view (Map.js). The phone-Impress pinch uses it to hand
+	// the map an intern whose projection is a section-world document point.
+	unproject(point: cool.Point, zoom?: number): InternPointLike;
 	_limitZoom(zoom: number): number;
 	setView(
 		center: [number, number],
@@ -224,7 +236,7 @@ interface MapInterface extends Evented {
 	zoomIn(delta: number, options?: any, animate?: boolean): MapInterface;
 	zoomOut(delta: number, options?: any, animate?: boolean): MapInterface;
 	cancelSearch(): void;
-	goToPage(page: string): void;
+	goToPage(page: string | number, options?: { quiet?: boolean }): void;
 	serverAuditDialog?: ServerAuditDialog;
 	_lockAccessibilityOn: boolean;
 	setAccessibilityState(enable: boolean): void;
@@ -236,6 +248,28 @@ interface MapInterface extends Evented {
 	onFormulaBarFocus(): void;
 	formulabarBlur(): void;
 	formulabarFocus(): void;
+	/** The ONE phone-Calc cell-edit exit (Toolbar.js). */
+	vulcanEndCellEditSession(opts?: { dismissKeyboard?: boolean }): void;
+	/**
+	 * The two writers of html.vulcan-calc-edit-ready — the phone-Calc
+	 * EDIT-READY marker (src/app/VulcanCalcMode.ts). Both live on the same
+	 * Toolbar.js map mixin as vulcanEndCellEditSession above, and the marker
+	 * is MONOTONE by construction: one adder, one remover, nothing else
+	 * touches it. Declared here so call sites read them off MapInterface
+	 * instead of casting `app.map as any` — a cast hides a mixin that stops
+	 * being loaded.
+	 *
+	 * 🔴 OPTIONAL, AND MEASURED SO. Both call sites test for the method
+	 * before calling it (MouseControl's cell tap, VulcanEscape's editready
+	 * rung), and those tests are NOT decoration: the mocha extraction rigs
+	 * drive MouseControl.onClick against a hand-built `app.map` that carries
+	 * no Toolbar mixin at all, and 15 rows across three suites go red the
+	 * moment the guard is removed. A required declaration would type those
+	 * guards as dead code and invite exactly that removal, so the type says
+	 * what is true of every caller instead.
+	 */
+	vulcanEnterCalcEditReady?(): void;
+	vulcanExitCalcEditReady?(): void;
 	formulabarSetDirty(): void;
 	_functionWizardData: WidgetJSON;
 

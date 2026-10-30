@@ -16,8 +16,11 @@
 #include <kit/StateRecorder.hpp>
 #include <kit/Watermark.hpp>
 
+#include <Poco/JSON/Object.h>
+
 #include <chrono>
 #include <queue>
+#include <unordered_set>
 
 namespace kit
 {
@@ -178,6 +181,9 @@ private:
     bool saveDocumentBackground(const StringVector &tokens);
 
     bool getCommandValues(const StringVector& tokens);
+    /// Vulcan: a refused per-view .uno:Undo/.uno:Redo answer, rewritten for the browser
+    /// (common/VulcanUndoNotice.hpp). Returns true when payload was rewritten.
+    bool rewriteVulcanUndoResult(Poco::JSON::Object::Ptr object, std::string& payload);
 
     bool clientZoom(const StringVector& tokens);
     bool clientVisibleArea(const StringVector& tokens);
@@ -297,6 +303,9 @@ public:
             // FIXME: _pixmapCache
             << "\n\texportAsWopiUrl: " << _exportAsWopiUrl
             << "\n\tviewRenderedState: " << _viewRenderState
+            << "\n\tpendingTransformBrokerChannels: "
+            << _transformDocumentStructureBrokerChannels.size()
+            << "\n\tviewPostureReadOnly: " << _viewPostureReadOnly
             << "\n\tisDumpingTiles: " <<_isDumpingTiles
             << "\n\tclientVisibleArea: " << _clientVisibleArea.toString()
             << "\n\thasURP: " << _hasURP
@@ -345,6 +354,27 @@ private:
 
     /// stores info about the view
     std::string _viewRenderState;
+
+    /// Opaque response-channel tokens carried only by special broker
+    /// TransformDocumentStructure requests which must retain their legacy
+    /// transformeddocumentstructure response frame.
+    std::unordered_set<std::string> _transformDocumentStructureBrokerChannels;
+
+    /// The last Viewing/Editing posture this session applied via the
+    /// `setviewreadonly` message (true = Viewing). wsd forwards that message
+    /// only for WOPI-writable sessions, so this flag can only be set on a
+    /// session that holds write permission: it records browser POSTURE, never
+    /// document permission (a genuinely read-only session gets its view
+    /// read-only bit at load, not through this message, and stays false
+    /// here). TransformDocumentStructure lifts the posture around its
+    /// dispatch (see the transform branch in _handleInput), and unoCommand
+    /// lifts it around .uno:Save — otherwise the modified document can never
+    /// save while the view sits in Viewing posture and the edit is lost on
+    /// close (the build-#11 measured data loss). wsd also sends it itself
+    /// (Vulcan, FB 9/29) to pin an editor whose storage lock failed to
+    /// read-only, and to lift that again when attemptlock wins the lock back;
+    /// that session still holds write permission, so the above holds.
+    bool _viewPostureReadOnly = false;
 
     /// the canonical id unique to the set of rendering properties of this session
     CanonicalViewId _canonicalViewId;

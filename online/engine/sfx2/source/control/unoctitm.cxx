@@ -1214,6 +1214,20 @@ const std::map<std::u16string_view, KitUnoCommand>& GetKitUnoCommandList()
 {
     static std::map<std::u16string_view, KitUnoCommand> aUnoCommandList = {
         { u"Bold", { PayloadType::IsActivePayload, true } },
+        // VULCAN (Lane W, W2): without this row the phone's web-view toggle
+        // renders unchecked forever, because core broadcasts no state for a
+        // command that is not in this list and doc_iniUnoCommands() only
+        // initialises the slots that ARE in it. A checkbox that never checks
+        // does not merely look wrong -- "am I in page view or reflowed view"
+        // is the entire question that row exists to answer, so an unchecked
+        // row in web view is the menu asserting something false.
+        //
+        // SwView::StateViewOptions already puts an SfxBoolItem for
+        // SID_BROWSER_MODE (sw/source/uibase/uiview/view0.cxx), so nothing
+        // else is needed to produce the value; it just had no route out.
+        // IsActivePayload emits ".uno:BrowseView=true|false", which is the
+        // shape Control.Menubar's getItemValue(...) === 'true' test reads.
+        { u"BrowseView", { PayloadType::IsActivePayload, true } },
         { u"CenterPara", { PayloadType::IsActivePayload, true } },
 
         { u"CharBackgroundExt", { PayloadType::IsActivePayload, true } },
@@ -1242,6 +1256,15 @@ const std::map<std::u16string_view, KitUnoCommand>& GetKitUnoCommandList()
         { u"AlignLeft", { PayloadType::IsActivePayload, true } },
         { u"AlignHorizontalCenter", { PayloadType::IsActivePayload, true } },
         { u"AlignRight", { PayloadType::IsActivePayload, true } },
+        // VULCAN: Calc's justify (ScFormatShell::GetTextAttrState puts it beside
+        // AlignLeft/HorizontalCenter/Right). Without this row no listener is bound
+        // for it, so nothing ever reports a range justified: the agent's
+        // FormatRange Alignment=justify (.uno:CommonAlignJustified) could never be
+        // confirmed, and the toolbar's justify button never showed pressed.
+        { u"AlignBlock", { PayloadType::IsActivePayload, true } },
+        { u"AlignTop", { PayloadType::IsActivePayload, true } },
+        { u"AlignVCenter", { PayloadType::IsActivePayload, true } },
+        { u"AlignBottom", { PayloadType::IsActivePayload, true } },
         { u"DocumentRepair", { PayloadType::IsActivePayload, true } },
         { u"ObjectAlignLeft", { PayloadType::IsActivePayload, true } },
         { u"ObjectAlignRight", { PayloadType::IsActivePayload, true } },
@@ -1262,6 +1285,11 @@ const std::map<std::u16string_view, KitUnoCommand>& GetKitUnoCommandList()
         { u"NormalMultiPaneGUI", { PayloadType::IsActivePayload, false } },
         { u"NotesMode", { PayloadType::IsActivePayload, false } },
         { u"SlideMasterPage", { PayloadType::IsActivePayload, false } },
+        // VULCAN (Slide Studio W1): per-box resize-mode toggles, dispatchable
+        // from agent SlideCommand batches; the checked state mirrors whether
+        // every marked text object has the autogrow attribute on.
+        { u"ToggleAutoWidth", { PayloadType::IsActivePayload, true } },
+        { u"ToggleAutoHeight", { PayloadType::IsActivePayload, true } },
 
         { u"CharFontName", { PayloadType::FontNamePayload, true } },
 
@@ -1391,6 +1419,7 @@ const std::map<std::u16string_view, KitUnoCommand>& GetKitUnoCommandList()
         { u"Dismantle", { PayloadType::EnabledPayload, true } },
         { u"Substract", { PayloadType::EnabledPayload, true } },
         { u"DistributeSelection", { PayloadType::EnabledPayload, true } },
+        { u"AlignOnPage", { PayloadType::EnabledPayload, true } },
         { u"Intersect", { PayloadType::EnabledPayload, true } },
         { u"ResetAttributes", { PayloadType::EnabledPayload, true } },
         { u"IncrementIndent", { PayloadType::EnabledPayload, true } },
@@ -1449,6 +1478,7 @@ const std::map<std::u16string_view, KitUnoCommand>& GetKitUnoCommandList()
         { u"SelectionMode", { PayloadType::Int32Payload, true } },
         { u"StatusBarFunc", { PayloadType::Int32Payload, true } },
         { u"CalcPageSize", { PayloadType::Int32Payload, true } },
+        { u"NumberFormatType", { PayloadType::Int32Payload, true } },
 
         { u"TransformPosX", { PayloadType::TransformPayload, true } },
         { u"TransformPosY", { PayloadType::TransformPayload, true } },

@@ -95,6 +95,8 @@
 #include <sal/log.hxx>
 #include <tools/UnitConversion.hxx>
 #include <unotxdoc.hxx>
+#include <docsh.hxx>
+#include <doc.hxx>
 #include <unostyle.hxx>
 #include <unosett.hxx>
 #include <SwXTextDefaults.hxx>
@@ -234,6 +236,15 @@ DomainMapper::~DomainMapper()
         sal_Int32 nIndexes = 0;
         if ( m_pImpl->GetTextDocument() )
             nIndexes = m_pImpl->GetTextDocument()->getDocumentIndexes()->getCount();
+        // w:updateFields asks for the fields to be refreshed when the file is opened, as Word
+        // does. A generator writes its TOC with no entries and sets it, so have the
+        // first view update every index: SwView's ctor runs FN_UPDATE_TOX for IsUpdateTOX()
+        // and then resets the modified flag.
+        if (nIndexes && m_pImpl->IsNewDoc() && m_pImpl->GetSettingsTable()->GetUpdateFields())
+        {
+            if (SwDocShell* pDocShell = m_pImpl->GetTextDocument()->GetDocShell())
+                pDocShell->GetDoc()->SetUpdateTOX(true);
+        }
         // If we have page references, those need updating as well, similar to the indexes.
         if ( m_pImpl->GetTextDocument() )
         {
@@ -261,6 +272,14 @@ DomainMapper::~DomainMapper()
 
         // Grab-bag handling
         comphelper::SequenceAsHashMap aProperties;
+
+        // Preserve source OOXML view settings for COKit export. The key is present even when
+        // neither optional element exists, so absence is not replaced by a collaborator's view.
+        if (m_pImpl->IsNewDoc() && m_pImpl->GetSettingsTable()->IsOOXMLImport())
+        {
+            aProperties[u"OOXMLViewSettings"_ustr]
+                <<= m_pImpl->GetSettingsTable()->GetOOXMLViewSettings();
+        }
 
         // Add the saved w:themeFontLang setting
         aProperties[u"ThemeFontLangProps"_ustr] <<= m_pImpl->GetSettingsTable()->GetThemeFontLangProperties();

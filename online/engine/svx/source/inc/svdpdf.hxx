@@ -32,6 +32,8 @@
 #include <svx/xdash.hxx>
 
 #include <basegfx/matrix/b2dhommatrix.hxx>
+#include <basegfx/range/b2drectangle.hxx>
+#include <vector>
 
 #include <vcl/filter/PDFiumLibrary.hxx>
 
@@ -116,6 +118,13 @@ class ImpSdrPdfImport final
     std::unique_ptr<vcl::pdf::PDFiumDocument> mpPdfDocument;
     int mnPageCount;
     double mdPageHeightPts;
+    /// Skip reconstructing the PDF's embedded fonts into OTFs (map each to its
+    /// PostScript family name and let the container's font fall back instead).
+    /// The reconstruction (CollectFonts -> convertToOTF -> makeotf) aborts the
+    /// process on some embedded subsets — the ones our own draw_pdf_Export
+    /// produces among them — so the interactive decompose skips it: an
+    /// editable page wants a real font it can retype in, not a subset.
+    bool mbSkipEmbeddedFonts;
     /// The current transformation matrix, typically used with Form objects.
     basegfx::B2DHomMatrix maCurrentMatrix;
 
@@ -142,6 +151,7 @@ class ImpSdrPdfImport final
                     std::unique_ptr<vcl::pdf::PDFiumTextPage> const& pTextPage,
                     int nPageObjectIndex);
     void ImportImage(std::unique_ptr<vcl::pdf::PDFiumPageObject> const& pPageObject,
+                     std::unique_ptr<vcl::pdf::PDFiumPage> const& pPage,
                      int nPageObjectIndex);
     void ImportPath(std::unique_ptr<vcl::pdf::PDFiumPageObject> const& pPageObject,
                     std::unique_ptr<vcl::pdf::PDFiumPage> const& pPage, int nPageObjectIndex);
@@ -151,6 +161,24 @@ class ImpSdrPdfImport final
                     int nPageObjectIndex);
     void InsertTextObject(const Point& rPos, const Size& rSize, const OUString& rStr,
                           bool bInvisible);
+
+    /// One glyph of the page's text: code point and box in logic (1/100 mm,
+    /// y down) coordinates, from pdfium's text page.
+    struct PageChar
+    {
+        sal_uInt32 nCode;
+        basegfx::B2DRectangle aBox;
+    };
+    std::vector<PageChar> maPageChars;
+    std::vector<size_t> maPageNonSpace; ///< indices into maPageChars of the glyphs that are not spaces
+    const vcl::pdf::PDFiumTextPage* mpPageCharsFor = nullptr;
+    size_t mnPageRunCursor = 0; ///< index into maPageNonSpace where the next object's run is looked for first
+    void collectPageChars(std::unique_ptr<vcl::pdf::PDFiumTextPage> const& pTextPage);
+    /// Insert a pdfium text object as the runs a reader sees (see the
+    /// definition). Returns false when the glyphs could not be matched to
+    /// the text, in which case the caller inserts the object as one run.
+    bool InsertTextSegments(const tools::Rectangle& rObjRect, const OUString& rText,
+                            bool bInvisible);
 
     void SetupPageScale(const double dPageWidth, const double dPageHeight);
     void SetAttributes(SdrObject* pObj, bool bForceTextAttr = false);
@@ -172,7 +200,7 @@ class ImpSdrPdfImport final
     void DoObjects(SvdProgressInfo* pProgrInfo, sal_uInt32* pActionsToReport, int nPageIndex);
 
     static ImportedFontMap CollectFonts(std::u16string_view sPrefix,
-                                        vcl::pdf::PDFiumDocument& rPdfDocument);
+                                        vcl::pdf::PDFiumDocument& rPdfDocument, bool bSkipEmbeddedFonts);
 
     static EmbeddedFontInfo convertToOTF(std::u16string_view sPrefix, SubSetInfo& rSubSetInfo,
                                          const OUString& fileUrl, const OUString& fontName,
@@ -186,8 +214,13 @@ class ImpSdrPdfImport final
     ImpSdrPdfImport& operator=(const ImpSdrPdfImport&) = delete;
 
 public:
+    /// pSharedFonts: a family-name-only font map shared across the pages of
+    /// one decompose (filled by the first page, reused by the rest) — the
+    /// skip-fonts map is never cached on the GfxLink, so without it every
+    /// page walked the whole document's text again (quadratic in pages).
     ImpSdrPdfImport(SdrModel& rModel, SdrLayerID nLay, const tools::Rectangle& rRect,
-                    Graphic const& rGraphic);
+                    Graphic const& rGraphic, bool bSkipEmbeddedFonts = false,
+                    std::shared_ptr<ImportedFontMap>* pSharedFonts = nullptr);
 
     ~ImpSdrPdfImport();
 

@@ -23,6 +23,7 @@
 #include <common/StringVector.hpp>
 #include <common/Uri.hpp>
 #include <common/Util.hpp>
+#include <common/VulcanLogScrub.hpp>
 
 #include <Poco/DateTime.h>
 #include <Poco/DateTimeFormatter.h>
@@ -453,7 +454,8 @@ private:
             if (extractRecord(line, lastTime, rec, _latencyFactor))
                 _records.push_back(std::move(rec));
             else
-                fprintf(stderr, "Invalid trace file record, expected 4 tokens. [%s]\n", line.c_str());
+                fprintf(stderr, "Invalid trace file record, expected 4 tokens. [%s]\n",
+                        Vulcan::scrubLogSecrets(line).c_str()); // Vulcan: records hold load urls.
         }
 
         if (_records.empty() ||
@@ -461,7 +463,7 @@ private:
             _records[0].getPayload().find("NewSession") != 0)
         {
             fprintf(stderr, "Invalid trace file with %ld records. First record: %s\n", static_cast<long>(_records.size()),
-                    _records.empty() ? "<empty>" : _records[0].getPayload().c_str());
+                    Vulcan::scrubLogSecrets(_records.empty() ? "<empty>" : _records[0].getPayload()).c_str());
             throw std::runtime_error("Invalid trace file.");
         }
 

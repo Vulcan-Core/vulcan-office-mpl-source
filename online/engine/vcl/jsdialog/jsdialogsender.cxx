@@ -20,14 +20,11 @@ JSDialogNotifyIdle::JSDialogNotifyIdle(VclPtr<vcl::Window> aNotifierWindow,
     , m_aNotifierWindow(std::move(aNotifierWindow))
     , m_aContentWindow(std::move(aContentWindow))
     , m_sTypeOfJSON(sTypeOfJSON)
-    , m_bForce(false)
 {
     SetPriority(TaskPriority::POST_PAINT);
 }
 
-void JSDialogNotifyIdle::forceUpdate() { m_bForce = true; }
-
-void JSDialogNotifyIdle::send(const OString& sMsg)
+void JSDialogNotifyIdle::send(const OString& sMsg, bool bForce)
 {
     if (!m_aNotifierWindow)
     {
@@ -37,9 +34,8 @@ void JSDialogNotifyIdle::send(const OString& sMsg)
     const vcl::ICOKitNotifier* pNotifier = m_aNotifierWindow->GetKitNotifier();
     if (pNotifier)
     {
-        if (m_bForce || sMsg != m_LastNotificationMessage)
+        if (bForce || sMsg != m_LastNotificationMessage)
         {
-            m_bForce = false;
             m_LastNotificationMessage = sMsg;
             pNotifier->viewCallback(KIT_CALLBACK_JSDIALOG, m_LastNotificationMessage);
         }
@@ -49,7 +45,7 @@ void JSDialogNotifyIdle::send(const OString& sMsg)
 template <class VclType>
 void JSDialogNotifyIdle::sendMessage(const jsdialog::MessageType eType,
                                      const VclPtr<VclType>& pTarget,
-                                     std::unique_ptr<jsdialog::ActionDataMap> pData)
+                                     std::unique_ptr<jsdialog::ActionDataMap> pData, bool bForce)
 {
     std::scoped_lock aGuard(m_aQueueMutex);
 
@@ -71,13 +67,14 @@ void JSDialogNotifyIdle::sendMessage(const jsdialog::MessageType eType,
                 it++;
                 continue;
             }
+            bForce = bForce || it->m_bForce;
             it = m_aMessageQueue.erase(it);
         }
         else
             it++;
     }
 
-    JSDialogMessageInfo aMessage(eType, pTarget, std::move(pData));
+    JSDialogMessageInfo aMessage(eType, pTarget, std::move(pData), bForce);
     m_aMessageQueue.push_back(aMessage);
 }
 
@@ -261,36 +258,40 @@ void JSDialogNotifyIdle::Invoke()
             switch (eType)
             {
                 case jsdialog::MessageType::FullUpdate:
-                    send(generateFullUpdate());
+                    send(generateFullUpdate(), rMessage.m_bForce);
                     break;
 
                 case jsdialog::MessageType::WidgetUpdate:
-                    send(generateWidgetUpdate(rMessage.m_pWindow));
+                    send(generateWidgetUpdate(rMessage.m_pWindow), rMessage.m_bForce);
                     break;
 
                 case jsdialog::MessageType::Close:
-                    send(generateCloseMessage());
+                    send(generateCloseMessage(), rMessage.m_bForce);
                     break;
 
                 case jsdialog::MessageType::Action:
-                    send(generateActionMessage(rMessage.m_pWindow, std::move(rMessage.m_pData)));
+                    send(generateActionMessage(rMessage.m_pWindow, std::move(rMessage.m_pData)),
+                         rMessage.m_bForce);
                     break;
 
                 case jsdialog::MessageType::Popup:
                     send(generatePopupMessage(rMessage.m_pWindow,
                                               (*rMessage.m_pData)[PARENT_ID ""_ostr],
-                                              (*rMessage.m_pData)[CLOSE_ID ""_ostr]));
+                                              (*rMessage.m_pData)[CLOSE_ID ""_ostr]),
+                         rMessage.m_bForce);
                     break;
 
                 case jsdialog::MessageType::PopupClose:
-                    send(generateClosePopupMessage((*rMessage.m_pData)[WINDOW_ID ""_ostr]));
+                    send(generateClosePopupMessage((*rMessage.m_pData)[WINDOW_ID ""_ostr]),
+                         rMessage.m_bForce);
                     break;
 
                 case jsdialog::MessageType::Menu:
                 {
                     send(generateMenuMessage(rMessage.m_pMenu,
                                              (*rMessage.m_pData)[PARENT_ID ""_ostr],
-                                             (*rMessage.m_pData)[CLOSE_ID ""_ostr]));
+                                             (*rMessage.m_pData)[CLOSE_ID ""_ostr]),
+                         rMessage.m_bForce);
                     break;
                 }
             }
@@ -327,10 +328,8 @@ void JSDialogSender::sendFullUpdate(bool bForce)
         return;
     }
 
-    if (bForce)
-        mpIdleNotify->forceUpdate();
-
-    mpIdleNotify->sendMessage(jsdialog::MessageType::FullUpdate, VclPtr<vcl::Window>(nullptr));
+    mpIdleNotify->sendMessage(jsdialog::MessageType::FullUpdate, VclPtr<vcl::Window>(nullptr),
+                              nullptr, bForce);
     mpIdleNotify->Start();
 }
 
@@ -349,10 +348,7 @@ void JSDialogSender::sendUpdate(const VclPtr<vcl::Window>& pWindow, bool bForce)
     if (!mpIdleNotify)
         return;
 
-    if (bForce)
-        mpIdleNotify->forceUpdate();
-
-    mpIdleNotify->sendMessage(jsdialog::MessageType::WidgetUpdate, pWindow);
+    mpIdleNotify->sendMessage(jsdialog::MessageType::WidgetUpdate, pWindow, nullptr, bForce);
     mpIdleNotify->Start();
 }
 

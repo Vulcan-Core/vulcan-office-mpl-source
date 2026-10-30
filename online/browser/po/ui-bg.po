@@ -7248,7 +7248,7 @@ msgstr ""
 #~ msgstr "Сървърът се рестартира и ще бъде достъпен скоро"
 
 #~ msgid "Oops, there is a problem connecting to Collabora Online : "
-#~ msgstr "Възникна проблем при свързване с Collabora Online: "
+#~ msgstr "Възникна проблем при свързване с Vulcan Office: "
 
 #~ msgid "Number of views"
 #~ msgstr "Брой разглеждания"

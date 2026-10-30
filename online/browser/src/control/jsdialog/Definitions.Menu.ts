@@ -133,10 +133,18 @@ enum LO_BorderLineWidth {
 	ExtraThick = 90, // 4.50pt
 }
 
+// com.sun.star.table.BorderLineStyle (offapi/com/sun/star/table/
+// BorderLineStyle.idl): NONE 0x7FFF, SOLID 0, DOTTED 1, DASHED 2, DOUBLE 3.
+// Core's SvxBoxItem::LineToSvxLine static_casts the struct's LineStyle short
+// straight into SvxBorderLineStyle, so the number IS the style. SOLID used
+// to read 1 here, which is DOTTED: every "solid" entry of the desktop line
+// style menu below sent a dotted line (VO-P-0016 lane B5 found it while
+// pinning the phone borders palette's own style tier to the same IDL).
 enum UNO_BorderLineStyle {
-	// Matches table::BorderLineStyle::DOUBLE in UNO IDL
 	NONE = 32767,
-	SOLID = 1,
+	SOLID = 0,
+	DOTTED = 1,
+	DASHED = 2,
 	DOUBLE = 3,
 }
 
@@ -185,6 +193,13 @@ menuDefinitions.set('AutoSumMenu', [
 	{ text: _('Min'), uno: '.uno:AutoSum?Function:string=min' },
 	{ text: _('Max'), uno: '.uno:AutoSum?Function:string=max' },
 	{ text: _('Count'), uno: '.uno:AutoSum?Function:string=count' },
+] as Array<MenuDefinition>);
+
+menuDefinitions.set('FormulaAuditingMenu', [
+	{ text: _('Remove Precedent Arrows'), uno: '.uno:ClearArrowPrecedents' },
+	{ text: _('Remove Dependent Arrows'), uno: '.uno:ClearArrowDependents' },
+	{ text: _('Trace Error'), uno: '.uno:ShowErrors' },
+	{ text: _('Mark Invalid Data'), uno: '.uno:ShowInvalid' },
 ] as Array<MenuDefinition>);
 
 enum functionCategories {

@@ -88,6 +88,7 @@
 #include <FrameView.hxx>
 #include <zoomlist.hxx>
 #include <drawview.hxx>
+#include <VulcanHiddenInk.hxx>
 #include <DrawDocShell.hxx>
 #include <ViewShellBase.hxx>
 #include <ToolBarManager.hxx>
@@ -138,6 +139,11 @@ static void ImpAddPrintableCharactersToTextEdit(SfxRequest const & rReq, ::sd::V
 
     if(pOLV)
     {
+        // Editable scanned PDFs: typing on a marked hidden-ink OCR line
+        // starts its text edit here and feeds the character straight to the
+        // outliner, past FuText::KeyInput - the line becomes visible and the
+        // scan under it is covered first, as a key in text edit does.
+        sd::hiddenink::BeforeTextChange(*pView);
         for(sal_Int32 a(0); a < aInputString.getLength(); a++)
         {
             vcl::KeyCode aKeyCode;

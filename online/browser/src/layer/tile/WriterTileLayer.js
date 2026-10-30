@@ -64,6 +64,15 @@ window.L.WriterTileLayer = window.L.CanvasTileLayer.extend({
 		}
 		else if (values.redlines && values.redlines.length > 0) {
 			app.sectionContainer.getSectionWithName(app.CSections.CommentList.name).importChanges(values.redlines);
+			// Fork: the Writer bridge awaits this same .uno:AcceptTrackedChanges
+			// response (VulcanWriterBridge.fetchRedlines); importChanges must
+			// not consume it silently or every tracked mutation's after-fetch
+			// times out.
+			this._map.fire('commandvalues', {
+				commandName: undefined,
+				commandValues: undefined,
+				rawValues: values
+			});
 		}
 		else if (this._map.zotero && values.userDefinedProperties) {
 			this._map.zotero.handleCustomProperty(values.userDefinedProperties);
@@ -85,6 +94,14 @@ window.L.WriterTileLayer = window.L.CanvasTileLayer.extend({
 		} else {
 			window.L.CanvasTileLayer.prototype._onCommandValuesMsg.call(this, textMsg);
 		}
+	},
+
+	_onInvalidateTilesMsg: function (textMsg) {
+		var command = window.L.CanvasTileLayer.prototype._onInvalidateTilesMsg.call(this, textMsg);
+		var layout = app.activeDocument.activeLayout;
+		if (layout.requestContentExtent)
+			layout.requestContentExtent();
+		return command;
 	},
 
 	_shouldIgnoreServerPageSync: function () {

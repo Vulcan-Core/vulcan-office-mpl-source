@@ -65,6 +65,10 @@ class ShapeHandleDiagramSubSection extends ShapeHandleSubSection {
 	}
 
 	onDraw(frameCount?: number, elapsedTime?: number): void {
+		if (VulcanImpressSelectEcho.suppressesSelectionChrome()) return;
+		// A live move drag displaces frame and content; stationary
+		// grip dots would trail the old position, so they stand down.
+		if (this.sectionProperties.parentHandlerSection?.isMoveDragLive?.()) return;
 		const origLineWidth: number = this.context.lineWidth;
 		const halfWidthPx: number =
 			this.sectionProperties.ownInfo.halfWidth * app.twipsToPixels;

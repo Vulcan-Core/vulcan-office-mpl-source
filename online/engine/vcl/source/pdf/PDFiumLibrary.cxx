@@ -35,6 +35,7 @@
 
 #include <vcl/BitmapWriteAccess.hxx>
 #include <vcl/dibtools.hxx>
+#include <algorithm>
 #include <functional>
 
 using namespace com::sun::star;
@@ -276,6 +277,8 @@ public:
     void fillRect(int left, int top, int width, int height, sal_uInt32 nColor) override;
     void renderPageBitmap(PDFiumDocument* pDoc, PDFiumPage* pPage, int nStartX, int nStartY,
                           int nSizeX, int nSizeY) override;
+    void renderFormFields(PDFiumDocument* pDoc, PDFiumPage* pPage, int nStartX, int nStartY,
+                          int nSizeX, int nSizeY, int nRotate) override;
     ConstScanline getBuffer() override;
     int getStride() override;
     int getWidth() override;
@@ -355,7 +358,13 @@ public:
     OUString getFormAdditionalActionJavaScript(PDFiumDocument* pDoc,
                                                PDFAnnotAActionType eEvent) override;
     OUString getFormFieldValue(PDFiumDocument* pDoc) override;
+    OUString getFormFieldName(PDFiumDocument* pDoc) override;
     int getOptionCount(PDFiumDocument* pDoc) override;
+    OUString getOptionLabel(PDFiumDocument* pDoc, int nIndex) override;
+    bool isOptionSelected(PDFiumDocument* pDoc, int nIndex) override;
+    bool isChecked(PDFiumDocument* pDoc) override;
+    OUString getFormFieldExportValue(PDFiumDocument* pDoc) override;
+    bool getNumberValue(OString const& rKey, float& rValue) override;
 };
 
 class VCL_DLLPUBLIC PDFiumLinkImpl final : public PDFiumLink
@@ -424,6 +433,7 @@ private:
 public:
     PDFiumPageObjectImpl(FPDF_PAGEOBJECT pPageObject);
 
+    void* getPointer() override { return mpPageObject; }
     PDFPageObjectType getType() override;
     OUString getText(std::unique_ptr<PDFiumTextPage> const& pTextPage) override;
 
@@ -450,6 +460,14 @@ public:
     std::unique_ptr<PDFiumPathSegment> getPathSegment(int index) override;
     Size getImageSize(PDFiumPage& rPage) override;
     std::unique_ptr<PDFiumBitmap> getImageBitmap() override;
+    std::unique_ptr<PDFiumBitmap> getRenderedImage(PDFiumDocument& rDoc,
+                                                   PDFiumPage& rPage) override;
+    std::vector<OString> getImageFilters() override;
+    std::vector<sal_uInt8> getImageDataRaw() override;
+    PDFImageColorSpace getImageColorSpace(PDFiumPage& rPage) override;
+    int getImageBitsPerPixel(PDFiumPage& rPage) override;
+    std::vector<std::pair<OUString, OUString>> getMarks(const OString& rParamKey) override;
+    void setMatrix(const basegfx::B2DHomMatrix& rMatrix) override;
     bool getDrawMode(PDFFillMode& eFillMode, bool& bStroke) override;
 
     // ClipPath
@@ -514,6 +532,26 @@ public:
     /// Returned rect is no longer upside down and is in mm100.
     basegfx::B2DRectangle getCharBox(int nIndex, double fPageHeight) override;
 
+    void* getTextObjectPointer(int nIndex) override
+    {
+        return FPDFText_GetTextObject(mpTextPage, nIndex);
+    }
+    bool getCharOrigin(int nIndex, double& rX, double& rY) override
+    {
+        return FPDFText_GetCharOrigin(mpTextPage, nIndex, &rX, &rY);
+    }
+    bool getLooseCharBox(int nIndex, double& rLeft, double& rRight, double& rBottom,
+                         double& rTop) override
+    {
+        FS_RECTF aRect{};
+        if (!FPDFText_GetLooseCharBox(mpTextPage, nIndex, &aRect))
+            return false;
+        rLeft = aRect.left;
+        rRight = aRect.right;
+        rBottom = aRect.bottom;
+        rTop = aRect.top;
+        return true;
+    }
     OUString getText(FPDF_PAGEOBJECT pPageObject)
     {
         OUStringBuffer aResult;
@@ -639,6 +677,10 @@ public:
 
     double getWidth() override;
     double getHeight() override;
+
+    int getRotation() override;
+    bool pageToDevice(int nStartX, int nStartY, int nSizeX, int nSizeY, int nRotate,
+                      double fPageX, double fPageY, int& rDeviceX, int& rDeviceY) override;
 
     bool hasTransparency() override;
 
@@ -1416,6 +1458,110 @@ std::unique_ptr<PDFiumBitmap> PDFiumPageObjectImpl::getImageBitmap()
     return pPDFiumBitmap;
 }
 
+std::vector<OString> PDFiumPageObjectImpl::getImageFilters()
+{
+    std::vector<OString> aFilters;
+    const int nCount = FPDFImageObj_GetImageFilterCount(mpPageObject);
+    for (int nIndex = 0; nIndex < nCount; ++nIndex)
+    {
+        const unsigned long nLen = FPDFImageObj_GetImageFilter(mpPageObject, nIndex, nullptr, 0);
+        if (nLen <= 1)
+        {
+            aFilters.emplace_back();
+            continue;
+        }
+        std::vector<char> aFilterBuf(nLen);
+        FPDFImageObj_GetImageFilter(mpPageObject, nIndex, aFilterBuf.data(), aFilterBuf.size());
+        // Buffer is NUL-terminated.
+        OString aFilter(aFilterBuf.data(), aFilterBuf.size() - 1);
+        aFilters.push_back(aFilter);
+    }
+    return aFilters;
+}
+
+std::vector<sal_uInt8> PDFiumPageObjectImpl::getImageDataRaw()
+{
+    std::vector<sal_uInt8> aData;
+    const unsigned long nLen = FPDFImageObj_GetImageDataRaw(mpPageObject, nullptr, 0);
+    if (nLen == 0)
+        return aData;
+    aData.resize(nLen);
+    if (FPDFImageObj_GetImageDataRaw(mpPageObject, aData.data(), aData.size()) != nLen)
+        aData.clear();
+    return aData;
+}
+
+PDFImageColorSpace PDFiumPageObjectImpl::getImageColorSpace(PDFiumPage& rPage)
+{
+    FPDF_IMAGEOBJ_METADATA aMeta{};
+    auto& rPageImpl = static_cast<PDFiumPageImpl&>(rPage);
+    if (!FPDFImageObj_GetImageMetadata(mpPageObject, rPageImpl.getPointer(), &aMeta))
+        return PDFImageColorSpace::Unknown;
+    return static_cast<PDFImageColorSpace>(aMeta.colorspace);
+}
+
+int PDFiumPageObjectImpl::getImageBitsPerPixel(PDFiumPage& rPage)
+{
+    FPDF_IMAGEOBJ_METADATA aMeta{};
+    auto& rPageImpl = static_cast<PDFiumPageImpl&>(rPage);
+    if (!FPDFImageObj_GetImageMetadata(mpPageObject, rPageImpl.getPointer(), &aMeta))
+        return 0;
+    return static_cast<int>(aMeta.bits_per_pixel);
+}
+
+namespace
+{
+/// A UTF-16LE string pdfium wrote into a byte buffer of nBytes (the
+/// terminating NUL included).
+OUString lcl_Utf16FromPdfium(const std::vector<sal_Unicode>& rBuffer, unsigned long nBytes)
+{
+    const size_t nUnits = std::min<size_t>(rBuffer.size(), nBytes / 2);
+    if (nUnits <= 1)
+        return OUString();
+    std::vector<sal_Unicode> aUnits(rBuffer.begin(), rBuffer.begin() + (nUnits - 1));
+#ifdef OSL_BIGENDIAN
+    for (sal_Unicode& rUnit : aUnits)
+        rUnit = OSL_SWAPWORD(rUnit);
+#endif
+    return OUString(aUnits.data(), static_cast<sal_Int32>(aUnits.size()));
+}
+}
+
+std::vector<std::pair<OUString, OUString>> PDFiumPageObjectImpl::getMarks(const OString& rParamKey)
+{
+    std::vector<std::pair<OUString, OUString>> aMarks;
+    const int nCount = FPDFPageObj_CountMarks(mpPageObject);
+    for (int nMark = 0; nMark < nCount; ++nMark)
+    {
+        FPDF_PAGEOBJECTMARK pMark = FPDFPageObj_GetMark(mpPageObject, nMark);
+        if (!pMark)
+            continue;
+        OUString aName;
+        unsigned long nBytes = 0;
+        if (FPDFPageObjMark_GetName(pMark, nullptr, 0, &nBytes) && nBytes > 2)
+        {
+            std::vector<sal_Unicode> aBuffer(nBytes / 2 + 1, 0);
+            if (FPDFPageObjMark_GetName(pMark, reinterpret_cast<FPDF_WCHAR*>(aBuffer.data()),
+                                        aBuffer.size() * 2, &nBytes))
+                aName = lcl_Utf16FromPdfium(aBuffer, nBytes);
+        }
+        OUString aValue;
+        nBytes = 0;
+        if (!rParamKey.isEmpty()
+            && FPDFPageObjMark_GetParamStringValue(pMark, rParamKey.getStr(), nullptr, 0, &nBytes)
+            && nBytes > 2)
+        {
+            std::vector<sal_Unicode> aBuffer(nBytes / 2 + 1, 0);
+            if (FPDFPageObjMark_GetParamStringValue(
+                    pMark, rParamKey.getStr(), reinterpret_cast<FPDF_WCHAR*>(aBuffer.data()),
+                    aBuffer.size() * 2, &nBytes))
+                aValue = lcl_Utf16FromPdfium(aBuffer, nBytes);
+        }
+        aMarks.emplace_back(aName, aValue);
+    }
+    return aMarks;
+}
+
 std::unique_ptr<PDFiumBitmap> PDFiumPageObjectImpl::getRenderedStrokePattern(PDFiumDocument& rDoc,
                                                                              PDFiumPage& rPage)
 {
@@ -1429,6 +1575,31 @@ std::unique_ptr<PDFiumBitmap> PDFiumPageObjectImpl::getRenderedStrokePattern(PDF
         pPDFiumBitmap = std::make_unique<PDFiumBitmapImpl>(pBitmap);
     }
     return pPDFiumBitmap;
+}
+
+std::unique_ptr<PDFiumBitmap> PDFiumPageObjectImpl::getRenderedImage(PDFiumDocument& rDoc,
+                                                                     PDFiumPage& rPage)
+{
+    auto& rDocImpl = static_cast<PDFiumDocumentImpl&>(rDoc);
+    auto& rPageImpl = static_cast<PDFiumPageImpl&>(rPage);
+    std::unique_ptr<PDFiumBitmap> pPDFiumBitmap;
+    FPDF_BITMAP pBitmap = FPDFImageObj_GetRenderedBitmap(rDocImpl.getPointer(),
+                                                         rPageImpl.getPointer(), mpPageObject);
+    if (pBitmap)
+        pPDFiumBitmap = std::make_unique<PDFiumBitmapImpl>(pBitmap);
+    return pPDFiumBitmap;
+}
+
+void PDFiumPageObjectImpl::setMatrix(const basegfx::B2DHomMatrix& rMatrix)
+{
+    FS_MATRIX aMatrix;
+    aMatrix.a = rMatrix.a();
+    aMatrix.b = rMatrix.b();
+    aMatrix.c = rMatrix.c();
+    aMatrix.d = rMatrix.d();
+    aMatrix.e = rMatrix.e();
+    aMatrix.f = rMatrix.f();
+    FPDFPageObj_SetMatrix(mpPageObject, &aMatrix);
 }
 
 std::unique_ptr<PDFiumBitmap> PDFiumPageObjectImpl::getRenderedFillPattern(PDFiumDocument& rDoc,
@@ -1496,6 +1667,15 @@ double PDFiumPageImpl::getWidth() { return FPDF_GetPageWidth(mpPage); }
 double PDFiumPageImpl::getHeight() { return FPDF_GetPageHeight(mpPage); }
 
 bool PDFiumPageImpl::hasTransparency() { return FPDFPage_HasTransparency(mpPage); }
+
+int PDFiumPageImpl::getRotation() { return FPDFPage_GetRotation(mpPage); }
+
+bool PDFiumPageImpl::pageToDevice(int nStartX, int nStartY, int nSizeX, int nSizeY, int nRotate,
+                                  double fPageX, double fPageY, int& rDeviceX, int& rDeviceY)
+{
+    return FPDF_PageToDevice(mpPage, nStartX, nStartY, nSizeX, nSizeY, nRotate, fPageX, fPageY,
+                             &rDeviceX, &rDeviceY);
+}
 
 PDFiumPathSegmentImpl::PDFiumPathSegmentImpl(FPDF_PATHSEGMENT pPathSegment)
     : mpPathSegment(pPathSegment)
@@ -1581,6 +1761,15 @@ void PDFiumBitmapImpl::renderPageBitmap(PDFiumDocument* pDoc, PDFiumPage* pPage,
     auto pDocImpl = static_cast<PDFiumDocumentImpl*>(pDoc);
     FPDF_FFLDraw(pDocImpl->getFormHandlePointer(), mpBitmap, pPageImpl->getPointer(), nStartX,
                  nStartY, nSizeX, nSizeY, /*rotate=*/0, /*flags=*/0);
+}
+
+void PDFiumBitmapImpl::renderFormFields(PDFiumDocument* pDoc, PDFiumPage* pPage, int nStartX,
+                                        int nStartY, int nSizeX, int nSizeY, int nRotate)
+{
+    auto pPageImpl = static_cast<PDFiumPageImpl*>(pPage);
+    auto pDocImpl = static_cast<PDFiumDocumentImpl*>(pDoc);
+    FPDF_FFLDraw(pDocImpl->getFormHandlePointer(), mpBitmap, pPageImpl->getPointer(), nStartX,
+                 nStartY, nSizeX, nSizeY, nRotate, /*flags=*/0);
 }
 
 ConstScanline PDFiumBitmapImpl::getBuffer()
@@ -1807,10 +1996,54 @@ OUString PDFiumAnnotationImpl::getFormFieldValue(PDFiumDocument* pDoc)
                                            length);
     });
 }
+OUString PDFiumAnnotationImpl::getFormFieldName(PDFiumDocument* pDoc)
+{
+    auto* pDocImpl = static_cast<PDFiumDocumentImpl*>(pDoc);
+    return getUnicodeString([this, pDocImpl](FPDF_WCHAR* buffer, unsigned long length) {
+        return FPDFAnnot_GetFormFieldName(pDocImpl->getFormHandlePointer(), mpAnnotation, buffer,
+                                          length);
+    });
+}
+
 int PDFiumAnnotationImpl::getOptionCount(PDFiumDocument* pDoc)
 {
     auto* pDocImpl = static_cast<PDFiumDocumentImpl*>(pDoc);
     return FPDFAnnot_GetOptionCount(pDocImpl->getFormHandlePointer(), mpAnnotation);
+}
+
+OUString PDFiumAnnotationImpl::getOptionLabel(PDFiumDocument* pDoc, int nIndex)
+{
+    auto* pDocImpl = static_cast<PDFiumDocumentImpl*>(pDoc);
+    return getUnicodeString([this, pDocImpl, nIndex](FPDF_WCHAR* buffer, unsigned long length) {
+        return FPDFAnnot_GetOptionLabel(pDocImpl->getFormHandlePointer(), mpAnnotation, nIndex,
+                                        buffer, length);
+    });
+}
+
+bool PDFiumAnnotationImpl::isOptionSelected(PDFiumDocument* pDoc, int nIndex)
+{
+    auto* pDocImpl = static_cast<PDFiumDocumentImpl*>(pDoc);
+    return FPDFAnnot_IsOptionSelected(pDocImpl->getFormHandlePointer(), mpAnnotation, nIndex);
+}
+
+bool PDFiumAnnotationImpl::isChecked(PDFiumDocument* pDoc)
+{
+    auto* pDocImpl = static_cast<PDFiumDocumentImpl*>(pDoc);
+    return FPDFAnnot_IsChecked(pDocImpl->getFormHandlePointer(), mpAnnotation);
+}
+
+OUString PDFiumAnnotationImpl::getFormFieldExportValue(PDFiumDocument* pDoc)
+{
+    auto* pDocImpl = static_cast<PDFiumDocumentImpl*>(pDoc);
+    return getUnicodeString([this, pDocImpl](FPDF_WCHAR* buffer, unsigned long length) {
+        return FPDFAnnot_GetFormFieldExportValue(pDocImpl->getFormHandlePointer(), mpAnnotation,
+                                                 buffer, length);
+    });
+}
+
+bool PDFiumAnnotationImpl::getNumberValue(OString const& rKey, float& rValue)
+{
+    return FPDFAnnot_GetNumberValue(mpAnnotation, rKey.getStr(), &rValue);
 }
 
 OUString PDFiumAnnotationImpl::getFormAdditionalActionJavaScript(PDFiumDocument* pDoc,

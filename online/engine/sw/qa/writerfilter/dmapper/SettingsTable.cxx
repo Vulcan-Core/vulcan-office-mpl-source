@@ -10,8 +10,14 @@
 #include <test/unoapixml_test.hxx>
 
 #include <com/sun/star/beans/XPropertySet.hpp>
+#include <com/sun/star/container/XIndexAccess.hpp>
+#include <com/sun/star/document/XUndoManager.hpp>
+#include <com/sun/star/document/XUndoManagerSupplier.hpp>
 #include <com/sun/star/qa/XDumper.hpp>
+#include <com/sun/star/text/XDocumentIndex.hpp>
+#include <com/sun/star/text/XDocumentIndexesSupplier.hpp>
 #include <com/sun/star/text/XTextDocument.hpp>
+#include <com/sun/star/util/XModifiable.hpp>
 
 #include <test/xmldocptr.hxx>
 
@@ -26,6 +32,17 @@ public:
     Test()
         : UnoApiXmlTest(u"/sw/qa/writerfilter/dmapper/data/"_ustr)
     {
+    }
+
+    /// The text of the document's only index (its TOC).
+    OUString getTocText()
+    {
+        uno::Reference<text::XDocumentIndexesSupplier> xIndexesSupplier(mxComponent,
+                                                                        uno::UNO_QUERY);
+        uno::Reference<container::XIndexAccess> xIndexes = xIndexesSupplier->getDocumentIndexes();
+        CPPUNIT_ASSERT_EQUAL(static_cast<sal_Int32>(1), xIndexes->getCount());
+        uno::Reference<text::XDocumentIndex> xIndex(xIndexes->getByIndex(0), uno::UNO_QUERY);
+        return xIndex->getAnchor()->getString();
     }
 };
 
@@ -106,6 +123,44 @@ CPPUNIT_TEST_FIXTURE(Test, testEndnoteAtSectionEnd)
     // Without the accompanying fix in place, this test would have failed, endnotes were always at
     // document end.
     CPPUNIT_ASSERT(bEndnoteIsCollectAtTextEnd);
+}
+
+CPPUNIT_TEST_FIXTURE(Test, testUpdateFieldsFillsToc)
+{
+    // Given a document as docx-js writes it: <w:updateFields>, a dirty TOC field with no entries
+    // yet, and Heading 1-2 styles without <w:outlineLvl>:
+    // When importing that document:
+    loadFromFile(u"update-fields-toc.docx");
+
+    // Then make sure the TOC lists the headings, in order:
+    OUString aToc = getTocText();
+    sal_Int32 nScope = aToc.indexOf("Scope of the manual");
+    sal_Int32 nSignsOff = aToc.indexOf("Who signs off");
+    sal_Int32 nRetention = aToc.indexOf("Retention schedule");
+    // Without the accompanying fix in place, this test would have failed, the TOC stayed empty
+    // until the user updated it.
+    CPPUNIT_ASSERT(nScope != -1);
+    CPPUNIT_ASSERT_GREATER(nScope, nSignsOff);
+    CPPUNIT_ASSERT_GREATER(nSignsOff, nRetention);
+
+    // And that the update is part of the load: nothing to save, nothing to undo.
+    uno::Reference<util::XModifiable> xModifiable(mxComponent, uno::UNO_QUERY);
+    CPPUNIT_ASSERT(!xModifiable->isModified());
+    uno::Reference<document::XUndoManagerSupplier> xUndoManagerSupplier(mxComponent,
+                                                                        uno::UNO_QUERY);
+    CPPUNIT_ASSERT(!xUndoManagerSupplier->getUndoManager()->isUndoPossible());
+}
+
+CPPUNIT_TEST_FIXTURE(Test, testNoUpdateFieldsKeepsTocResult)
+{
+    // Given a TOC as Word saves it: one stale entry as its result, and no <w:updateFields>:
+    // When importing that document:
+    loadFromFile(u"toc-cached-result.docx");
+
+    // Then make sure the TOC still shows what the file stored, as Word does:
+    OUString aToc = getTocText();
+    CPPUNIT_ASSERT(aToc.indexOf("Stale entry") != -1);
+    CPPUNIT_ASSERT_EQUAL(static_cast<sal_Int32>(-1), aToc.indexOf("Scope of the manual"));
 }
 }
 

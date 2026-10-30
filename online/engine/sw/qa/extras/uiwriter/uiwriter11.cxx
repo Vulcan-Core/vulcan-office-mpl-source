@@ -30,6 +30,7 @@
 #include <i18nutil/paper.hxx>
 #include <pagedesc.hxx>
 #include <PostItMgr.hxx>
+#include <rootfrm.hxx>
 #include <view.hxx>
 #include <wrtsh.hxx>
 #include <unotxdoc.hxx>
@@ -695,6 +696,152 @@ CPPUNIT_TEST_FIXTURE(SwUiWriterTest11, testCommentDeletionStaysDeletedAfterHighl
     // Without the fix the format redline on top of the delete redline hid the
     // deletion, so the comment turned back to VISIBLE.
     CPPUNIT_ASSERT_EQUAL(SwPostItHelper::SwLayoutStatus::DELETED, aPostItFields[0]->mLayoutStatus);
+}
+
+/// "Before", then a one-cell table (a docx-js callout box) holding "Do not share", then "After".
+/// Leaves the cursor in the cell.
+void lcl_insertBoxBetweenParagraphs(SwWrtShell& rWrtShell,
+                                    const uno::Reference<lang::XComponent>& xComponent)
+{
+    rWrtShell.Insert(u"Before"_ustr);
+    rWrtShell.SplitNode();
+    rWrtShell.Insert(u"After"_ustr);
+    rWrtShell.SttPara();
+    SwModelTestBase::dispatchCommand(
+        xComponent, u".uno:InsertTable"_ustr,
+        { comphelper::makePropertyValue(u"Rows"_ustr, sal_Int32(1)),
+          comphelper::makePropertyValue(u"Columns"_ustr, sal_Int32(1)) });
+    rWrtShell.Insert(u"Do not share"_ustr);
+}
+
+CPPUNIT_TEST_FIXTURE(SwUiWriterTest11, testBackspaceDeletesWhollySelectedTable)
+{
+    // VULCAN: an agent-built callout box is a one-cell table. Selecting the whole
+    // table and pressing Backspace must remove it, as in Word and as Cut does.
+    createSwDoc();
+    SwDoc* pDoc = getSwDoc();
+    SwWrtShell* pWrtShell = getSwDocShell()->GetWrtShell();
+    CPPUNIT_ASSERT(pWrtShell);
+    lcl_insertBoxBetweenParagraphs(*pWrtShell, mxComponent);
+    CPPUNIT_ASSERT_EQUAL(3, getParagraphs());
+    getCell(getParagraphOrTable(2), u"A1"_ustr, u"Do not share"_ustr);
+
+    // Ctrl+A twice in the cell (the customer's gesture) selects the whole table:
+    dispatchCommand(mxComponent, u".uno:SelectAll"_ustr, {});
+    dispatchCommand(mxComponent, u".uno:SelectAll"_ustr, {});
+    CPPUNIT_ASSERT(pWrtShell->IsTableMode());
+
+    dispatchCommand(mxComponent, u".uno:SwBackspace"_ustr, {});
+
+    // Without the fix in place, this test would have failed with:
+    // - Expected: 0
+    // - Actual  : 1
+    // i.e. the text went, but the empty table (the box) stayed.
+    CPPUNIT_ASSERT_EQUAL(static_cast<size_t>(0), pDoc->GetTableFrameFormatCount(/*bUsed=*/true));
+    CPPUNIT_ASSERT_EQUAL(2, getParagraphs());
+    getParagraph(1, u"Before"_ustr);
+    getParagraph(2, u"After"_ustr);
+
+    // One Undo brings the table back with its text:
+    dispatchCommand(mxComponent, u".uno:Undo"_ustr, {});
+    CPPUNIT_ASSERT_EQUAL(static_cast<size_t>(1), pDoc->GetTableFrameFormatCount(/*bUsed=*/true));
+    CPPUNIT_ASSERT_EQUAL(3, getParagraphs());
+    getCell(getParagraphOrTable(2), u"A1"_ustr, u"Do not share"_ustr);
+}
+
+CPPUNIT_TEST_FIXTURE(SwUiWriterTest11, testBackspaceDeletesWhollySelectedTableTracked)
+{
+    // VULCAN: with change tracking on, Backspace on the selected table records a
+    // tracked table deletion, as Table > Delete > Table does (see testTdf147347).
+    createSwDoc();
+    SwDoc* pDoc = getSwDoc();
+    SwWrtShell* pWrtShell = getSwDocShell()->GetWrtShell();
+    CPPUNIT_ASSERT(pWrtShell);
+    lcl_insertBoxBetweenParagraphs(*pWrtShell, mxComponent);
+
+    dispatchCommand(mxComponent, u".uno:TrackChanges"_ustr, {});
+    CPPUNIT_ASSERT(pDoc->getIDocumentRedlineAccess().IsRedlineOn());
+    dispatchCommand(mxComponent, u".uno:ShowTrackedChanges"_ustr, {});
+    CPPUNIT_ASSERT(pWrtShell->GetLayout()->IsHideRedlines());
+
+    dispatchCommand(mxComponent, u".uno:SelectTable"_ustr, {});
+    dispatchCommand(mxComponent, u".uno:SwBackspace"_ustr, {});
+
+    // Without the fix in place, this test would have failed with:
+    // - Expected: 0
+    // - Actual  : 1
+    // i.e. only the cell text was tracked as deleted, and Hide Changes still showed the box.
+    xmlDocUniquePtr pXmlDoc = parseLayoutDump();
+    assertXPath(pXmlDoc, "/root/page[1]/body/tab/row", 0);
+
+    // One Undo brings the box back:
+    dispatchCommand(mxComponent, u".uno:Undo"_ustr, {});
+    pXmlDoc = parseLayoutDump();
+    assertXPath(pXmlDoc, "/root/page[1]/body/tab/row", 1);
+}
+
+CPPUNIT_TEST_FIXTURE(SwUiWriterTest11, testDeleteDeletesWhollySelectedTable)
+{
+    // VULCAN: Delete on the wholly selected callout box removes it too. Word only
+    // clears the cells on Delete; the designer chose removal for both keys (2026-10-14).
+    createSwDoc();
+    SwDoc* pDoc = getSwDoc();
+    SwWrtShell* pWrtShell = getSwDocShell()->GetWrtShell();
+    CPPUNIT_ASSERT(pWrtShell);
+    lcl_insertBoxBetweenParagraphs(*pWrtShell, mxComponent);
+    CPPUNIT_ASSERT_EQUAL(3, getParagraphs());
+
+    dispatchCommand(mxComponent, u".uno:SelectAll"_ustr, {});
+    dispatchCommand(mxComponent, u".uno:SelectAll"_ustr, {});
+    CPPUNIT_ASSERT(pWrtShell->IsTableMode());
+
+    dispatchCommand(mxComponent, u".uno:Delete"_ustr, {});
+
+    // Without the fix in place, this test would have failed with:
+    // - Expected: 0
+    // - Actual  : 1
+    // i.e. Delete emptied the cell, and the empty table (the box) stayed.
+    CPPUNIT_ASSERT_EQUAL(static_cast<size_t>(0), pDoc->GetTableFrameFormatCount(/*bUsed=*/true));
+    CPPUNIT_ASSERT_EQUAL(2, getParagraphs());
+    getParagraph(1, u"Before"_ustr);
+    getParagraph(2, u"After"_ustr);
+
+    // One Undo brings the table back with its text:
+    dispatchCommand(mxComponent, u".uno:Undo"_ustr, {});
+    CPPUNIT_ASSERT_EQUAL(static_cast<size_t>(1), pDoc->GetTableFrameFormatCount(/*bUsed=*/true));
+    CPPUNIT_ASSERT_EQUAL(3, getParagraphs());
+    getCell(getParagraphOrTable(2), u"A1"_ustr, u"Do not share"_ustr);
+}
+
+CPPUNIT_TEST_FIXTURE(SwUiWriterTest11, testDeleteDeletesWhollySelectedTableTracked)
+{
+    // VULCAN: with change tracking on, Delete on the selected table records a tracked
+    // table deletion, as Backspace does (testBackspaceDeletesWhollySelectedTableTracked).
+    createSwDoc();
+    SwDoc* pDoc = getSwDoc();
+    SwWrtShell* pWrtShell = getSwDocShell()->GetWrtShell();
+    CPPUNIT_ASSERT(pWrtShell);
+    lcl_insertBoxBetweenParagraphs(*pWrtShell, mxComponent);
+
+    dispatchCommand(mxComponent, u".uno:TrackChanges"_ustr, {});
+    CPPUNIT_ASSERT(pDoc->getIDocumentRedlineAccess().IsRedlineOn());
+    dispatchCommand(mxComponent, u".uno:ShowTrackedChanges"_ustr, {});
+    CPPUNIT_ASSERT(pWrtShell->GetLayout()->IsHideRedlines());
+
+    dispatchCommand(mxComponent, u".uno:SelectTable"_ustr, {});
+    dispatchCommand(mxComponent, u".uno:Delete"_ustr, {});
+
+    // Without the fix in place, this test would have failed with:
+    // - Expected: 0
+    // - Actual  : 1
+    // i.e. only the cell text was tracked as deleted, and Hide Changes still showed the box.
+    xmlDocUniquePtr pXmlDoc = parseLayoutDump();
+    assertXPath(pXmlDoc, "/root/page[1]/body/tab/row", 0);
+
+    // One Undo brings the box back:
+    dispatchCommand(mxComponent, u".uno:Undo"_ustr, {});
+    pXmlDoc = parseLayoutDump();
+    assertXPath(pXmlDoc, "/root/page[1]/body/tab/row", 1);
 }
 
 } // end of anonymous namespace

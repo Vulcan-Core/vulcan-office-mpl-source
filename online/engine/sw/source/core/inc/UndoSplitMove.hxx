@@ -42,6 +42,9 @@ public:
     virtual void RepeatImpl( ::sw::RepeatContext & ) override;
 
     void SetTableFlag()       { m_bTableFlag = true; }
+
+    /// Vulcan fork: a paragraph split moves every node index from its node on.
+    std::optional<sw::UndoFootprint> GetFootprint() const override;
 };
 
 class SwUndoMove final : public SwUndo, private SwUndRng, private SwUndoSaveContent

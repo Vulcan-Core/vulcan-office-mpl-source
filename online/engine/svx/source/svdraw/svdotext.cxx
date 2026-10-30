@@ -155,13 +155,11 @@ SdrTextObj::~SdrTextObj()
     ImpDeregisterLink();
 }
 
-void SdrTextObj::FitFrameToTextSize()
+Size SdrTextObj::CalcFitToTextSize() const
 {
-    ImpJustifyRect(maRectangle);
-
     SdrText* pText = getActiveText();
     if(pText==nullptr || !pText->GetOutlinerParaObject())
-        return;
+        return Size();
 
     SdrOutliner& rOutliner=ImpGetDrawOutliner();
     rOutliner.SetPaperSize(Size(getRectangle().Right() - getRectangle().Left(), getRectangle().Bottom() - getRectangle().Top()));
@@ -172,8 +170,19 @@ void SdrTextObj::FitFrameToTextSize()
     aNewSize.AdjustWidth( 1 ); // because of possible rounding errors
     aNewSize.AdjustWidth(GetTextLeftDistance()+GetTextRightDistance() );
     aNewSize.AdjustHeight(GetTextUpperDistance()+GetTextLowerDistance() );
+    return aNewSize;
+}
+
+void SdrTextObj::FitFrameToTextSize()
+{
+    ImpJustifyRect(maRectangle);
+
+    SdrText* pText = getActiveText();
+    if(pText==nullptr || !pText->GetOutlinerParaObject())
+        return;
+
     tools::Rectangle aNewRect(getRectangle());
-    aNewRect.SetSize(aNewSize);
+    aNewRect.SetSize(CalcFitToTextSize());
     ImpJustifyRect(aNewRect);
 
     if (aNewRect != getRectangle())

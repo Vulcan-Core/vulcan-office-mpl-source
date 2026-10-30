@@ -42,8 +42,8 @@ msgid ""
 "Technology, provided by Collabora Productivity. See "
 "https://collaboraoffice.com"
 msgstr ""
-"Collabora Office, pakiet biurowy oparty na technologii LibreOffice, "
-"dostarczany przez Collabora Productivity. Zobacz https://collaboraoffice.com"
+"Vulcan Office, pakiet biurowy oparty na technologii Vulcan Office, "
+"dostarczany przez Vulcan AI. Zobacz https://collaboraoffice.com"
 
 #. 4rBwc
 #: include/svx/strings.hrc:1040
@@ -166,7 +166,7 @@ msgid ""
 "href=\"https://collaboraoffice.com\">https://CollaboraOffice.com/</a>."
 msgstr ""
 "Więcej informacji znajdziesz na stronie głównej ${PRODUCTNAME} pod adresem "
-"<a href=\"https://collaboraoffice.com\">https://CollaboraOffice.com/</a>."
+"<a href=\"https://collaboraoffice.com\">https://Vulcan OfficeOffice.com/</a>."
 
 #. SbQew
 #: chart2/inc/strings.hrc:51

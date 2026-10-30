@@ -247,6 +247,21 @@ SwUndo* UndoManager::GetLastUndo()
     return dynamic_cast<SwUndo*>(pAction);
 }
 
+SwUndo* UndoManager::GetLastUndoToGroupWith()
+{
+    SwUndo* pLast = GetLastUndo();
+    if (!pLast || !comphelper::COKit::isActive())
+        return pLast;
+    // The view a new action is recorded for (as SwUndo::CreateViewShellId sees it).
+    ViewShellId nCurrent(-1);
+    if (m_pDocShell)
+    {
+        if (const SwView* pView = m_pDocShell->GetView())
+            nCurrent = pView->GetViewShellId();
+    }
+    return pLast->GetViewShellId() == nCurrent ? pLast : nullptr;
+}
+
 void UndoManager::AppendUndo(std::unique_ptr<SwUndo> pUndo)
 {
     AddUndoAction(std::move(pUndo));
@@ -361,86 +376,59 @@ UndoManager::EndUndo(SwUndoId eUndoId, SwRewriter const*const pRewriter)
     return eUndoId;
 }
 
+namespace
+{
+/// Vulcan fork: may this view's own action be undone out of order at all?
+bool lcl_CanUndoOutOfOrder(const SfxUndoAction& rMine)
+{
+    std::optional<sw::UndoFootprint> oMine = SwUndo::GetActionFootprint(rMine);
+    return oMine && oMine->bNodeNeutral;
+}
+
+/// Vulcan fork: can rMine (node-neutral) be undone while rOther, recorded after it, stays?
+bool lcl_IsUndoIndependent(const SfxUndoAction& rMine, const SfxUndoAction& rOther)
+{
+    std::optional<sw::UndoFootprint> oMine = SwUndo::GetActionFootprint(rMine);
+    std::optional<sw::UndoFootprint> oOther = SwUndo::GetActionFootprint(rOther);
+    if (!oMine || !oOther || !oMine->bNodeNeutral)
+        return false;
+    if (oOther->bNodeNeutral)
+    {
+        // Different paragraphs: neither changes the other's stored positions.
+        return oOther->nEnd < oMine->nStart || oOther->nStart > oMine->nEnd;
+    }
+    // It inserted or removed nodes: only harmless when all of that happened after mine,
+    // so my stored node indexes never moved.
+    return oOther->nStart > oMine->nEnd;
+}
+}
+
 /**
- * Checks if the topmost undo action owned by pView is independent from the topmost action undo
- * action.
+ * Checks if the topmost undo action owned by pView can be undone although other views' undo
+ * actions sit above it. Sets rOffset to the offset of that undo action on success.
  */
 bool UndoManager::IsViewUndoActionIndependent(const SwView* pView, sal_uInt16& rOffset) const
 {
-    if (GetUndoActionCount() <= 1)
-    {
-        // Single or less undo, owned by another view.
+    const SfxViewUndoLookup aLookup = LookupViewUndo(pView);
+    if (aLookup.eStatus != SfxViewUndoLookup::Status::Independent)
         return false;
-    }
-
-    if (!pView)
-    {
-        return false;
-    }
-
-    // Last undo action that doesn't belong to the view.
-    const SfxUndoAction* pTopAction = GetUndoAction();
-
-    ViewShellId nViewId = pView->GetViewShellId();
-
-    // Earlier undo action that belongs to the view, but is not the top one.
-    const SfxUndoAction* pViewAction = nullptr;
-    size_t nOffset = 0;
-    for (size_t i = 0; i < GetUndoActionCount(); ++i)
-    {
-        const SfxUndoAction* pAction = GetUndoAction(i);
-        if (pAction->GetViewShellId() == nViewId)
-        {
-            pViewAction = pAction;
-            nOffset = i;
-            break;
-        }
-    }
-
-    if (!pViewAction)
-    {
-        // Found no earlier undo action that belongs to the view.
-        return false;
-    }
-
-    auto pTopSwAction = dynamic_cast<const SwUndo*>(pTopAction);
-    if (!pTopSwAction || pTopSwAction->GetId() != SwUndoId::TYPING)
-    {
-        return false;
-    }
-
-    auto pViewSwAction = dynamic_cast<const SwUndo*>(pViewAction);
-    if (!pViewSwAction || pViewSwAction->GetId() != SwUndoId::TYPING)
-    {
-        return false;
-    }
-
-    const auto& rTopInsert = *static_cast<const SwUndoInsert*>(pTopSwAction);
-    const auto& rViewInsert = *static_cast<const SwUndoInsert*>(pViewSwAction);
-
-    for (size_t i = 0; i < GetRedoActionCount(); ++i)
-    {
-        auto pRedoAction = dynamic_cast<const SwUndo*>(GetRedoAction(i));
-        if (!pRedoAction || pRedoAction->GetId() != SwUndoId::TYPING)
-        {
-            return false;
-        }
-
-        const auto& rRedoInsert = *static_cast<const SwUndoInsert*>(pRedoAction);
-        if (!rViewInsert.IsIndependent(rRedoInsert) && rRedoInsert.GetViewShellId() != nViewId)
-        {
-            // Dependent redo action and owned by another view.
-            return false;
-        }
-    }
-
-    if (!rViewInsert.IsIndependent(rTopInsert))
-    {
-        return false;
-    }
-
-    rOffset = nOffset;
+    rOffset = static_cast<sal_uInt16>(aLookup.nOffset);
     return true;
+}
+
+SfxViewUndoLookup UndoManager::LookupViewUndo(const SwView* pView) const
+{
+    if (!pView)
+        return SfxViewUndoLookup();
+    return SdrUndoManager::LookupViewUndo(pView->GetViewShellId(), &lcl_CanUndoOutOfOrder,
+                                          &lcl_IsUndoIndependent);
+}
+
+SfxViewUndoLookup UndoManager::LookupViewRedo(const SwView* pView) const
+{
+    if (!pView)
+        return SfxViewUndoLookup();
+    return SdrUndoManager::LookupViewRedo(pView->GetViewShellId());
 }
 
 bool
@@ -454,21 +442,26 @@ UndoManager::GetLastUndoInfo(
         return false;
     }
 
-    SfxUndoAction *const pAction( SdrUndoManager::GetUndoAction() );
+    SfxUndoAction * pAction( SdrUndoManager::GetUndoAction() );
 
     if (comphelper::COKit::isActive() && !m_bRepair)
     {
         // If another view created the undo action, prevent undoing it from this view.
         ViewShellId nViewShellId = pView ? pView->GetViewShellId() : m_pDocShell->GetView()->GetViewShellId();
-        // Unless we know that the other view's undo action is independent from us.
-        if (pAction->GetViewShellId() != nViewShellId
-            && !IsViewUndoActionIndependent(pView, o3tl::temporary(sal_uInt16())))
+        if (pAction->GetViewShellId() != nViewShellId)
         {
-            if (o_pId)
+            // Vulcan fork: unless this view's own action can be undone out of order; then
+            // report THAT action, which is the one this view's Undo will take back.
+            const SfxViewUndoLookup aLookup = LookupViewUndo(pView);
+            if (aLookup.eStatus != SfxViewUndoLookup::Status::Independent)
             {
-                 *o_pId = SwUndoId::CONFLICT;
+                if (o_pId)
+                {
+                     *o_pId = SwUndoId::CONFLICT;
+                }
+                return false;
             }
-            return false;
+            pAction = SdrUndoManager::GetUndoAction(aLookup.nOffset);
         }
     }
 
@@ -619,16 +612,7 @@ void UndoManager::AddUndoAction(std::unique_ptr<SfxUndoAction> pAction, bool bTr
         }
     }
     SdrUndoManager::AddUndoAction(std::move(pAction), bTryMerge);
-    if (m_pDocShell)
-    {
-        SfxViewFrame* pViewFrame = SfxViewFrame::GetFirst( m_pDocShell );
-        while ( pViewFrame )
-        {
-            pViewFrame->GetBindings().Invalidate( SID_UNDO );
-            pViewFrame->GetBindings().Invalidate( SID_REDO );
-            pViewFrame = SfxViewFrame::GetNext( *pViewFrame, m_pDocShell );
-        }
-    }
+    InvalidateUndoStateInAllViews();
 
     // if the undo nodes array is too large, delete some actions
     while (UNDO_ACTION_LIMIT < sal_Int32(GetUndoNodes().Count()))
@@ -743,7 +727,24 @@ bool UndoManager::impl_DoUndoRedo(UndoOrRedoType undoOrRedo, size_t nUndoOffset)
 
     pEditShell->HandleUndoRedoContext(context);
 
+    // Vulcan fork: one view's undo or redo changes what the OTHER views can undo too.
+    if (bRet && comphelper::COKit::isActive())
+        InvalidateUndoStateInAllViews();
+
     return bRet;
+}
+
+void UndoManager::InvalidateUndoStateInAllViews()
+{
+    if (!m_pDocShell)
+        return;
+    SfxViewFrame* pViewFrame = SfxViewFrame::GetFirst( m_pDocShell );
+    while ( pViewFrame )
+    {
+        pViewFrame->GetBindings().Invalidate( SID_UNDO );
+        pViewFrame->GetBindings().Invalidate( SID_REDO );
+        pViewFrame = SfxViewFrame::GetNext( *pViewFrame, m_pDocShell );
+    }
 }
 
 bool UndoManager::Undo() { return UndoWithOffset(0); }

@@ -2375,6 +2375,14 @@ ScTabViewShell::ScTabViewShell( SfxViewFrame& rViewFrame,
 ScTabViewShell::~ScTabViewShell()
 {
     bInDispose = true;
+
+    // Vulcan fork: a view that dies between Vulcan_BeginUndoBatch and its End
+    // (a mid-batch browser death) would leak an open list action on the
+    // DOCUMENT undo manager — which outlives this view and would then swallow
+    // every later undo action from every view. Close it while the doc shell
+    // is still reachable.
+    VulcanCloseUndoBatch();
+
     mChangesListener->stopListening();
     mChangesListener.clear();
 

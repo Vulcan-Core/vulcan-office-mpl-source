@@ -35,6 +35,7 @@
 #include <desktop/dllapi.h>
 
 class KitInteractionHandler;
+namespace comphelper { class SequenceAsHashMap; }
 
 namespace desktop {
 
@@ -322,6 +323,15 @@ namespace desktop {
     /// Helper function to convert JSON to a vector of PropertyValues.
     /// Public to be unit-test-able.
     DESKTOP_DLLPUBLIC std::vector<css::beans::PropertyValue> jsonToPropertyValuesVector(const char* pJSON);
+
+    /// Vulcan PDF canvas: add the pdf export FilterData a .uno:Save of a PDF
+    /// opened into Draw (rImportFilterName "draw_pdf_import") writes the file
+    /// with - form fields kept, images neither downsampled nor re-encoded
+    /// lossily, comments kept - for each key rFilterDataMap does not already
+    /// have. Any other import filter: returns false, the map is untouched.
+    /// Public to be unit-test-able.
+    DESKTOP_DLLPUBLIC bool setPdfSourceSaveFilterData(std::u16string_view rImportFilterName,
+                                                      comphelper::SequenceAsHashMap& rFilterDataMap);
 }
 
 /* vim:set shiftwidth=4 softtabstop=4 expandtab: */

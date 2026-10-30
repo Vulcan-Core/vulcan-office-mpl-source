@@ -747,6 +747,11 @@ bool ScTabViewShell::IsSignatureLineSigned()
     return pGraphic->isSignatureLineSigned();
 }
 
+bool ScTabViewShell::IsConditionalFastCall(const SfxRequest& rReq)
+{
+    return IsKitPerViewUndoRedo(rReq) || SfxShell::IsConditionalFastCall(rReq);
+}
+
 void ScTabViewShell::ExecuteUndo(SfxRequest& rReq)
 {
     SfxShell* pSh = GetViewData().GetDispatcher().GetShell(0);
@@ -779,40 +784,32 @@ void ScTabViewShell::ExecuteUndo(SfxRequest& rReq)
                     bRepair = static_cast<const SfxBoolItem*>(pItem)->GetValue();
 
                 sal_uInt16 nUndoOffset = 0;
-                if (comphelper::COKit::isActive() && !bRepair)
+                // The in-cell edit engine's undo manager is not a ScUndoManager, and its
+                // actions all belong to this view's own edit: nothing to arbitrate there.
+                ScUndoManager* pDocUndoManager = dynamic_cast<ScUndoManager*>(pSh->GetUndoManager());
+                if (comphelper::COKit::isActive() && !bRepair && pDocUndoManager)
                 {
-                    SfxUndoAction* pAction = nullptr;
+                    // Vulcan fork: per-view undo (ScUndoManager::LookupViewUndo). This view's
+                    // Undo takes back this view's own most recent change, out of order when no
+                    // later change by another view touches its cells; otherwise it does
+                    // nothing and answers why, as a JSON string -- never the numeric
+                    // SID_REPAIRPACKAGE value behind the stock "Conflict Undo/Redo with
+                    // multiple users" dialog. Redo is per view and in order only.
+                    // "Undo N" / "Redo N" is only ever in order, over this view's own
+                    // topmost actions: it never reaches another view's (ForCount).
+                    const SfxViewUndoLookup aLookup = (bIsUndo
+                        ? pDocUndoManager->LookupViewUndo(this)
+                        : pDocUndoManager->LookupViewRedo(this)).ForCount(nCount);
+                    if (!aLookup.CanDo())
+                    {
+                        if (aLookup.eStatus != SfxViewUndoLookup::Status::Empty)
+                            rReq.SetReturnValue(SfxStringItem(nSlot, SfxViewUndoLookupToJson(aLookup, !bIsUndo)));
+                        return;
+                    }
+                    // Execute the undo with an offset: don't undo the top action, but this
+                    // view's own earlier one, which the actions above it do not touch.
                     if (bIsUndo)
-                    {
-                        if (pUndoManager->GetUndoActionCount() != 0)
-                            pAction = pUndoManager->GetUndoAction();
-                    }
-                    else
-                    {
-                        if (pUndoManager->GetRedoActionCount() != 0)
-                            pAction = pUndoManager->GetRedoAction();
-                    }
-                    if (pAction)
-                    {
-                        // If another view created the undo action, prevent undoing it from this view.
-                        // Unless we know that the other view's undo action is independent from us.
-                        ViewShellId nViewShellId = GetViewShellId();
-                        if (pAction->GetViewShellId() != nViewShellId)
-                        {
-                            sal_uInt16 nOffset = 0;
-                            if (pUndoManager->IsViewUndoActionIndependent(this, nOffset))
-                            {
-                                // Execute the undo with an offset: don't undo the top action, but an
-                                // earlier one, since it's independent and that belongs to our view.
-                                nUndoOffset += nOffset;
-                            }
-                            else
-                            {
-                                rReq.SetReturnValue(SfxUInt32Item(SID_UNDO, static_cast<sal_uInt32>(SID_REPAIRPACKAGE)));
-                                return;
-                            }
-                        }
-                    }
+                        nUndoOffset = static_cast<sal_uInt16>(aLookup.nOffset);
                 }
 
                 // lock paint for more than one cell undo action (not for editing within a cell)
@@ -860,11 +857,70 @@ void ScTabViewShell::ExecuteUndo(SfxRequest& rReq)
                     pDocSh->UnlockPaint();
 
                 GetViewFrame().GetBindings().InvalidateAll(false);
+                // Vulcan fork: what the OTHER views can undo changed too.
+                if (comphelper::COKit::isActive())
+                    ScUndoManager::InvalidateUndoStateInAllViews();
             }
+            break;
+
+        // Vulcan fork: the Calc port of the Impress batch bracket
+        // (FuTransformDocumentStructure, sd/source/ui/view/drviews2.cxx). The
+        // agent bridge's multi-cell writes arrive as N separate uno commands
+        // (GoToCell + EnterString per cell), each recording its own undo
+        // action on the document undo manager — so "undo the AI's edit" was N
+        // steps deep, and a user keystroke typed AFTER the batch sat ABOVE
+        // those steps and was eaten first by a counted undo. Begin opens ONE
+        // list action tagged with the requesting view's id (the same tag the
+        // COKit view-ownership check in the SID_UNDO arm above reads), so the
+        // whole batch collapses into a single honest undo step this view
+        // owns. The DOCUMENT undo manager is deliberate: EnterString's undo
+        // actions land there, and GetShell(0)'s manager can be the edit
+        // shell's during an in-cell edit (see pUndoManager above).
+        //
+        // NEVER NEST. Unlike the Impress bracket, this one spans multiple
+        // incoming uno commands, so a leaked open list action would swallow
+        // every subsequent undo action — from every view — into a stale entry
+        // and corrupt undo grouping for the rest of the session. Hence: a
+        // second Begin closes the first instead of stacking, End without
+        // Begin is a no-op, and the view shell destructor closes a batch
+        // whose End never arrived (a mid-batch browser death).
+        case SID_VULCAN_BEGIN_UNDO_BATCH:
+            VulcanCloseUndoBatch();
+            if ( pDocSh )
+            {
+                OUString aComment;
+                if (const SfxStringItem* pComment = rReq.GetArg<SfxStringItem>(FN_PARAM_1))
+                    aComment = pComment->GetValue();
+                pDocSh->GetUndoManager()->EnterListAction(
+                    aComment, u""_ustr, 0, GetViewShellId());
+                mbVulcanUndoBatchOpen = true;
+            }
+            break;
+
+        case SID_VULCAN_END_UNDO_BATCH:
+            VulcanCloseUndoBatch();
             break;
 //      default:
 //          GetViewFrame().ExecuteSlot( rReq );
     }
+}
+
+void ScTabViewShell::VulcanCloseUndoBatch()
+{
+    // Vulcan fork: close the Vulcan_BeginUndoBatch list action, if one is
+    // open. Plain LeaveListAction is the variant the Impress precedent uses:
+    // it PRUNES the entry when the batch added no undo actions, so a batch
+    // that mutated nothing leaves no empty "step" behind. The IsInListAction
+    // check guards the reset hole — if something cleared the undo stack
+    // mid-batch, the list entry is already gone and LeaveListAction would be
+    // closing a list that does not exist.
+    if (!mbVulcanUndoBatchOpen)
+        return;
+    mbVulcanUndoBatchOpen = false;
+    ScDocShell* pDocSh = GetViewData().GetDocShell();
+    SfxUndoManager* pUndoManager = pDocSh ? pDocSh->GetUndoManager() : nullptr;
+    if (pUndoManager && pUndoManager->IsInListAction())
+        pUndoManager->LeaveListAction();
 }
 
 void ScTabViewShell::GetUndoState(SfxItemSet &rSet)
@@ -907,12 +963,18 @@ void ScTabViewShell::GetUndoState(SfxItemSet &rSet)
                 {
                     if (pScUndoManager->GetUndoActionCount())
                     {
-                        const SfxUndoAction* pAction = pScUndoManager->GetUndoAction();
                         SfxViewShell *pViewSh = GetViewShell();
-                        if (pViewSh && pAction->GetViewShellId() != pViewSh->GetViewShellId()
-                            && !pScUndoManager->IsViewUndoActionIndependent(this, o3tl::temporary(sal_uInt16())))
+                        if (pViewSh && comphelper::COKit::isActive())
                         {
-                            rSet.Put(SfxUInt32Item(SID_UNDO, static_cast<sal_uInt32>(SID_REPAIRPACKAGE)));
+                            // Vulcan fork: enabled exactly when THIS view has a change of its
+                            // own it can take back now, labelled with that change; otherwise
+                            // disabled. Never the SID_REPAIRPACKAGE "conflict" state.
+                            const SfxViewUndoLookup aLookup = pScUndoManager->LookupViewUndo(pViewSh);
+                            if (aLookup.CanDo())
+                                rSet.Put(SfxStringItem(SID_UNDO, SvtResId(STR_UNDO)
+                                    + pScUndoManager->GetUndoActionComment(aLookup.nOffset)));
+                            else
+                                rSet.DisableItem(SID_UNDO);
                         }
                         else
                         {
@@ -937,7 +999,8 @@ void ScTabViewShell::GetUndoState(SfxItemSet &rSet)
                         SfxViewShell *pViewSh = GetViewShell();
                         if (pViewSh && pAction->GetViewShellId() != pViewSh->GetViewShellId())
                         {
-                            rSet.Put(SfxUInt32Item(SID_REDO, static_cast<sal_uInt32>(SID_REPAIRPACKAGE)));
+                            // Vulcan fork: another view's redo is not this view's to redo.
+                            rSet.DisableItem(SID_REDO);
                         }
                         else
                         {

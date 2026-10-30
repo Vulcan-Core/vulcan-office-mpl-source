@@ -17,9 +17,18 @@
  *   the License at http://www.apache.org/licenses/LICENSE-2.0 .
  */
 
+#include <com/sun/star/beans/PropertyValue.hpp>
+#include <com/sun/star/beans/XPropertySet.hpp>
+#include <com/sun/star/chart2/XAnyDescriptionAccess.hpp>
 #include <com/sun/star/chart2/XChartDocument.hpp>
 #include <com/sun/star/chart2/data/XDataReceiver.hpp>
+#include <com/sun/star/frame/XModel.hpp>
+#include <com/sun/star/io/XInputStream.hpp>
 #include <com/sun/star/util/XNumberFormatsSupplier.hpp>
+#include <comphelper/diagnose_ex.hxx>
+#include <comphelper/propertyvalue.hxx>
+#include <comphelper/sequenceashashmap.hxx>
+#include <drawingml/chart/chartworkbook.hxx>
 #include <drawingml/chart/chartspaceconverter.hxx>
 #include <drawingml/chart/chartspacemodel.hxx>
 #include <drawingml/chart/stylemodel.hxx>
@@ -31,6 +40,9 @@
 #include <oox/helper/containerhelper.hxx>
 #include <oox/core/xmlfilterbase.hxx>
 #include <osl/diagnose.h>
+#include <rtl/ustrbuf.hxx>
+
+#include <utility>
 
 #include <oox/drawingml/chart/chartconverter.hxx>
 
@@ -197,6 +209,136 @@ void ChartColorStyleConverter::convertFromModel([[maybe_unused]] XmlFilterBase& 
     if (!rChartColorStyleModel.maComplexColors.empty()) {
         aColorStyles.addEntry(rChartColorStyleModel.maComplexColors,
                 rChartColorStyleModel.meMethod, rChartColorStyleModel.mnId);
+    }
+}
+
+// ===========
+// The workbook behind a PPTX chart's data (chartworkbook.hxx)
+// ===========
+namespace
+{
+constexpr OUString gaGrabBag = u"InteropGrabBag"_ustr;
+constexpr OUString gaWorkbooks = u"OOXChartWorkbooks"_ustr;
+
+/// The data a chart shows, as one string that changes when the data does: every value, and the
+/// category and series names with all their levels.
+OUString lclGetChartDataFingerprint(const Reference<XChartDocument>& rxChartDoc)
+{
+    if (!rxChartDoc.is() || !rxChartDoc->hasInternalDataProvider())
+        return OUString();
+    Reference<XAnyDescriptionAccess> xData(rxChartDoc->getDataProvider(), UNO_QUERY);
+    if (!xData.is())
+        return OUString();
+
+    OUStringBuffer aBuffer;
+    for (const Sequence<double>& rRow : xData->getData())
+    {
+        aBuffer.append("\n");
+        for (const double fValue : rRow)
+            aBuffer.append(OUString::number(fValue) + " ");
+    }
+    for (const Sequence<Sequence<OUString>>& rDescriptions :
+         { xData->getComplexRowDescriptions(), xData->getComplexColumnDescriptions() })
+    {
+        aBuffer.append("\n");
+        for (const Sequence<OUString>& rLevels : rDescriptions)
+        {
+            aBuffer.append("[");
+            for (const OUString& rText : rLevels)
+                aBuffer.append(OUString::number(rText.getLength()) + ":" + rText);
+            aBuffer.append("]");
+        }
+    }
+    return aBuffer.makeStringAndClear();
+}
+}
+
+void keepChartWorkbook(XmlFilterBase& rFilter, const OUString& rPath,
+                       const Reference<XChartDocument>& rxChartDoc)
+{
+    try
+    {
+        Reference<beans::XPropertySet> xDocProps(rFilter.getModel(), UNO_QUERY);
+        if (rPath.isEmpty() || !xDocProps.is()
+            || !xDocProps->getPropertySetInfo()->hasPropertyByName(gaGrabBag))
+            return;
+
+        comphelper::SequenceAsHashMap aGrabBag(xDocProps->getPropertyValue(gaGrabBag));
+        comphelper::SequenceAsHashMap aWorkbooks(aGrabBag.getUnpackedValueOrDefault(
+            gaWorkbooks, Sequence<beans::PropertyValue>()));
+        if (aWorkbooks.contains(rPath))
+            return;
+
+        Reference<css::io::XInputStream> xStream = rFilter.openInputStream(rPath);
+        Sequence<sal_Int8> aBytes;
+        if (!xStream.is() || xStream->readBytes(aBytes, SAL_MAX_INT32) <= 0)
+            return;
+        // The part's own content type, when the package stream reports it.
+        OUString aMediaType;
+        Reference<beans::XPropertySet> xStreamProps(xStream, UNO_QUERY);
+        if (xStreamProps.is())
+        {
+            try
+            {
+                xStreamProps->getPropertyValue(u"MediaType"_ustr) >>= aMediaType;
+            }
+            catch (const beans::UnknownPropertyException&)
+            {
+            }
+        }
+
+        aWorkbooks[rPath] <<= Sequence<beans::PropertyValue>{
+            comphelper::makePropertyValue(u"Workbook"_ustr, aBytes),
+            comphelper::makePropertyValue(u"MediaType"_ustr, aMediaType),
+            comphelper::makePropertyValue(u"Data"_ustr, lclGetChartDataFingerprint(rxChartDoc))
+        };
+        aGrabBag[gaWorkbooks] <<= aWorkbooks.getAsConstPropertyValueList();
+        xDocProps->setPropertyValue(gaGrabBag, Any(aGrabBag.getAsConstPropertyValueList()));
+    }
+    catch (const Exception&)
+    {
+        TOOLS_WARN_EXCEPTION("oox", "keepChartWorkbook: cannot keep " << rPath);
+    }
+}
+
+bool getUnchangedChartWorkbook(XmlFilterBase& rFilter, const OUString& rPath,
+                               const Reference<XChartDocument>& rxChartDoc,
+                               Sequence<sal_Int8>& rBytes, OUString& rMediaType)
+{
+    try
+    {
+        Reference<beans::XPropertySet> xDocProps(rFilter.getModel(), UNO_QUERY);
+        if (rPath.isEmpty() || !xDocProps.is()
+            || !xDocProps->getPropertySetInfo()->hasPropertyByName(gaGrabBag))
+            return false;
+
+        const comphelper::SequenceAsHashMap aGrabBag(xDocProps->getPropertyValue(gaGrabBag));
+        const comphelper::SequenceAsHashMap aWorkbooks(aGrabBag.getUnpackedValueOrDefault(
+            gaWorkbooks, Sequence<beans::PropertyValue>()));
+        const comphelper::SequenceAsHashMap aWorkbook(
+            aWorkbooks.getUnpackedValueOrDefault(rPath, Sequence<beans::PropertyValue>()));
+        const OUString aData = aWorkbook.getUnpackedValueOrDefault(u"Data"_ustr, OUString());
+        Sequence<sal_Int8> aBytes
+            = aWorkbook.getUnpackedValueOrDefault(u"Workbook"_ustr, Sequence<sal_Int8>());
+        if (aData.isEmpty() || !aBytes.hasElements()
+            || aData != lclGetChartDataFingerprint(rxChartDoc))
+            return false;
+
+        rBytes = std::move(aBytes);
+        rMediaType = aWorkbook.getUnpackedValueOrDefault(u"MediaType"_ustr, OUString());
+        // The part's type by its extension, as DocxExport::WriteEmbeddings guesses it.
+        if (rMediaType.isEmpty() && rPath.endsWithIgnoreAsciiCase(".xlsm"))
+            rMediaType = u"application/vnd.ms-excel.sheet.macroEnabled.12"_ustr;
+        else if (rMediaType.isEmpty() && rPath.endsWithIgnoreAsciiCase(".bin"))
+            rMediaType = u"application/vnd.openxmlformats-officedocument.oleObject"_ustr;
+        else if (rMediaType.isEmpty())
+            rMediaType = u"application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"_ustr;
+        return true;
+    }
+    catch (const Exception&)
+    {
+        TOOLS_WARN_EXCEPTION("oox", "getUnchangedChartWorkbook: cannot read " << rPath);
+        return false;
     }
 }
 

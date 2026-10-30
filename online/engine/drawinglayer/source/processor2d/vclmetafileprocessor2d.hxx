@@ -193,6 +193,10 @@ private:
 
     primitive2d::StructureTagPrimitive2D const* mpCurrentStructureTag = nullptr;
 
+    /// The name of the drawing object whose primitives are being processed
+    /// (ObjectInfoPrimitive2D): hidden-ink OCR lines are named "ocr:...".
+    OUString maCurrentObjectName;
+
 protected:
     /*  the local processor for BasePrimitive2D-Implementation based primitives,
         called from the common process()-implementation

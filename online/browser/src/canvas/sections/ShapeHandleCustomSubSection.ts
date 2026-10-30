@@ -21,11 +21,19 @@ class ShapeHandleCustomSubSection extends ShapeHandleSubSection {
 	}
 
 	onDraw(frameCount?: number, elapsedTime?: number): void {
+		if (VulcanImpressSelectEcho.suppressesSelectionChrome()) return;
+		// A live move drag displaces frame and content; stationary
+		// grip dots would trail the old position, so they stand down.
+		if (this.sectionProperties.parentHandlerSection?.isMoveDragLive?.()) return;
+		if (HelperLineStyles.handleStrokeStyle === null) HelperLineStyles.initiate();
+
 		const rtlShift = app.map._docLayer.isCalcRTL() ? this.size[0] : 0;
-		this.context.fillStyle = 'yellow';
-		this.context.strokeStyle = 'black';
+		// Adjustment handle: yellow like PowerPoint's, with the shared gray ring.
+		this.context.fillStyle = '#ffc83d';
+		this.context.strokeStyle = HelperLineStyles.handleStrokeStyle;
+		this.context.lineWidth = app.dpiScale;
 		this.context.beginPath();
-		this.context.arc(this.size[0] * 0.5 - rtlShift, this.size[1] * 0.5, this.size[0] * 0.5, 0, Math.PI * 2);
+		this.context.arc(this.size[0] * 0.5 - rtlShift, this.size[1] * 0.5, 4.5 * app.dpiScale, 0, Math.PI * 2);
 		this.context.closePath();
 		this.context.fill();
 		this.context.stroke();
@@ -37,6 +45,12 @@ class ShapeHandleCustomSubSection extends ShapeHandleSubSection {
 
 	onMouseUp(point: cool.SimplePoint, e: MouseEvent): void {
 		if (this.containerObject.isDraggingSomething()) {
+			if (this.sectionProperties.parentHandlerSection.consumeDragCancelled()) {
+				this.stopPropagating();
+				e.stopPropagation();
+				return;
+			}
+
 			const isRTL = app.map._docLayer.isCalcRTL();
 			const docX = isRTL ? this.position[0] - point.pX : this.position[0] + point.pX;
 			const parameters = {

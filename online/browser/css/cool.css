@@ -101,7 +101,7 @@ input, button {
 	pointer-events: none;
 }
 
-#insertgraphic, #insertmultimedia {
+#insertgraphic, #insertgraphiccamera, #insertmultimedia {
 	position: fixed;
 	top: -100em;
 }
@@ -501,6 +501,12 @@ input, button {
 
 #mobile-edit-button.impress.portrait {
 	bottom: 70px;
+}
+
+/* Read-only because the WOPI lock failed: still tappable (retries the lock),
+ * but visually disabled until the lock frees up. */
+#mobile-edit-button.lock-retry {
+	opacity: 0.5;
 }
 
 #mobile-edit-button-image {
@@ -1166,6 +1172,12 @@ input, button {
 	padding: 0px;
 }
 
+/* Vulcan fork (Excel parity): the formula usage tooltip emphasizes the
+   argument the caret currently sits in (see Control.FormulaUsagePopup). */
+#formulausagePopup .ui-treeview-cell-text-content .highlighted {
+	font-weight: 700;
+}
+
 .lokdialog.ui-dialog-content [Id$='Page']:not(.checkbutton) {
 	grid-column-gap: 24px;
 }
@@ -1369,9 +1381,14 @@ input, button {
 	/* Keep the box at least as tall as the logo so a short info column
 	   (e.g. only Version and Copyright) cannot clip the bottom of it. */
 	min-height: 82px;
+	background-image: url('images/vulcan-office-light.png');
 	background-repeat: no-repeat;
 	background-size: 82px;
 	background-position: right center;
+}
+
+[data-theme='dark'] #product-logo {
+	background-image: url('images/vulcan-office-dark.png');
 }
 #about-dialog-info-container {
 	align-items: center;

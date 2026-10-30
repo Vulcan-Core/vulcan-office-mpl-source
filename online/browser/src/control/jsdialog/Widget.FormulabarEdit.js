@@ -91,6 +91,69 @@ function _sendSelection(edit, builder, id) {
 	builder.callback('edit', 'textselection', {id: id}, selection, builder);
 }
 
+// R6-1 — resolve a tap/click to a character position in the text layer.
+//
+// The click path below used to trust document.getSelection(), which is a
+// MOUSE artifact: a desktop click plants a DOM caret in the contenteditable
+// before 'click' fires, but a phone tap does not — focus deliberately lives
+// in map._textInput so the soft keyboard stays attached to the hidden area,
+// and the b8 probe measured the result: a mid-strip tap KILLED the caret
+// (cursor span 0x0 at the origin) instead of placing it. The point APIs are
+// the same pair the selection-handle drags above already trust, and the
+// child walk is the same one _onSelectionHandleDragEnd performs: the text
+// layer is one span per character with <br> line breaks, so the walk IS the
+// text coordinate system.
+function _charPosFromPoint(textLayer, clientX, clientY) {
+	if (typeof clientX !== 'number' || typeof clientY !== 'number')
+		return null;
+	var node = null;
+	var offset = 0;
+	if (document.caretPositionFromPoint) {
+		var position = document.caretPositionFromPoint(clientX, clientY);
+		if (!position)
+			return null;
+		node = position.offsetNode;
+		offset = position.offset;
+	} else if (document.caretRangeFromPoint) {
+		var range = document.caretRangeFromPoint(clientX, clientY);
+		if (!range)
+			return null;
+		node = range.startContainer;
+		offset = range.startOffset;
+	} else {
+		return null;
+	}
+	if (!node)
+		return null;
+	if (node.nodeType === 3 /* Text */)
+		node = node.parentElement;
+	if (!node || textLayer === node || !textLayer.contains(node))
+		return null;
+
+	var charX = 0;
+	var charY = 0;
+	var found = false;
+	for (var i = 0; i < textLayer.children.length; i++) {
+		var child = textLayer.children[i];
+		if (child === node) {
+			found = true;
+			break;
+		}
+		if (child.tagName === 'BR') {
+			charX = 0;
+			charY++;
+		} else {
+			charX++;
+		}
+	}
+	if (!found)
+		return null;
+	// offset 1 inside a one-character span = the caret BEHIND the character
+	if (offset > 0 && node.tagName !== 'BR')
+		charX++;
+	return { x: charX, y: charY };
+}
+
 function _appendText(cursorLayer, text, style) {
 	var span = window.L.DomUtil.create('span', style);
 	span.innerText = text;
@@ -418,6 +481,14 @@ function _formulabarEditControl(parentContainer, data, builder) {
 		textLayer.textContent = '';
 		textLayer.appendChild(newTextLayer);
 
+		// G34 — colour the range references in the freshly built spans. This
+		// is a style.color write on nodes that already exist; it creates,
+		// moves and removes nothing, and it never touches focus (which lives
+		// in map._textInput on a phone so the soft keyboard stays attached).
+		// Inert off the phone chrome: paint() returns before reading a node.
+		if (window.VulcanFormulaRefColors)
+			window.VulcanFormulaRefColors.paint(textLayer);
+
 		var startX = parseInt(selection[0]);
 		var endX = parseInt(selection[1]);
 		var startY = parseInt(selection[2]);
@@ -454,7 +525,25 @@ function _formulabarEditControl(parentContainer, data, builder) {
 		}
 
 		builder.callback('edit', 'grab_focus', container, null, builder);
-		_sendSelection(textLayer, builder, container.id);
+
+		// A DOM selection INSIDE the layer is a real mouse placement (it
+		// also carries drags) and stays authoritative. Anything else — the
+		// phone tap case — resolves from the event point instead; see
+		// _charPosFromPoint for why the selection cannot be trusted there.
+		var domSelection = document.getSelection();
+		var selectionInLayer = !!(domSelection && domSelection.anchorNode &&
+			(textLayer === domSelection.anchorNode ||
+				textLayer.contains(domSelection.anchorNode)));
+		if (selectionInLayer) {
+			_sendSelection(textLayer, builder, container.id);
+		} else {
+			var tapPos = _charPosFromPoint(textLayer, event.clientX, event.clientY);
+			if (tapPos) {
+				builder.callback('edit', 'textselection', {id: container.id},
+					tapPos.x + ';' + tapPos.x + ';' + tapPos.y + ';' + tapPos.y,
+					builder);
+			}
+		}
 
 		builder.map.setWinId(0);
 		builder.map._textInput._emptyArea();

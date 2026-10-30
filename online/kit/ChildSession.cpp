@@ -33,6 +33,7 @@
 #include <common/Unit.hpp>
 #include <common/Uri.hpp>
 #include <common/Util.hpp>
+#include <common/VulcanUndoNotice.hpp>
 #include <common/base64.hpp>
 #include <kit/KitHelper.hpp>
 #include <kit/SlideCompressor.hpp>
@@ -466,28 +467,144 @@ bool ChildSession::_handleInput(const char *buffer, int length)
             LOG_TRC("Transformation JSON was not provided.");
             return false;
         }
+
+        std::string url;
+        getTokenString(tokens[1], "url", url);
+        const bool interactive = (url == "interactive");
+
+        // A frame wsd's ClientSession forwarded off a browser socket carries
+        // an appended `origin=client` token (R6-10 residual). Such a request
+        // must NOT enroll a broker response channel: the legacy
+        // `transformeddocumentstructure:` frame is consumed wsd-side (AIChat
+        // tryConsume, else the convert-to path) and can never reach the
+        // browser bridge's 'commandresult' wait — measured on build #9 as a
+        // 10s "commandresult timed out" with the document unchanged. With no
+        // channel, the UNO_COMMAND_RESULT router below falls through to the
+        // standard `unocommandresult:` envelope, which wsd forwards to the
+        // client. Scan for the exact appended token so a client smuggling its
+        // own `origin=` token cannot displace the marker wsd appends last.
+        bool clientOrigin = false;
+        for (std::size_t i = 1; i < tokens.size(); ++i)
+        {
+            if (tokens.equals(i, "origin=client"))
+            {
+                clientOrigin = true;
+                break;
+            }
+        }
+
+        // Special broker and AI transforms share the same UNO command with
+        // ordinary browser dispatches. Carry an opaque typed transport token
+        // beside DataJson so every asynchronous terminal result can be routed
+        // without changing the transform bytes or relying on FIFO ordering.
+        // Client-originated requests skip the channel — their result must
+        // ride the standard envelope — but keep the same validation and its
+        // attributable parseerror refusal.
+        std::string responseChannel;
+        if (interactive)
+        {
+            try
+            {
+                std::string transformQueryJSON;
+                URI::decode(encodedTransformQueryJSON, transformQueryJSON);
+                const size_t rootStart = transformQueryJSON.find_first_not_of(" \t\r\n");
+                if (rootStart == std::string::npos || transformQueryJSON[rootStart] != '{')
+                {
+                    sendTextFrameAndLogError(
+                        "error: cmd=transformdocumentstructure kind=parseerror");
+                    return false;
+                }
+
+                // Validate the complete input before allocating or tracking a
+                // channel. Parsing is validation-only: the original bytes,
+                // including repeated keys and their order, remain untouched.
+                Parser validationParser;
+                (void)validationParser.parse(transformQueryJSON);
+                encodedTransformQueryJSON.clear();
+                URI::encode(transformQueryJSON, "", encodedTransformQueryJSON);
+
+                if (!clientOrigin)
+                {
+                    do
+                    {
+                        responseChannel
+                            = "transformeddocumentstructure:" + Util::rng::getHexString(16);
+                    }
+                    while (_transformDocumentStructureBrokerChannels.contains(responseChannel));
+                }
+            }
+            catch (const std::exception& exc)
+            {
+                LOG_ERR("transformdocumentstructure: invalid transform JSON: " << exc.what());
+                sendTextFrameAndLogError(
+                    "error: cmd=transformdocumentstructure kind=parseerror");
+                return false;
+            }
+        }
+
         // Send encoded string, this way it survive until it arrive at core.
-        const std::string arguments = "{"
+        // The ResponseChannel argument and the channel bookkeeping key on the
+        // ALLOCATED channel, not bare `interactive`: a client-originated
+        // request is interactive but channel-less, and enrolling it would
+        // put its result back on the broker route wsd consumes.
+        std::string arguments = "{"
             "\"DataJson\":{"
                 "\"type\":\"string\","
                 "\"value\":\"" + encodedTransformQueryJSON + "\""
-            "}}";
+            "}";
+        if (!responseChannel.empty())
+        {
+            arguments += ",\"ResponseChannel\":{"
+                         "\"type\":\"string\","
+                         "\"value\":\"" + responseChannel + "\""
+                         "}";
+        }
+        arguments += "}";
 
+        // Viewing-posture lift (R6-10 execution half, measured on build #10):
+        // the phone opens Impress read-first, so the browser's Viewing/
+        // Editing toggle has set this session's core view read-only. Core's
+        // dispatch gate (SfxDispatcher::FindServer_,
+        // IsCommandAllowedInKitReadOnlyViewMode) cannot tell that POSTURE
+        // from real document permission and refuses the slot — the dispatch
+        // listener then reports the measured
+        // `success:false result:{type:void} wasModified:false` with the
+        // document untouched. This frame only reaches us wsd-authorized:
+        // ClientSession forwards it for WOPI-writable sessions ONLY
+        // (kind=readonly refusal), and the broker senders are wsd-internal —
+        // so lifting the posture here cannot widen what a view-only session
+        // can do. The raw `uno .uno:TransformDocumentStructure` lane does NOT
+        // pass through this branch and stays refused by core's gate. The
+        // dispatch is synchronous (unipoll, non-ASYNCHRON slot), so the
+        // restore after postUnoCommand cannot land before execution. A
+        // broker frame's session never receives setviewreadonly, so the lift
+        // no-ops there and broker behavior is byte-identical.
+        const bool liftPosture = _viewPostureReadOnly;
         try
         {
-            // For interactive sessions, request a notification so we get
-            // the real success/failure via LOK_CALLBACK_UNO_COMMAND_RESULT.
-            // For MCP/convert-to, the saveas flow returns the modified
-            // document, so no notification is needed.
-            std::string url;
-            getTokenString(tokens[1], "url", url);
-            bool interactive = (url == "interactive");
+            // For interactive sessions (client-originated included), request
+            // a notification so we get the real success/failure via
+            // LOK_CALLBACK_UNO_COMMAND_RESULT. For MCP/convert-to, the saveas
+            // flow returns the modified document, so no notification is
+            // needed.
+            if (!responseChannel.empty())
+                _transformDocumentStructureBrokerChannels.insert(responseChannel);
+            getLOKitDocument()->setView(_viewId);
+            if (liftPosture)
+                getLOKitDocument()->setViewReadOnly(_viewId, false);
             getLOKitDocument()->postUnoCommand(command.c_str(), arguments.c_str(), interactive);
+            if (liftPosture)
+                getLOKitDocument()->setViewReadOnly(_viewId, true);
         }
         catch (const std::exception& exc)
         {
+            if (liftPosture)
+                getLOKitDocument()->setViewReadOnly(_viewId, true);
+            if (!responseChannel.empty())
+                _transformDocumentStructureBrokerChannels.erase(responseChannel);
             LOG_ERR("transformdocumentstructure: postUnoCommand failed: " << exc.what());
             sendTextFrameAndLogError("error: cmd=transformdocumentstructure kind=parseerror");
+            return false;
         }
 
         LOG_TRC("Transformation JSON application was requested.");
@@ -969,6 +1086,12 @@ bool ChildSession::_handleInput(const char *buffer, int length)
                 getLOKitDocument()->setAllowChangeComments(_viewId, !readOnly);
                 getLOKitDocument()->setAllowManageRedlines(_viewId, !readOnly);
 
+                // Remember the posture: TransformDocumentStructure must lift
+                // it around its dispatch (see the transform branch), because
+                // core's read-only-view dispatch gate cannot tell this
+                // posture from real document permission.
+                _viewPostureReadOnly = readOnly;
+
                 LOG_DBG("setviewreadonly: viewId=" << _viewId
                         << " readOnly=" << readOnly);
             }
@@ -1290,6 +1413,67 @@ void insertUserNames(const std::map<int, UserInfo>& viewInfo, std::string& json)
     json = ss.str();
 }
 
+}
+
+bool ChildSession::rewriteVulcanUndoResult(Poco::JSON::Object::Ptr object,
+                                           std::string& payload)
+{
+    namespace UndoNotice = Vulcan::UndoNotice;
+
+    const Object::Ptr resultObj = object->getObject("result");
+    if (!resultObj)
+        return false;
+
+    const Poco::Dynamic::Var typeVar = resultObj->get("type");
+    const Poco::Dynamic::Var valueVar = resultObj->get("value");
+    if (valueVar.isEmpty())
+        return false;
+    const std::string type = typeVar.isEmpty() ? std::string() : typeVar.toString();
+    const std::string value = valueVar.toString();
+    const bool isRedo = object->get("commandName").toString() == ".uno:Redo";
+
+    UndoNotice::EngineAnswer answer;
+    if (type == "string")
+        answer = UndoNotice::parseEngineAnswer(value);
+    else if (UndoNotice::isLegacyConflictValue(value))
+    {
+        // An engine that still answers the numeric conflict value: the action in the way is
+        // the one on top of the stack.
+        getLOKitDocument()->setView(_viewId);
+        LOKitHelper::ScopedString stack(
+            getLOKitDocument()->getCommandValues(isRedo ? ".uno:Redo" : ".uno:Undo"));
+        answer.valid = true;
+        answer.status = "blocked";
+        answer.command = isRedo ? "redo" : "undo";
+        answer.otherViewId = UndoNotice::topActionViewId(stack.get() ? stack.get() : "");
+    }
+    if (!answer.valid)
+        return false;
+
+    std::map<int, std::string> userIdByView;
+    for (const auto& it : _docManager->getViewInfo())
+        userIdByView[it.first] = it.second.getUserId();
+    const std::string blockedBy = UndoNotice::classifyBlocker(answer.otherViewId, _viewId, userIdByView);
+
+    try
+    {
+        Parser parser;
+        object->set("result", parser.parse(UndoNotice::buildBrowserResult(answer, blockedBy)));
+        // Nothing was undone.
+        object->set("success", false);
+        std::ostringstream oss;
+        object->stringify(oss);
+        payload = oss.str();
+    }
+    catch (const std::exception& ex)
+    {
+        LOG_WRN("Could not rewrite the undo answer: " << ex.what());
+        return false;
+    }
+
+    LOG_DBG("Per-view " << answer.command << " refused (" << answer.status << ", blocked by "
+                        << blockedBy << ')');
+    return true;
 }
 
 bool ChildSession::getCommandValues(const StringVector& tokens)
@@ -2501,14 +2685,35 @@ bool ChildSession::unoCommand(const StringVector& tokens)
 
     SigUtil::addActivity(getId(), formatUnoCommandInfo(tokens[1]));
 
+    // Vulcan: an exact trailing "notify=1" token asks for the
+    // KIT_CALLBACK_UNO_COMMAND_RESULT ack of a command that is otherwise
+    // dispatched silently (e.g. .uno:EnterString, .uno:ExecuteSearch), so an
+    // agent driving the document can tell when the command really finished
+    // instead of guessing. The flag is stripped from the arguments; without it
+    // both the arguments and the notify decision below are the upstream ones,
+    // and UNO argument strings are JSON, so they can never end in this token.
+    std::size_t lastArgToken = std::string::npos;
+    bool notifyRequested = false;
+    if (tokens.size() > 2 && tokens.equals(tokens.size() - 1, "notify=1"))
+    {
+        notifyRequested = true;
+        lastArgToken = tokens.size() - 2;
+    }
+
     // we need to get KIT_CALLBACK_UNO_COMMAND_RESULT callback when saving
-    const bool notify = (tokens.equals(1, ".uno:Save") ||
+    const bool notify = (notifyRequested ||
+                          tokens.equals(1, ".uno:Save") ||
                           tokens.equals(1, ".uno:Undo") ||
                           tokens.equals(1, ".uno:Redo") ||
                           tokens.equals(1, ".uno:Cut") ||
                           tokens.equals(1, ".uno:Copy") ||
                           tokens.equals(1, ".uno:CopySlide") ||
                           tokens.equals(1, ".uno:OpenHyperlink") ||
+                          tokens.equals(1, ".uno:TransformDocumentStructure") ||
+                          // Vulcan: the applied formatter key is this command's
+                          // result, and the Calc bridge sends it through
+                          // map.sendUnoCommand, which cannot append notify=1.
+                          tokens.equals(1, ".uno:Vulcan_NumberFormatCode") ||
                           tokens.startsWith(1, "vnd.sun.star.script:") ||
                           // The in-process apps (e.g. coda-qt) dismiss their paste
                           // progress UI on this result; browser online neither
@@ -2517,7 +2722,7 @@ bool ChildSession::unoCommand(const StringVector& tokens)
                            (tokens.equals(1, ".uno:Paste") ||
                             tokens.equals(1, ".uno:PasteSpecial"))));
 
-    const std::string saveArgs = tokens.substrFromToken(2);
+    const std::string saveArgs = tokens.substrFromToken(2, lastArgToken);
     LOG_TRC("uno command " << tokens[1] << " " << saveArgs << " notify: " << notify);
 
     // check that internal UNO commands don't make it to the core
@@ -2535,7 +2740,26 @@ bool ChildSession::unoCommand(const StringVector& tokens)
         return true;
     }
 
+    // Viewing-posture lift for the save verb (R6-10 persistence half,
+    // measured on build #11): the posture-lifted transform marks the
+    // document modified and wsd schedules the save — but the phone's view
+    // is posture-read-only again when that save arrives, and desktop's
+    // isCommandAllowed() drops .uno:Save for a Kit read-only current view
+    // SILENTLY (no dispatch, no unocommandresult, no PutFile; the edit
+    // evaporates on close). .uno:Save reaches this method only through the
+    // `save` frame arm (foreground and the bgsave fork's child) — the raw
+    // `uno .uno:Save` client lane is refused above — so the lift is
+    // reachable only for wsd-initiated saves, and it keys on the TRACKED
+    // posture, which wsd stamps only onto WOPI-writable sessions. The
+    // dispatch is synchronous despite SID_SAVEDOC's Asynchron flag (the
+    // attached result listener forces SfxCallMode::SYNCHRON), so the
+    // restore cannot land before the save executes.
+    const bool liftPosture = _viewPostureReadOnly && tokens.equals(1, ".uno:Save");
+    if (liftPosture)
+        getLOKitDocument()->setViewReadOnly(_viewId, false);
     getLOKitDocument()->postUnoCommand(tokens[1].c_str(), saveArgs.c_str(), notify);
+    if (liftPosture)
+        getLOKitDocument()->setViewReadOnly(_viewId, true);
     return true;
 }
 
@@ -4046,11 +4270,42 @@ void ChildSession::loKitCallback(const int type, const std::string& payload)
                 bool bSuccess = !success.isEmpty() && success.toString() == "true";
                 resultJson = "{\"success\":" + std::string(bSuccess ? "true" : "false") + "}";
             }
-            sendTextFrame("transformeddocumentstructure: " + resultJson);
-            break;
+
+            // Only the special broker/AI route gets the legacy transformed-
+            // document frame. Ordinary browser UNO dispatches need the normal
+            // unocommandresult envelope (including its typed return value).
+            std::string responseChannel;
+            JsonUtil::findJSONValue(object, "responseChannel", responseChannel);
+
+            if (!responseChannel.empty()
+                && _transformDocumentStructureBrokerChannels.erase(responseChannel) > 0)
+            {
+                // The marker is transport-private; preserve the historical
+                // broker result shape consumed by AI and convert-to clients.
+                Object::Ptr transformResult;
+                if (JsonUtil::parseJSON(resultJson, transformResult)
+                    && transformResult->has("responseChannel"))
+                {
+                    transformResult->remove("responseChannel");
+                    std::ostringstream sanitizedResult;
+                    transformResult->stringify(sanitizedResult);
+                    resultJson = sanitizedResult.str();
+                }
+                sendTextFrame("transformeddocumentstructure: " + resultJson);
+                break;
+            }
         }
 
-        const std::string saveMessage = "unocommandresult: " + payload;
+        // Vulcan: per-view undo. A refused undo/redo says who is in the way (the AI or a
+        // person) instead of the numeric conflict value behind the stock dialog.
+        std::string resultPayload = payload;
+        if (!commandName.isEmpty()
+            && (commandName.toString() == ".uno:Undo" || commandName.toString() == ".uno:Redo"))
+        {
+            rewriteVulcanUndoResult(object, resultPayload);
+        }
+
+        const std::string saveMessage = "unocommandresult: " + resultPayload;
         sendTextFrame(saveMessage);
         if (saveCommand)
             _docManager->handleSaveMessage(saveMessage);

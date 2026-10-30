@@ -38,6 +38,8 @@
 #include <svl/intitem.hxx>
 #include <svl/srchitem.hxx>
 #include <svx/svxids.hrc>
+#include <svx/sdtagitm.hxx>
+#include <svx/sdtmfitm.hxx>
 #include <svx/svdoashp.hxx>
 #include <svx/svdorect.hxx>
 #include <svx/svdhdl.hxx>
@@ -46,6 +48,8 @@
 #include <svx/xlineit0.hxx>
 #include <svx/xfillit0.hxx>
 #include <svx/xflclit.hxx>
+#include <svx/xlnclit.hxx>
+#include <editeng/colritem.hxx>
 #include <svx/xflgrit.hxx>
 #include <svx/xlndsit.hxx>
 #include <SlideSorterViewShell.hxx>
@@ -68,6 +72,7 @@
 #include <drawdoc.hxx>
 #include <DrawDocShell.hxx>
 #include <ViewShell.hxx>
+#include <DrawViewShell.hxx>
 #include <app.hrc>
 #include <sdpage.hxx>
 #include <unomodel.hxx>
@@ -79,6 +84,42 @@
 #include <editeng/outlobj.hxx>
 #include <sdmod.hxx>
 #include <svx/svdotext.hxx>
+#include <svx/svdogrp.hxx>
+#include <svx/svdopath.hxx>
+#include <comphelper/base64.hxx>
+#include <boost/property_tree/json_parser.hpp>
+#include <boost/property_tree/ptree.hpp>
+#include <sstream>
+#include <svx/svdograf.hxx>
+#include <svx/svdouno.hxx>
+#include <com/sun/star/form/FormComponentType.hpp>
+#include <com/sun/star/frame/XStorable.hpp>
+#include <unotools/tempfile.hxx>
+#include <vcl/filter/PDFiumLibrary.hxx>
+#include <vcl/gfxlink.hxx>
+#include <vcl/graphicfilter.hxx>
+#include <tools/stream.hxx>
+#include <vcl/pdf/PDFAnnotationSubType.hxx>
+#include <vcl/pdf/PDFFormFieldType.hxx>
+#include <functional>
+#include <map>
+#include <string_view>
+#include <svx/svdpagv.hxx>
+#include <svx/svdmark.hxx>
+#include <svx/vulcanprovenance.hxx>
+#include <VulcanHiddenInk.hxx>
+#include <View.hxx>
+#include <editeng/editobj.hxx>
+#include <editeng/outliner.hxx>
+#include <vcl/BitmapReadAccess.hxx>
+#include <vcl/BitmapWriteAccess.hxx>
+#include <vcl/pdf/PDFTextRenderMode.hxx>
+#include <vcl/pdf/PDFPageObjectType.hxx>
+#include <editeng/udlnitem.hxx>
+#include <sfx2/kit/helper.hxx>
+#include <svx/sdrhittesthelper.hxx>
+#include <basegfx/vector/b2dvector.hxx>
+#include <Window.hxx>
 
 using namespace ::com::sun::star;
 
@@ -319,6 +360,70 @@ CPPUNIT_TEST_FIXTURE(SdUiImpressTest, testDocumentStructureExtractSlideText)
     }
 }
 
+CPPUNIT_TEST_FIXTURE(SdUiImpressTest, testDocumentStructureExtractSlideTextInGroups)
+{
+    // a built PDF page puts nearly all of its text inside groups,
+    // and compose_archetype groups the boxes it inserts. read_slide and
+    // find_replace's read-back use this text filter.
+    createSdImpressDoc();
+
+    comphelper::COKit::setActive(true);
+    comphelper::ScopeGuard aKitGuard([] { comphelper::COKit::setActive(false); });
+
+    auto xDesktop = frame::Desktop::create(comphelper::getProcessComponentContext());
+    auto pImpressDocument = static_cast<SdXImpressDocument*>(mxComponent.get());
+    auto pFrame = pImpressDocument->GetDocShell()->GetFrame();
+    CPPUNIT_ASSERT(pFrame);
+    xDesktop->setActiveFrame(pFrame->GetFrame().GetFrameInterface());
+
+    SdPage* pPage = pImpressDocument->GetDoc()->GetSdPage(0, PageKind::Standard);
+    const size_t nObjCountBefore = pPage->GetObjCount();
+
+    auto* pDrawViewShell
+        = dynamic_cast<sd::DrawViewShell*>(pImpressDocument->GetDocShell()->GetViewShell());
+    CPPUNIT_ASSERT(pDrawViewShell);
+
+    // Three boxes: the first two grouped as a card, and the card grouped
+    // again with the third, so the card's text sits two levels down.
+    static constexpr OUString aJson = uR"json(
+{
+    "Transforms": {
+        "SlideCommands": [
+            {"InsertTextBox.0": "2000,2000|Grouped heading"},
+            {"InsertTextBox.0": "2000,4000|Grouped intro sentence"},
+            {"InsertTextBox.0": "2000,8000|Caption beside the card"},
+            {"JumpToSlide": "0"},
+            {"UnmarkAll": ""},
+            {"MarkCreated": "0,1"},
+            {"UnoCommand": ".uno:FormatGroup"},
+            {"UnmarkAll": ""},
+            {"MarkCreated": "0,2"},
+            {"UnoCommand": ".uno:FormatGroup"},
+            {"UnmarkAll": ""}
+        ]
+    }
+}
+)json"_ustr;
+
+    SfxRequest aRequest(*pDrawViewShell->GetViewFrame(), FN_TRANSFORM_DOCUMENT_STRUCTURE);
+    aRequest.AppendItem(SfxStringItem(FN_PARAM_1, aJson));
+    pDrawViewShell->ExecuteSlot(aRequest);
+
+    CPPUNIT_ASSERT_EQUAL(nObjCountBefore + 1, pPage->GetObjCount());
+    SdrObject* pTop = pPage->GetObj(nObjCountBefore);
+    CPPUNIT_ASSERT(pTop->IsGroupObject());
+    CPPUNIT_ASSERT_EQUAL(size_t(2), pTop->GetSubList()->GetObjCount());
+    CPPUNIT_ASSERT(pTop->GetSubList()->GetObj(0)->IsGroupObject());
+
+    tools::JsonWriter aJsonWriter;
+    pImpressDocument->getCommandValues(aJsonWriter, ".uno:ExtractDocumentStructure?filter=text");
+    const OString aText = aJsonWriter.finishAndGetAsOString();
+
+    CPPUNIT_ASSERT(aText.indexOf("Grouped heading") >= 0);
+    CPPUNIT_ASSERT(aText.indexOf("Grouped intro sentence") >= 0);
+    CPPUNIT_ASSERT(aText.indexOf("Caption beside the card") >= 0);
+}
+
 CPPUNIT_TEST_FIXTURE(SdUiImpressTest, testDocumentStructureUnoCommand)
 {
     // 1. Create a document;
@@ -355,6 +460,1653 @@ CPPUNIT_TEST_FIXTURE(SdUiImpressTest, testDocumentStructureUnoCommand)
 
     CPPUNIT_ASSERT_EQUAL(sal_Int32(0),
                          pImpressDocument->getSdDrawPages()->getDrawPageByIndex(0)->getCount());
+}
+
+CPPUNIT_TEST_FIXTURE(SdUiImpressTest, testDocumentStructureArrangeGeometry)
+{
+    // The arrange-verb contract: geometry extracted with geometry=1 is in
+    // the margin-inclusive 1/100 mm frame the in-document
+    // '.uno:TransformDialog' dispatch expects (read -> write -> read is an
+    // identity even with nonzero page borders), an UnmarkAll command
+    // isolates a batch from the session's live selection, and AlignOnPage
+    // is accepted by the kit uno-command allowlist.
+
+    createSdImpressDoc();
+
+    comphelper::COKit::setActive(true);
+    comphelper::ScopeGuard aKitGuard([] { comphelper::COKit::setActive(false); });
+
+    // Let comphelper::dispatchCommand find the frame.
+    auto xDesktop = frame::Desktop::create(comphelper::getProcessComponentContext());
+    auto pImpressDocument = static_cast<SdXImpressDocument*>(mxComponent.get());
+    auto pFrame = pImpressDocument->GetDocShell()->GetFrame();
+    CPPUNIT_ASSERT(pFrame);
+    xDesktop->setActiveFrame(pFrame->GetFrame().GetFrameInterface());
+
+    SdPage* pPage = pImpressDocument->GetDoc()->GetSdPage(0, PageKind::Standard);
+    CPPUNIT_ASSERT(pPage->GetObjCount() >= 2);
+    pPage->SetBorder(1000, 800, 1100, 900);
+
+    SdrObject* pObject0 = pPage->GetObj(0);
+    SdrObject* pObject1 = pPage->GetObj(1);
+    const tools::Rectangle aRect0 = pObject0->GetLogicRect();
+    const tools::Rectangle aRect1 = pObject1->GetLogicRect();
+
+    // The extract reports positions shifted by the page borders.
+    const sal_Int64 nExtractedX = aRect0.Left() + pPage->GetLeftBorder();
+    const sal_Int64 nExtractedY = aRect0.Top() + pPage->GetUpperBorder();
+    {
+        tools::JsonWriter aJsonWriter;
+        pImpressDocument->getCommandValues(
+            aJsonWriter, ".uno:ExtractDocumentStructure?filter=slides&geometry=1");
+        const OString aJson = aJsonWriter.finishAndGetAsOString();
+        CPPUNIT_ASSERT(aJson.indexOf(Concat2View("\"PosX\": " + OString::number(nExtractedX))) >= 0);
+        CPPUNIT_ASSERT(aJson.indexOf(Concat2View("\"PosY\": " + OString::number(nExtractedY))) >= 0);
+        CPPUNIT_ASSERT(aJson.indexOf(Concat2View("\"Width\": " + OString::number(aRect0.GetWidth()))) >= 0);
+        CPPUNIT_ASSERT(aJson.indexOf("\"RotateAngle\": 0") >= 0);
+    }
+
+    // Contaminate the selection the way a live user would.
+    dispatchCommand(mxComponent, u".uno:TransformDocumentStructure"_ustr,
+                    { comphelper::makePropertyValue(
+                        u"DataJson"_ustr,
+                        u"{ \"Transforms\": { \"SlideCommands\": ["
+                        u"{\"JumpToSlide\": 0}, {\"MarkObject\": 1}]}}"_ustr) });
+
+    // Write back the extracted position plus a delta, through the batch a
+    // Vulcan_SetShapeGeometry verb produces.
+    const OUString aMoveJson
+        = u"{ \"Transforms\": { \"SlideCommands\": ["
+          u"{\"JumpToSlide\": 0},"
+          u"{\"UnmarkAll\": true},"
+          u"{\"MarkObject\": 0},"
+          u"{\"UnoCommand\": \".uno:TransformDialog {"
+          u"\\\"TransformPosX\\\":{\\\"type\\\":\\\"long\\\",\\\"value\\\":"
+          + OUString::number(nExtractedX + 700)
+          + u"},"
+            u"\\\"TransformPosY\\\":{\\\"type\\\":\\\"long\\\",\\\"value\\\":"
+          + OUString::number(nExtractedY + 400) + u"}}\"}]}}";
+    dispatchCommand(mxComponent, u".uno:TransformDocumentStructure"_ustr,
+                    { comphelper::makePropertyValue(u"DataJson"_ustr, aMoveJson) });
+
+    // Identity: the model moved by exactly the delta (no unit conversion,
+    // no margin-frame mismatch)...
+    CPPUNIT_ASSERT_EQUAL(aRect0.Left() + 700, pObject0->GetLogicRect().Left());
+    CPPUNIT_ASSERT_EQUAL(aRect0.Top() + 400, pObject0->GetLogicRect().Top());
+    // ...and the contaminating selection did not ride along.
+    CPPUNIT_ASSERT_EQUAL(aRect1, pObject1->GetLogicRect());
+
+    // AlignOnPage is on the kit allowlist: aligning both objects makes them
+    // concentric (a rejected command would leave the centers apart).
+    dispatchCommand(mxComponent, u".uno:TransformDocumentStructure"_ustr,
+                    { comphelper::makePropertyValue(
+                        u"DataJson"_ustr,
+                        u"{ \"Transforms\": { \"SlideCommands\": ["
+                        u"{\"JumpToSlide\": 0}, {\"UnmarkAll\": true},"
+                        u"{\"MarkObject\": 0}, {\"MarkObject\": 1},"
+                        u"{\"UnoCommand\": \".uno:AlignOnPage\"}]}}"_ustr) });
+    CPPUNIT_ASSERT(pObject0->GetLogicRect().Center()
+                   == pObject1->GetLogicRect().Center());
+}
+
+CPPUNIT_TEST_FIXTURE(SdUiImpressTest, testUnmarkAllEndsTextEdit)
+{
+    // The browser's owned press gesture re-aims the selection with an
+    // UnmarkAll + MarkObject batch while the caret may be in another box
+    // ("type here, grab that"). UnmarkAll must end the live text edit
+    // first — the way a click away does — or the edit keeps running on an
+    // object the batch just unmarked, a state no user gesture can reach.
+    createSdImpressDoc();
+
+    comphelper::COKit::setActive(true);
+    comphelper::ScopeGuard aKitGuard([] { comphelper::COKit::setActive(false); });
+
+    // Let comphelper::dispatchCommand find the frame.
+    auto xDesktop = frame::Desktop::create(comphelper::getProcessComponentContext());
+    auto pImpressDocument = static_cast<SdXImpressDocument*>(mxComponent.get());
+    auto pFrame = pImpressDocument->GetDocShell()->GetFrame();
+    CPPUNIT_ASSERT(pFrame);
+    xDesktop->setActiveFrame(pFrame->GetFrame().GetFrameInterface());
+
+    SdPage* pPage = pImpressDocument->GetDoc()->GetSdPage(0, PageKind::Standard);
+    CPPUNIT_ASSERT(pPage->GetObjCount() >= 2);
+    SdrObject* pObject0 = pPage->GetObj(0);
+    SdrObject* pObject1 = pPage->GetObj(1);
+
+    sd::ViewShell* pViewShell = pImpressDocument->GetDocShell()->GetViewShell();
+    CPPUNIT_ASSERT(pViewShell);
+    SdrView* pView = pViewShell->GetView();
+    CPPUNIT_ASSERT(pView);
+
+    // The caret is in the first box.
+    pView->UnmarkAll();
+    pView->MarkObj(pObject0, pView->GetSdrPageView());
+    pView->SdrBeginTextEdit(pObject0);
+    CPPUNIT_ASSERT(pView->IsTextEdit());
+
+    // The gesture's press-time batch: select the OTHER object by ordinal.
+    dispatchCommand(mxComponent, u".uno:TransformDocumentStructure"_ustr,
+                    { comphelper::makePropertyValue(
+                        u"DataJson"_ustr,
+                        u"{ \"Transforms\": { \"SlideCommands\": ["
+                        u"{\"JumpToSlide\": 0}, {\"UnmarkAll\": true},"
+                        u"{\"MarkObject\": 1}]}}"_ustr) });
+
+    // The edit ended and exactly the other object is marked.
+    CPPUNIT_ASSERT(!pView->IsTextEdit());
+    const SdrMarkList& rMarkList = pView->GetMarkedObjectList();
+    CPPUNIT_ASSERT_EQUAL(size_t(1), rMarkList.GetMarkCount());
+    CPPUNIT_ASSERT(pObject1 == rMarkList.GetMark(0)->GetMarkedSdrObj());
+}
+
+CPPUNIT_TEST_FIXTURE(SdUiImpressTest, testGroupMembersInPayloadAndMarkObjectPath)
+{
+    // A group's payload primitives are written member by member under
+    // "objectChild" nodes (ordinal within the group), and MarkObjectPath
+    // marks a member by "<page ordinal>/<member ordinal>" — what the
+    // browser's owned press inside an entered group needs to echo and to
+    // select one member.
+    createSdImpressDoc();
+
+    comphelper::COKit::setActive(true);
+    comphelper::ScopeGuard aKitGuard([] { comphelper::COKit::setActive(false); });
+
+    auto xDesktop = frame::Desktop::create(comphelper::getProcessComponentContext());
+    auto pImpressDocument = static_cast<SdXImpressDocument*>(mxComponent.get());
+    auto pFrame = pImpressDocument->GetDocShell()->GetFrame();
+    CPPUNIT_ASSERT(pFrame);
+    xDesktop->setActiveFrame(pFrame->GetFrame().GetFrameInterface());
+
+    SdPage* pPage = pImpressDocument->GetDoc()->GetSdPage(0, PageKind::Standard);
+    CPPUNIT_ASSERT(pPage->GetObjCount() >= 2);
+
+    // Group the first two objects.
+    dispatchCommand(mxComponent, u".uno:TransformDocumentStructure"_ustr,
+                    { comphelper::makePropertyValue(
+                        u"DataJson"_ustr,
+                        u"{ \"Transforms\": { \"SlideCommands\": ["
+                        u"{\"JumpToSlide\": 0}, {\"UnmarkAll\": true},"
+                        u"{\"MarkObject\": 0}, {\"MarkObject\": 1},"
+                        u"{\"UnoCommand\": \".uno:FormatGroup\"}]}}"_ustr) });
+
+    SdrObjGroup* pGroup = nullptr;
+    size_t nGroupOrd = 0;
+    for (size_t i = 0; i < pPage->GetObjCount() && !pGroup; ++i)
+    {
+        pGroup = dynamic_cast<SdrObjGroup*>(pPage->GetObj(i));
+        nGroupOrd = i;
+    }
+    CPPUNIT_ASSERT(pGroup);
+    CPPUNIT_ASSERT_EQUAL(size_t(2), pGroup->GetSubList()->GetObjCount());
+
+    // The payload carries the members under objectChild nodes.
+    {
+        tools::JsonWriter aJsonWriter;
+        pImpressDocument->getCommandValues(aJsonWriter, ".uno:VectorPrimitives");
+        const OString aJson = aJsonWriter.finishAndGetAsOString();
+        CPPUNIT_ASSERT(aJson.indexOf("\"objectChild\"") >= 0);
+    }
+
+    // Inside the group, MarkObjectPath marks exactly the second member.
+    sd::ViewShell* pViewShell = pImpressDocument->GetDocShell()->GetViewShell();
+    CPPUNIT_ASSERT(pViewShell);
+    SdrView* pView = pViewShell->GetView();
+    CPPUNIT_ASSERT(pView);
+    pView->UnmarkAll();
+    CPPUNIT_ASSERT(pView->GetSdrPageView()->EnterGroup(pGroup));
+    const OUString aMarkJson = u"{ \"Transforms\": { \"SlideCommands\": ["
+                               u"{\"JumpToSlide\": 0}, {\"UnmarkAll\": true},"
+                               u"{\"MarkObjectPath\": \""
+                               + OUString::number(static_cast<sal_Int32>(nGroupOrd)) + u"/1\"}]}}";
+    dispatchCommand(mxComponent, u".uno:TransformDocumentStructure"_ustr,
+                    { comphelper::makePropertyValue(u"DataJson"_ustr, aMarkJson) });
+    const SdrMarkList& rMarkList = pView->GetMarkedObjectList();
+    CPPUNIT_ASSERT_EQUAL(size_t(1), rMarkList.GetMarkCount());
+    CPPUNIT_ASSERT(pGroup->GetSubList()->GetObj(1) == rMarkList.GetMark(0)->GetMarkedSdrObj());
+}
+
+CPPUNIT_TEST_FIXTURE(SdUiImpressTest, testInsertTextBoxTransform)
+{
+    // The InsertTextBox contract (Slide Studio W1): value
+    // "<x>,<y>[,<width>]|<text>" in the margin-inclusive 1/100 mm frame; a
+    // width-less box hugs its text on both axes, a width-ful box keeps the
+    // width and settles its height, \n makes paragraphs, the created
+    // ordinals come back in the result JSON, and ONE undo removes the whole
+    // batch.
+    createSdImpressDoc();
+
+    comphelper::COKit::setActive(true);
+    comphelper::ScopeGuard aKitGuard([] { comphelper::COKit::setActive(false); });
+
+    // Let comphelper::dispatchCommand find the frame.
+    auto xDesktop = frame::Desktop::create(comphelper::getProcessComponentContext());
+    auto pImpressDocument = static_cast<SdXImpressDocument*>(mxComponent.get());
+    auto pFrame = pImpressDocument->GetDocShell()->GetFrame();
+    CPPUNIT_ASSERT(pFrame);
+    xDesktop->setActiveFrame(pFrame->GetFrame().GetFrameInterface());
+
+    SdPage* pPage = pImpressDocument->GetDoc()->GetSdPage(0, PageKind::Standard);
+    pPage->SetBorder(1000, 800, 1100, 900);
+    const size_t nObjCountBefore = pPage->GetObjCount();
+
+    auto* pDrawViewShell
+        = dynamic_cast<sd::DrawViewShell*>(pImpressDocument->GetDocShell()->GetViewShell());
+    CPPUNIT_ASSERT(pDrawViewShell);
+
+    static constexpr OUString aJson = uR"json(
+{
+    "Transforms": {
+        "SlideCommands": [
+            {"InsertTextBox.0": "4000,3000|Hugging box"},
+            {"InsertTextBox.0": "9000,5000,6000|Wrapped box\nSecond paragraph"}
+        ]
+    }
+}
+)json"_ustr;
+
+    SfxRequest aRequest(*pDrawViewShell->GetViewFrame(), FN_TRANSFORM_DOCUMENT_STRUCTURE);
+    aRequest.AppendItem(SfxStringItem(FN_PARAM_1, aJson));
+    pDrawViewShell->ExecuteSlot(aRequest);
+
+    // The batch reports the created objects as slide + ordinal.
+    const auto* pResult
+        = dynamic_cast<const SfxStringItem*>(aRequest.GetReturnValue().getItem());
+    CPPUNIT_ASSERT(pResult);
+    const OUString aResult = pResult->GetValue();
+    CPPUNIT_ASSERT(aResult.indexOf(u"\"createdObjects\"") >= 0);
+    CPPUNIT_ASSERT(aResult.indexOf(u"\"slide\": 0") >= 0);
+    CPPUNIT_ASSERT(
+        aResult.indexOf(Concat2View(u"\"ordNum\": " + OUString::number(sal_Int64(nObjCountBefore)))) >= 0);
+    CPPUNIT_ASSERT(
+        aResult.indexOf(Concat2View(u"\"ordNum\": " + OUString::number(sal_Int64(nObjCountBefore + 1)))) >= 0);
+
+    CPPUNIT_ASSERT_EQUAL(nObjCountBefore + 2, pPage->GetObjCount());
+    SdrTextObj* pBoxA = DynCastSdrTextObj(pPage->GetObj(nObjCountBefore));
+    SdrTextObj* pBoxB = DynCastSdrTextObj(pPage->GetObj(nObjCountBefore + 1));
+    CPPUNIT_ASSERT(pBoxA);
+    CPPUNIT_ASSERT(pBoxB);
+
+    // The page borders were subtracted on the way into the model...
+    CPPUNIT_ASSERT_EQUAL(tools::Long(3000), pBoxA->GetLogicRect().Left());
+    CPPUNIT_ASSERT_EQUAL(tools::Long(2200), pBoxA->GetLogicRect().Top());
+    CPPUNIT_ASSERT_EQUAL(tools::Long(8000), pBoxB->GetLogicRect().Left());
+    CPPUNIT_ASSERT_EQUAL(tools::Long(4200), pBoxB->GetLogicRect().Top());
+    // ...the explicit width sticks...
+    CPPUNIT_ASSERT_EQUAL(tools::Long(6000), pBoxB->GetLogicRect().GetWidth());
+    // ...\n made two paragraphs...
+    CPPUNIT_ASSERT_EQUAL(
+        sal_Int32(2), pBoxB->GetOutlinerParaObject()->GetTextObject().GetParagraphCount());
+    // ...and the resize modes track the content: auto width only where no
+    // width was given, auto height everywhere, zero min-size floors.
+    CPPUNIT_ASSERT(pBoxA->GetMergedItem(SDRATTR_TEXT_AUTOGROWWIDTH).GetValue());
+    CPPUNIT_ASSERT(!pBoxB->GetMergedItem(SDRATTR_TEXT_AUTOGROWWIDTH).GetValue());
+    CPPUNIT_ASSERT(pBoxA->GetMergedItem(SDRATTR_TEXT_AUTOGROWHEIGHT).GetValue());
+    CPPUNIT_ASSERT(pBoxB->GetMergedItem(SDRATTR_TEXT_AUTOGROWHEIGHT).GetValue());
+    CPPUNIT_ASSERT_EQUAL(sal_Int32(0),
+                         pBoxA->GetMergedItem(SDRATTR_TEXT_MINFRAMEWIDTH).GetValue());
+    CPPUNIT_ASSERT_EQUAL(sal_Int32(0),
+                         pBoxA->GetMergedItem(SDRATTR_TEXT_MINFRAMEHEIGHT).GetValue());
+    CPPUNIT_ASSERT_EQUAL(sal_Int32(0),
+                         pBoxB->GetMergedItem(SDRATTR_TEXT_MINFRAMEWIDTH).GetValue());
+    CPPUNIT_ASSERT_EQUAL(sal_Int32(0),
+                         pBoxB->GetMergedItem(SDRATTR_TEXT_MINFRAMEHEIGHT).GetValue());
+
+    // The geometry extract reports the boxes back in the border-inclusive
+    // frame (read -> insert -> read is an identity) and the snug box owns
+    // its fit.
+    {
+        tools::JsonWriter aJsonWriter;
+        pImpressDocument->getCommandValues(
+            aJsonWriter, ".uno:ExtractDocumentStructure?filter=slides&geometry=1&fit=1");
+        const OString aExtract = aJsonWriter.finishAndGetAsOString();
+        CPPUNIT_ASSERT(aExtract.indexOf("\"PosX\": 4000") >= 0);
+        CPPUNIT_ASSERT(aExtract.indexOf("\"PosY\": 3000") >= 0);
+        CPPUNIT_ASSERT(aExtract.indexOf("\"FitsText\": true") >= 0);
+        CPPUNIT_ASSERT(aExtract.indexOf("\"PageWidth\":") >= 0);
+        CPPUNIT_ASSERT(aExtract.indexOf("\"BorderLeft\": 1000") >= 0);
+    }
+
+    // One undo removes everything the batch created.
+    dispatchCommand(mxComponent, u".uno:Undo"_ustr, {});
+    CPPUNIT_ASSERT_EQUAL(nObjCountBefore, pPage->GetObjCount());
+}
+
+CPPUNIT_TEST_FIXTURE(SdUiImpressTest, testInsertShapeTransform)
+{
+    // The InsertShape contract (Slide Studio asset library): value
+    // "<kind>,<x>,<y>,<w>,<h>,<fill>,<line>[,<textColor>][|<text>]" in the
+    // margin-inclusive 1/100 mm frame; the drawn size is authoritative (no
+    // autogrow), given text rides centered inside the shape, invalid
+    // commands warn without aborting the batch, and ONE undo removes it
+    // all.
+    createSdImpressDoc();
+
+    comphelper::COKit::setActive(true);
+    comphelper::ScopeGuard aKitGuard([] { comphelper::COKit::setActive(false); });
+
+    // Let comphelper::dispatchCommand find the frame.
+    auto xDesktop = frame::Desktop::create(comphelper::getProcessComponentContext());
+    auto pImpressDocument = static_cast<SdXImpressDocument*>(mxComponent.get());
+    auto pFrame = pImpressDocument->GetDocShell()->GetFrame();
+    CPPUNIT_ASSERT(pFrame);
+    xDesktop->setActiveFrame(pFrame->GetFrame().GetFrameInterface());
+
+    SdPage* pPage = pImpressDocument->GetDoc()->GetSdPage(0, PageKind::Standard);
+    pPage->SetBorder(1000, 800, 1100, 900);
+    const size_t nObjCountBefore = pPage->GetObjCount();
+
+    auto* pDrawViewShell
+        = dynamic_cast<sd::DrawViewShell*>(pImpressDocument->GetDocShell()->GetViewShell());
+    CPPUNIT_ASSERT(pDrawViewShell);
+
+    // A filled numbered bubble with white text, two invalid commands (bad
+    // kind, zero width) in the middle, and a line-only rounded card after
+    // them: the invalid ones must warn without stopping the batch.
+    static constexpr OUString aJson = uR"json(
+{
+    "Transforms": {
+        "SlideCommands": [
+            {"InsertShape.0": "ellipse,4000,3000,5000,5000,cc0000,none,ffffff|1"},
+            {"InsertShape.0": "hexagon,4000,3000,5000,5000,cc0000,none"},
+            {"InsertShape.0": "rect,4000,3000,0,5000,cc0000,none"},
+            {"InsertShape.0": "rounded,12000,9000,6000,3000,none,0055aa"}
+        ]
+    }
+}
+)json"_ustr;
+
+    SfxRequest aRequest(*pDrawViewShell->GetViewFrame(), FN_TRANSFORM_DOCUMENT_STRUCTURE);
+    aRequest.AppendItem(SfxStringItem(FN_PARAM_1, aJson));
+    pDrawViewShell->ExecuteSlot(aRequest);
+
+    // Both valid shapes are reported; the invalid siblings only warned.
+    const auto* pResult
+        = dynamic_cast<const SfxStringItem*>(aRequest.GetReturnValue().getItem());
+    CPPUNIT_ASSERT(pResult);
+    const OUString aResult = pResult->GetValue();
+    CPPUNIT_ASSERT(aResult.indexOf(u"\"createdObjects\"") >= 0);
+    CPPUNIT_ASSERT(
+        aResult.indexOf(Concat2View(u"\"ordNum\": " + OUString::number(sal_Int64(nObjCountBefore)))) >= 0);
+    CPPUNIT_ASSERT(
+        aResult.indexOf(Concat2View(u"\"ordNum\": " + OUString::number(sal_Int64(nObjCountBefore + 1)))) >= 0);
+    CPPUNIT_ASSERT(aResult.indexOf(u"unknown kind") >= 0);
+    CPPUNIT_ASSERT(aResult.indexOf(u"must be positive") >= 0);
+
+    CPPUNIT_ASSERT_EQUAL(nObjCountBefore + 2, pPage->GetObjCount());
+    SdrObject* pBubble = pPage->GetObj(nObjCountBefore);
+    SdrObject* pCard = pPage->GetObj(nObjCountBefore + 1);
+    CPPUNIT_ASSERT_EQUAL(SdrObjKind::CircleOrEllipse, pBubble->GetObjIdentifier());
+    CPPUNIT_ASSERT_EQUAL(SdrObjKind::Rectangle, pCard->GetObjIdentifier());
+
+    // Border math on the way in, size EXACTLY as given - no autogrow
+    // drift, even though the bubble carries text.
+    CPPUNIT_ASSERT_EQUAL(tools::Long(3000), pBubble->GetLogicRect().Left());
+    CPPUNIT_ASSERT_EQUAL(tools::Long(2200), pBubble->GetLogicRect().Top());
+    CPPUNIT_ASSERT_EQUAL(tools::Long(5000), pBubble->GetLogicRect().GetWidth());
+    CPPUNIT_ASSERT_EQUAL(tools::Long(5000), pBubble->GetLogicRect().GetHeight());
+    CPPUNIT_ASSERT_EQUAL(tools::Long(11000), pCard->GetLogicRect().Left());
+    CPPUNIT_ASSERT_EQUAL(tools::Long(8200), pCard->GetLogicRect().Top());
+    CPPUNIT_ASSERT_EQUAL(tools::Long(6000), pCard->GetLogicRect().GetWidth());
+    CPPUNIT_ASSERT_EQUAL(tools::Long(3000), pCard->GetLogicRect().GetHeight());
+    CPPUNIT_ASSERT(!pBubble->GetMergedItem(SDRATTR_TEXT_AUTOGROWWIDTH).GetValue());
+    CPPUNIT_ASSERT(!pBubble->GetMergedItem(SDRATTR_TEXT_AUTOGROWHEIGHT).GetValue());
+
+    // Styling: solid fill + white text on the bubble; line-only card with
+    // a proportional corner radius (min(w,h)/8).
+    CPPUNIT_ASSERT_EQUAL(drawing::FillStyle_SOLID,
+                         pBubble->GetMergedItem(XATTR_FILLSTYLE).GetValue());
+    CPPUNIT_ASSERT_EQUAL(Color(0xcc0000),
+                         pBubble->GetMergedItem(XATTR_FILLCOLOR).GetColorValue());
+    CPPUNIT_ASSERT_EQUAL(drawing::LineStyle_NONE,
+                         pBubble->GetMergedItem(XATTR_LINESTYLE).GetValue());
+    CPPUNIT_ASSERT_EQUAL(Color(0xffffff),
+                         pBubble->GetMergedItem(EE_CHAR_COLOR).GetValue());
+    CPPUNIT_ASSERT_EQUAL(drawing::FillStyle_NONE,
+                         pCard->GetMergedItem(XATTR_FILLSTYLE).GetValue());
+    CPPUNIT_ASSERT_EQUAL(drawing::LineStyle_SOLID,
+                         pCard->GetMergedItem(XATTR_LINESTYLE).GetValue());
+    CPPUNIT_ASSERT_EQUAL(Color(0x0055aa),
+                         pCard->GetMergedItem(XATTR_LINECOLOR).GetColorValue());
+    CPPUNIT_ASSERT_EQUAL(sal_Int32(375),
+                         pCard->GetMergedItem(SDRATTR_CORNER_RADIUS).GetValue());
+
+    // The geometry extract reports the same margin-inclusive frame and the
+    // untouched sizes, and the bubble's text made it into the deck info.
+    {
+        tools::JsonWriter aJsonWriter;
+        pImpressDocument->getCommandValues(
+            aJsonWriter, ".uno:ExtractDocumentStructure?filter=slides&geometry=1");
+        const OString aExtract = aJsonWriter.finishAndGetAsOString();
+        CPPUNIT_ASSERT(aExtract.indexOf("\"PosX\": 4000") >= 0);
+        CPPUNIT_ASSERT(aExtract.indexOf("\"PosX\": 12000") >= 0);
+        CPPUNIT_ASSERT(aExtract.indexOf("\"Width\": 5000") >= 0);
+        CPPUNIT_ASSERT(aExtract.indexOf("\"Height\": 3000") >= 0);
+        CPPUNIT_ASSERT(aExtract.indexOf("\"Paragraphs\": [ \"1\"]") >= 0);
+    }
+
+    // One undo removes both shapes.
+    dispatchCommand(mxComponent, u".uno:Undo"_ustr, {});
+    CPPUNIT_ASSERT_EQUAL(nObjCountBefore, pPage->GetObjCount());
+}
+
+CPPUNIT_TEST_FIXTURE(SdUiImpressTest, testInsertStyleTokens)
+{
+    // The optional trailing style tokens of the insert grammar - "s<pt>"
+    // font size, "b" bold, "c<6hex>" text color - style the whole
+    // object's text (the library's titles, kickers and muted labels).
+    createSdImpressDoc();
+
+    comphelper::COKit::setActive(true);
+    comphelper::ScopeGuard aKitGuard([] { comphelper::COKit::setActive(false); });
+
+    auto xDesktop = frame::Desktop::create(comphelper::getProcessComponentContext());
+    auto pImpressDocument = static_cast<SdXImpressDocument*>(mxComponent.get());
+    auto pFrame = pImpressDocument->GetDocShell()->GetFrame();
+    CPPUNIT_ASSERT(pFrame);
+    xDesktop->setActiveFrame(pFrame->GetFrame().GetFrameInterface());
+
+    SdPage* pPage = pImpressDocument->GetDoc()->GetSdPage(0, PageKind::Standard);
+    const size_t nObjCountBefore = pPage->GetObjCount();
+
+    auto* pDrawViewShell
+        = dynamic_cast<sd::DrawViewShell*>(pImpressDocument->GetDocShell()->GetViewShell());
+    CPPUNIT_ASSERT(pDrawViewShell);
+
+    // A bold 28pt accent title, and a bubble whose positional textColor
+    // combines with size + bold tokens. A bad style token only warns.
+    static constexpr OUString aJson = uR"json(
+{
+    "Transforms": {
+        "SlideCommands": [
+            {"InsertTextBox.0": "2000,2000,20000,s28,b,c1f4e79|Working title"},
+            {"InsertShape.0": "ellipse,4000,8000,2000,2000,1f4e79,none,ffffff,s16,b|1"},
+            {"InsertTextBox.0": "2000,6000,s0|nope"}
+        ]
+    }
+}
+)json"_ustr;
+
+    SfxRequest aRequest(*pDrawViewShell->GetViewFrame(), FN_TRANSFORM_DOCUMENT_STRUCTURE);
+    aRequest.AppendItem(SfxStringItem(FN_PARAM_1, aJson));
+    pDrawViewShell->ExecuteSlot(aRequest);
+
+    const auto* pResult
+        = dynamic_cast<const SfxStringItem*>(aRequest.GetReturnValue().getItem());
+    CPPUNIT_ASSERT(pResult);
+    CPPUNIT_ASSERT(pResult->GetValue().indexOf(u"invalid geometry") >= 0);
+
+    CPPUNIT_ASSERT_EQUAL(nObjCountBefore + 2, pPage->GetObjCount());
+    SdrObject* pTitle = pPage->GetObj(nObjCountBefore);
+    SdrObject* pBubble = pPage->GetObj(nObjCountBefore + 1);
+
+    // 28pt and 16pt in the drawing pool's 1/100 mm metric (pt * 2540/72).
+    CPPUNIT_ASSERT_EQUAL(
+        sal_uInt32(28 * 2540 / 72),
+        pTitle->GetMergedItem(EE_CHAR_FONTHEIGHT).GetHeight());
+    CPPUNIT_ASSERT_EQUAL(WEIGHT_BOLD,
+                         pTitle->GetMergedItem(EE_CHAR_WEIGHT).GetWeight());
+    CPPUNIT_ASSERT_EQUAL(Color(0x1f4e79),
+                         pTitle->GetMergedItem(EE_CHAR_COLOR).GetValue());
+    CPPUNIT_ASSERT_EQUAL(
+        sal_uInt32(16 * 2540 / 72),
+        pBubble->GetMergedItem(EE_CHAR_FONTHEIGHT).GetHeight());
+    CPPUNIT_ASSERT_EQUAL(WEIGHT_BOLD,
+                         pBubble->GetMergedItem(EE_CHAR_WEIGHT).GetWeight());
+    CPPUNIT_ASSERT_EQUAL(Color(0xffffff),
+                         pBubble->GetMergedItem(EE_CHAR_COLOR).GetValue());
+}
+
+CPPUNIT_TEST_FIXTURE(SdUiImpressTest, testFillApiStructureUndo)
+{
+    // The structural SlideCommands used to mutate the model without undo
+    // actions (acks carried undoReliable:false). Each batch now records
+    // proper actions in its list entry: one .uno:Undo reverts one batch.
+    createSdImpressDoc();
+
+    comphelper::COKit::setActive(true);
+    comphelper::ScopeGuard aKitGuard([] { comphelper::COKit::setActive(false); });
+
+    auto xDesktop = frame::Desktop::create(comphelper::getProcessComponentContext());
+    auto pImpressDocument = static_cast<SdXImpressDocument*>(mxComponent.get());
+    auto pFrame = pImpressDocument->GetDocShell()->GetFrame();
+    CPPUNIT_ASSERT(pFrame);
+    xDesktop->setActiveFrame(pFrame->GetFrame().GetFrameInterface());
+
+    auto* pDrawViewShell
+        = dynamic_cast<sd::DrawViewShell*>(pImpressDocument->GetDocShell()->GetViewShell());
+    CPPUNIT_ASSERT(pDrawViewShell);
+
+    SdDrawDocument* pDoc = pImpressDocument->GetDoc();
+    const sal_uInt16 nPagesBefore = pDoc->GetSdPageCount(PageKind::Standard);
+
+    auto runBatch = [&](const OUString& rJson) {
+        SfxRequest aRequest(*pDrawViewShell->GetViewFrame(), FN_TRANSFORM_DOCUMENT_STRUCTURE);
+        aRequest.AppendItem(SfxStringItem(FN_PARAM_1, rJson));
+        pDrawViewShell->ExecuteSlot(aRequest);
+    };
+    auto undo = [&]() { dispatchCommand(mxComponent, u".uno:Undo"_ustr, {}); };
+
+    // DuplicateSlide: one undo removes the copy (standard + notes pages).
+    runBatch(uR"({"Transforms": {"SlideCommands": [{"DuplicateSlide": ""}]}})"_ustr);
+    CPPUNIT_ASSERT_EQUAL(sal_uInt16(nPagesBefore + 1), pDoc->GetSdPageCount(PageKind::Standard));
+    undo();
+    CPPUNIT_ASSERT_EQUAL(nPagesBefore, pDoc->GetSdPageCount(PageKind::Standard));
+
+    // RenameSlide: one undo restores the old name.
+    const OUString aOldName = pDoc->GetSdPage(0, PageKind::Standard)->GetName();
+    runBatch(
+        uR"({"Transforms": {"SlideCommands": [{"JumpToSlide": "0"}, {"RenameSlide": "Batch Renamed"}]}})"_ustr);
+    CPPUNIT_ASSERT_EQUAL(u"Batch Renamed"_ustr,
+                         pDoc->GetSdPage(0, PageKind::Standard)->GetName());
+    undo();
+    CPPUNIT_ASSERT_EQUAL(aOldName, pDoc->GetSdPage(0, PageKind::Standard)->GetName());
+
+    // SetText: one undo restores the old text of the addressed object.
+    SdPage* pPage = pDoc->GetSdPage(0, PageKind::Standard);
+    const size_t nObjCountBefore = pPage->GetObjCount();
+    runBatch(
+        uR"({"Transforms": {"SlideCommands": [{"InsertTextBox.0": "2000,2000,12000|before text"}]}})"_ustr);
+    CPPUNIT_ASSERT_EQUAL(nObjCountBefore + 1, pPage->GetObjCount());
+    auto* pBox = static_cast<SdrTextObj*>(pPage->GetObj(nObjCountBefore));
+    const OUString aSetTextCmd
+        = u"{\"Transforms\": {\"SlideCommands\": [{\"JumpToSlide\": \"0\"}, {\"SetText."_ustr
+          + OUString::number(sal_Int64(nObjCountBefore)) + u"\": \"after text\"}]}}"_ustr;
+    runBatch(aSetTextCmd);
+    CPPUNIT_ASSERT_EQUAL(u"after text"_ustr,
+                         pBox->GetOutlinerParaObject()->GetTextObject().GetText(0));
+    undo();
+    CPPUNIT_ASSERT_EQUAL(u"before text"_ustr,
+                         pBox->GetOutlinerParaObject()->GetTextObject().GetText(0));
+
+    // MoveSlide + DeleteSlide, on a two-slide deck with distinct names.
+    runBatch(uR"({"Transforms": {"SlideCommands": [{"DuplicateSlide": ""}]}})"_ustr);
+    pDoc->GetSdPage(0, PageKind::Standard)->SetName(u"First"_ustr);
+    pDoc->GetSdPage(1, PageKind::Standard)->SetName(u"Second"_ustr);
+
+    runBatch(uR"({"Transforms": {"SlideCommands": [{"MoveSlide.0": "1"}]}})"_ustr);
+    CPPUNIT_ASSERT_EQUAL(u"Second"_ustr, pDoc->GetSdPage(0, PageKind::Standard)->GetName());
+    undo();
+    CPPUNIT_ASSERT_EQUAL(u"First"_ustr, pDoc->GetSdPage(0, PageKind::Standard)->GetName());
+
+    runBatch(uR"({"Transforms": {"SlideCommands": [{"DeleteSlide": "1"}]}})"_ustr);
+    CPPUNIT_ASSERT_EQUAL(nPagesBefore, pDoc->GetSdPageCount(PageKind::Standard));
+    undo();
+    CPPUNIT_ASSERT_EQUAL(sal_uInt16(nPagesBefore + 1), pDoc->GetSdPageCount(PageKind::Standard));
+    CPPUNIT_ASSERT_EQUAL(u"Second"_ustr, pDoc->GetSdPage(1, PageKind::Standard)->GetName());
+}
+
+CPPUNIT_TEST_FIXTURE(SdUiImpressTest, testMarkCreatedGroupsInOneBatch)
+{
+    // MarkCreated marks objects created earlier in the SAME batch by
+    // creation index (identity-based, so ordNum shifts from an earlier
+    // FormatGroup in the batch cannot skew later groupings), letting a
+    // library scaffold insert AND group atomically: one batch, ONE undo.
+    createSdImpressDoc();
+
+    comphelper::COKit::setActive(true);
+    comphelper::ScopeGuard aKitGuard([] { comphelper::COKit::setActive(false); });
+
+    auto xDesktop = frame::Desktop::create(comphelper::getProcessComponentContext());
+    auto pImpressDocument = static_cast<SdXImpressDocument*>(mxComponent.get());
+    auto pFrame = pImpressDocument->GetDocShell()->GetFrame();
+    CPPUNIT_ASSERT(pFrame);
+    xDesktop->setActiveFrame(pFrame->GetFrame().GetFrameInterface());
+
+    SdPage* pPage = pImpressDocument->GetDoc()->GetSdPage(0, PageKind::Standard);
+    const size_t nObjCountBefore = pPage->GetObjCount();
+
+    auto* pDrawViewShell
+        = dynamic_cast<sd::DrawViewShell*>(pImpressDocument->GetDocShell()->GetViewShell());
+    CPPUNIT_ASSERT(pDrawViewShell);
+
+    // Four shapes, grouped [0,1] and [2,3]. The second MarkCreated runs
+    // after the first FormatGroup already renumbered the page; an out of
+    // range index only warns.
+    static constexpr OUString aJson = uR"json(
+{
+    "Transforms": {
+        "SlideCommands": [
+            {"InsertShape.0": "rect,2000,2000,3000,2000,cc0000,none"},
+            {"InsertShape.0": "ellipse,6000,2000,2000,2000,00cc00,none"},
+            {"InsertShape.0": "rect,2000,6000,3000,2000,0000cc,none"},
+            {"InsertShape.0": "ellipse,6000,6000,2000,2000,cccc00,none"},
+            {"JumpToSlide": "0"},
+            {"UnmarkAll": ""},
+            {"MarkCreated": "0,1"},
+            {"UnoCommand": ".uno:FormatGroup"},
+            {"UnmarkAll": ""},
+            {"MarkCreated": "2,3"},
+            {"UnoCommand": ".uno:FormatGroup"},
+            {"UnmarkAll": ""},
+            {"MarkCreated": "9"},
+            {"UnmarkAll": ""},
+            {"MarkCreated": "0,2"},
+            {"UnoCommand": ".uno:FormatGroup"},
+            {"UnmarkAll": ""}
+        ]
+    }
+}
+)json"_ustr;
+
+    SfxRequest aRequest(*pDrawViewShell->GetViewFrame(), FN_TRANSFORM_DOCUMENT_STRUCTURE);
+    aRequest.AppendItem(SfxStringItem(FN_PARAM_1, aJson));
+    pDrawViewShell->ExecuteSlot(aRequest);
+
+    const auto* pResult
+        = dynamic_cast<const SfxStringItem*>(aRequest.GetReturnValue().getItem());
+    CPPUNIT_ASSERT(pResult);
+    CPPUNIT_ASSERT(pResult->GetValue().indexOf(u"index out of range") >= 0);
+
+    // LAYERED: MarkCreated resolves each leaf to its TOP-LEVEL container,
+    // so the final MarkCreated "0,2" marked the two card-groups and the
+    // second FormatGroup nested them - one top group holding two groups
+    // of two.
+    CPPUNIT_ASSERT_EQUAL(nObjCountBefore + 1, pPage->GetObjCount());
+    SdrObject* pTop = pPage->GetObj(nObjCountBefore);
+    CPPUNIT_ASSERT(pTop->IsGroupObject());
+    CPPUNIT_ASSERT_EQUAL(size_t(2), pTop->GetSubList()->GetObjCount());
+    SdrObject* pFirst = pTop->GetSubList()->GetObj(0);
+    SdrObject* pSecond = pTop->GetSubList()->GetObj(1);
+    CPPUNIT_ASSERT(pFirst->IsGroupObject());
+    CPPUNIT_ASSERT(pSecond->IsGroupObject());
+    CPPUNIT_ASSERT_EQUAL(size_t(2), pFirst->GetSubList()->GetObjCount());
+    CPPUNIT_ASSERT_EQUAL(size_t(2), pSecond->GetSubList()->GetObjCount());
+
+    // The whole scaffold - inserts and both groupings - is ONE undo.
+    dispatchCommand(mxComponent, u".uno:Undo"_ustr, {});
+    CPPUNIT_ASSERT_EQUAL(nObjCountBefore, pPage->GetObjCount());
+}
+
+CPPUNIT_TEST_FIXTURE(SdUiImpressTest, testResizeModeToggles)
+{
+    // .uno:ToggleAutoWidth / .uno:ToggleAutoHeight flip the marked text
+    // object's autogrow attribute per axis; turning a mode ON zeroes the
+    // matching min-frame floor so the box can shrink to its content, and
+    // undo restores the attributes.
+    createSdImpressDoc();
+
+    comphelper::COKit::setActive(true);
+    comphelper::ScopeGuard aKitGuard([] { comphelper::COKit::setActive(false); });
+
+    auto xDesktop = frame::Desktop::create(comphelper::getProcessComponentContext());
+    auto pImpressDocument = static_cast<SdXImpressDocument*>(mxComponent.get());
+    auto pFrame = pImpressDocument->GetDocShell()->GetFrame();
+    CPPUNIT_ASSERT(pFrame);
+    xDesktop->setActiveFrame(pFrame->GetFrame().GetFrameInterface());
+
+    SdPage* pPage = pImpressDocument->GetDoc()->GetSdPage(0, PageKind::Standard);
+    pPage->SetBorder(1000, 800, 1100, 900);
+    const size_t nObjCountBefore = pPage->GetObjCount();
+
+    // A wide fixed-width box via the batch verb: auto width starts off.
+    dispatchCommand(mxComponent, u".uno:TransformDocumentStructure"_ustr,
+                    { comphelper::makePropertyValue(
+                        u"DataJson"_ustr,
+                        u"{ \"Transforms\": { \"SlideCommands\": ["
+                        u"{\"InsertTextBox.0\": \"3000,3000,8000|Hi\"}]}}"_ustr) });
+    CPPUNIT_ASSERT_EQUAL(nObjCountBefore + 1, pPage->GetObjCount());
+    SdrTextObj* pBox = DynCastSdrTextObj(pPage->GetObj(nObjCountBefore));
+    CPPUNIT_ASSERT(pBox);
+    CPPUNIT_ASSERT(!pBox->GetMergedItem(SDRATTR_TEXT_AUTOGROWWIDTH).GetValue());
+    const tools::Long nWideWidth = pBox->GetLogicRect().GetWidth();
+    CPPUNIT_ASSERT_EQUAL(tools::Long(8000), nWideWidth);
+
+    // Simulate the legacy min-size remnant the toggle must clear.
+    pBox->SetMergedItem(makeSdrTextMinFrameWidthItem(4000));
+
+    sd::ViewShell* pViewShell = pImpressDocument->GetDocShell()->GetViewShell();
+    SdrView* pView = pViewShell->GetView();
+    pView->MarkObj(pBox, pView->GetSdrPageView());
+
+    // ON: attribute flips, floor zeroed, the box snaps to its text.
+    dispatchCommand(mxComponent, u".uno:ToggleAutoWidth"_ustr, {});
+    CPPUNIT_ASSERT(pBox->GetMergedItem(SDRATTR_TEXT_AUTOGROWWIDTH).GetValue());
+    CPPUNIT_ASSERT_EQUAL(sal_Int32(0),
+                         pBox->GetMergedItem(SDRATTR_TEXT_MINFRAMEWIDTH).GetValue());
+    CPPUNIT_ASSERT(pBox->GetLogicRect().GetWidth() < nWideWidth);
+
+    // OFF again: only the attribute flips back.
+    dispatchCommand(mxComponent, u".uno:ToggleAutoWidth"_ustr, {});
+    CPPUNIT_ASSERT(!pBox->GetMergedItem(SDRATTR_TEXT_AUTOGROWWIDTH).GetValue());
+
+    // The height axis toggles the same way...
+    CPPUNIT_ASSERT(pBox->GetMergedItem(SDRATTR_TEXT_AUTOGROWHEIGHT).GetValue());
+    dispatchCommand(mxComponent, u".uno:ToggleAutoHeight"_ustr, {});
+    CPPUNIT_ASSERT(!pBox->GetMergedItem(SDRATTR_TEXT_AUTOGROWHEIGHT).GetValue());
+
+    // ...and one undo restores it.
+    dispatchCommand(mxComponent, u".uno:Undo"_ustr, {});
+    CPPUNIT_ASSERT(pBox->GetMergedItem(SDRATTR_TEXT_AUTOGROWHEIGHT).GetValue());
+}
+
+CPPUNIT_TEST_FIXTURE(SdUiImpressTest, testDecomposePdfPages)
+{
+    // A PDF opens as ONE protected graphic per page. The payload and the
+    // geometry read both flag it, and the FillApi DecomposePdfPages verb
+    // turns every page into editable objects - without an undo entry and
+    // without marking the document modified: opening a PDF to edit it is
+    // not itself an edit.
+    createSdDrawDoc("pdf/multipage.pdf");
+
+    comphelper::COKit::setActive(true);
+    comphelper::ScopeGuard aKitGuard([] { comphelper::COKit::setActive(false); });
+
+    auto xDesktop = frame::Desktop::create(comphelper::getProcessComponentContext());
+    auto pImpressDocument = static_cast<SdXImpressDocument*>(mxComponent.get());
+    auto pFrame = pImpressDocument->GetDocShell()->GetFrame();
+    CPPUNIT_ASSERT(pFrame);
+    xDesktop->setActiveFrame(pFrame->GetFrame().GetFrameInterface());
+
+    SdDrawDocument* pDoc = pImpressDocument->GetDoc();
+    CPPUNIT_ASSERT(pDoc->IsPDFDocument());
+    const sal_uInt16 nPageCount = pDoc->GetSdPageCount(PageKind::Standard);
+    CPPUNIT_ASSERT(nPageCount >= 2);
+    for (sal_uInt16 nPage = 0; nPage < nPageCount; ++nPage)
+    {
+        SdPage* pPage = pDoc->GetSdPage(nPage, PageKind::Standard);
+        CPPUNIT_ASSERT_EQUAL(size_t(1), pPage->GetObjCount());
+        CPPUNIT_ASSERT(pPage->GetPdfPageGraphic());
+        CPPUNIT_ASSERT(pPage->GetObj(0) == pPage->GetPdfPageGraphic());
+    }
+
+    // Both reads flag the undecomposed page graphic.
+    {
+        tools::JsonWriter aJsonWriter;
+        pImpressDocument->getCommandValues(aJsonWriter, ".uno:VectorPrimitives?part=0");
+        const OString aPayload = aJsonWriter.finishAndGetAsOString();
+        CPPUNIT_ASSERT(aPayload.indexOf("\"pdfPage\": true") >= 0);
+    }
+    {
+        tools::JsonWriter aJsonWriter;
+        pImpressDocument->getCommandValues(
+            aJsonWriter, ".uno:ExtractDocumentStructure?filter=slides&geometry=1");
+        const OString aExtract = aJsonWriter.finishAndGetAsOString();
+        CPPUNIT_ASSERT(aExtract.indexOf("\"PdfPage\": true") >= 0);
+    }
+
+    // Loading is not an edit either: the precondition the verb preserves.
+    CPPUNIT_ASSERT(!pDoc->IsChanged());
+    sd::UndoManager* pUndoManager = pDoc->GetUndoManager();
+    const size_t nUndoBefore = pUndoManager ? pUndoManager->GetUndoActionCount() : 0;
+
+    dispatchCommand(mxComponent, u".uno:TransformDocumentStructure"_ustr,
+                    { comphelper::makePropertyValue(
+                        u"DataJson"_ustr,
+                        u"{ \"Transforms\": { \"SlideCommands\": ["
+                        u"{\"DecomposePdfPages\": true}]}}"_ustr) });
+
+    for (sal_uInt16 nPage = 0; nPage < nPageCount; ++nPage)
+    {
+        SdPage* pPage = pDoc->GetSdPage(nPage, PageKind::Standard);
+        // The protected graphic is gone; the page holds drawing-level
+        // objects (the fixture's pages carry text).
+        CPPUNIT_ASSERT(!pPage->GetPdfPageGraphic());
+        CPPUNIT_ASSERT(pPage->GetObjCount() >= 1);
+        for (size_t nObj = 0; nObj < pPage->GetObjCount(); ++nObj)
+            CPPUNIT_ASSERT(!pPage->GetObj(nObj)->IsMoveProtect());
+    }
+
+    // Not an edit: nothing to undo, nothing to save.
+    CPPUNIT_ASSERT(!pDoc->IsChanged());
+    CPPUNIT_ASSERT(!pImpressDocument->GetDocShell()->IsModified());
+    if (pUndoManager)
+        CPPUNIT_ASSERT_EQUAL(nUndoBefore, pUndoManager->GetUndoActionCount());
+
+    // The flags are gone from both reads, and a second run is a no-op.
+    {
+        tools::JsonWriter aJsonWriter;
+        pImpressDocument->getCommandValues(
+            aJsonWriter, ".uno:ExtractDocumentStructure?filter=slides&geometry=1");
+        CPPUNIT_ASSERT(aJsonWriter.finishAndGetAsOString().indexOf("\"PdfPage\"") < 0);
+    }
+    const size_t nObjectsAfter = pDoc->GetSdPage(0, PageKind::Standard)->GetObjCount();
+    dispatchCommand(mxComponent, u".uno:TransformDocumentStructure"_ustr,
+                    { comphelper::makePropertyValue(
+                        u"DataJson"_ustr,
+                        u"{ \"Transforms\": { \"SlideCommands\": ["
+                        u"{\"DecomposePdfPages\": true}]}}"_ustr) });
+    CPPUNIT_ASSERT_EQUAL(nObjectsAfter, pDoc->GetSdPage(0, PageKind::Standard)->GetObjCount());
+    CPPUNIT_ASSERT(!pDoc->IsChanged());
+}
+
+CPPUNIT_TEST_FIXTURE(SdUiImpressTest, testPdfPageModelRaw)
+{
+    // The page as its object model, read through the importer on a scratch
+    // page: one text node per drawn run with its baseline, for the host's
+    // analysis. Nothing on the document changes - the page keeps its
+    // protected picture, nothing is modified.
+    createSdDrawDoc("pdf/multipage.pdf");
+    comphelper::COKit::setActive(true);
+    comphelper::ScopeGuard aKitGuard([] { comphelper::COKit::setActive(false); });
+    auto pImpressDocument = static_cast<SdXImpressDocument*>(mxComponent.get());
+    SdDrawDocument* pDoc = pImpressDocument->GetDoc();
+    SdPage* pPage = pDoc->GetSdPage(0, PageKind::Standard);
+    CPPUNIT_ASSERT(pPage->GetPdfPageGraphic());
+    {
+        tools::JsonWriter aJsonWriter;
+        pImpressDocument->getCommandValues(aJsonWriter, ".uno:PdfPageModel?part=0&raw=1");
+        const OString aRaw = aJsonWriter.finishAndGetAsOString();
+        CPPUNIT_ASSERT(aRaw.indexOf("\"type\": \"pdfpagemodel\"") >= 0);
+        CPPUNIT_ASSERT(aRaw.indexOf("\"raw\": true") >= 0);
+        CPPUNIT_ASSERT(aRaw.indexOf("\"kind\": \"text\"") >= 0);
+        CPPUNIT_ASSERT(aRaw.indexOf("\"baseline\"") >= 0);
+        CPPUNIT_ASSERT(aRaw.indexOf("\"ord\"") >= 0);
+        boost::property_tree::ptree aTree;
+        std::istringstream aStream(std::string(aRaw.getStr(), aRaw.getLength()));
+        boost::property_tree::read_json(aStream, aTree);
+        CPPUNIT_ASSERT(aTree.get<double>("page.w") > 100.0);
+        size_t nTexts = 0;
+        for (const auto& rNode : aTree.get_child("objects"))
+            if (rNode.second.get<std::string>("kind") == "text")
+            {
+                ++nTexts;
+                const auto& rLines = rNode.second.get_child("lines");
+                CPPUNIT_ASSERT(!rLines.empty());
+                const auto& rRuns = rLines.begin()->second.get_child("runs");
+                CPPUNIT_ASSERT(!rRuns.empty());
+                CPPUNIT_ASSERT(!rRuns.begin()->second.get<std::string>("text").empty());
+                CPPUNIT_ASSERT(rRuns.begin()->second.get<double>("size") > 0.0);
+            }
+        CPPUNIT_ASSERT(nTexts > 0);
+    }
+    // Untouched.
+    CPPUNIT_ASSERT(pPage->GetPdfPageGraphic());
+    CPPUNIT_ASSERT_EQUAL(size_t(1), pPage->GetObjCount());
+    CPPUNIT_ASSERT(!pDoc->IsChanged());
+    // Not raw on a still-protected page: there is no model to write.
+    {
+        tools::JsonWriter aJsonWriter;
+        pImpressDocument->getCommandValues(aJsonWriter, ".uno:PdfPageModel?part=0");
+        CPPUNIT_ASSERT(aJsonWriter.finishAndGetAsOString().indexOf("\"error\": \"no model\"") >= 0);
+    }
+}
+
+CPPUNIT_TEST_FIXTURE(SdUiImpressTest, testBuildPdfPageModelTree)
+{
+    // A v2 model - a card group holding a fill and a two-line text block, and
+    // a path - builds the page's objects: the group is a Draw group with its
+    // members, the block is ONE object whose lines land on the model's
+    // baselines (measured off the kit's own primitives), the path is a path.
+    // Building is not an edit, and the live page serialises back to the tree.
+    createSdDrawDoc("pdf/multipage.pdf");
+    comphelper::COKit::setActive(true);
+    comphelper::ScopeGuard aKitGuard([] { comphelper::COKit::setActive(false); });
+    auto xDesktop = frame::Desktop::create(comphelper::getProcessComponentContext());
+    auto pImpressDocument = static_cast<SdXImpressDocument*>(mxComponent.get());
+    auto pFrame = pImpressDocument->GetDocShell()->GetFrame();
+    CPPUNIT_ASSERT(pFrame);
+    xDesktop->setActiveFrame(pFrame->GetFrame().GetFrameInterface());
+    SdDrawDocument* pDoc = pImpressDocument->GetDoc();
+    SdPage* pPage = pDoc->GetSdPage(0, PageKind::Standard);
+    CPPUNIT_ASSERT(pPage->GetPdfPageGraphic());
+    // The model's page is the page's own size in points, so the coordinates
+    // round-trip exactly.
+    const double fW = pPage->GetSize().Width() * 72.0 / 2540.0;
+    const double fH = pPage->GetSize().Height() * 72.0 / 2540.0;
+    const OString aModel
+        = "{\"page\":{\"w\":" + OString::number(fW) + ",\"h\":" + OString::number(fH)
+          + "},\"objects\":["
+            "{\"kind\":\"group\",\"role\":\"card\",\"box\":{\"x\":50,\"y\":50,\"w\":200,\"h\":100},"
+            "\"children\":["
+            "{\"kind\":\"rect\",\"box\":{\"x\":50,\"y\":50,\"w\":200,\"h\":100},\"fill\":\"#eeeeee\"},"
+            "{\"kind\":\"text\",\"box\":{\"x\":60,\"y\":60,\"w\":180,\"h\":30},\"lineHeight\":14,"
+            "\"lines\":["
+            "{\"box\":{\"x\":60,\"y\":60,\"w\":100,\"h\":14},\"baseline\":72,\"runs\":[{\"text\":\"Hello card\","
+            "\"box\":{\"x\":60,\"y\":60,\"w\":100,\"h\":14},\"family\":\"Liberation Sans\",\"size\":12,"
+            "\"weight\":700,\"italic\":false,\"color\":\"#102030\",\"letterSpacing\":0}]},"
+            "{\"box\":{\"x\":60,\"y\":74,\"w\":100,\"h\":14},\"baseline\":86,\"runs\":[{\"text\":\"second line\","
+            "\"box\":{\"x\":60,\"y\":74,\"w\":100,\"h\":14},\"family\":\"Liberation Sans\",\"size\":12,"
+            "\"weight\":400,\"italic\":false,\"color\":\"#102030\",\"letterSpacing\":0}]}]}]},"
+            "{\"kind\":\"path\",\"box\":{\"x\":300,\"y\":300,\"w\":50,\"h\":50},"
+            "\"d\":\"M300 300 L350 300 L350 350 Z\",\"fill\":\"#ff0000\"}]}"_ostr;
+    OUStringBuffer aBase64;
+    comphelper::Base64::encode(
+        aBase64, cpo::uno::Sequence<sal_Int8>(reinterpret_cast<const sal_Int8*>(aModel.getStr()),
+                                              aModel.getLength()));
+    CPPUNIT_ASSERT(!pDoc->IsChanged());
+    sd::UndoManager* pUndoManager = pDoc->GetUndoManager();
+    const size_t nUndoBefore = pUndoManager ? pUndoManager->GetUndoActionCount() : 0;
+    const OUString aDataJson = u"{ \"Transforms\": { \"SlideCommands\": [{\"BuildPdfPageModel\": \"0|"_ustr
+                               + aBase64.makeStringAndClear() + u"\"}]}}"_ustr;
+    dispatchCommand(mxComponent, u".uno:TransformDocumentStructure"_ustr,
+                    { comphelper::makePropertyValue(u"DataJson"_ustr, aDataJson) });
+    CPPUNIT_ASSERT(!pPage->GetPdfPageGraphic());
+    CPPUNIT_ASSERT_EQUAL(size_t(2), pPage->GetObjCount());
+    auto* pGroup = dynamic_cast<SdrObjGroup*>(pPage->GetObj(0));
+    CPPUNIT_ASSERT(pGroup);
+    CPPUNIT_ASSERT_EQUAL(u"card"_ustr, pGroup->GetName());
+    CPPUNIT_ASSERT_EQUAL(size_t(2), pGroup->GetSubList()->GetObjCount());
+    CPPUNIT_ASSERT(pGroup->GetSubList()->GetObj(0)->GetObjIdentifier() == SdrObjKind::Rectangle);
+    auto* pText = DynCastSdrTextObj(pGroup->GetSubList()->GetObj(1));
+    CPPUNIT_ASSERT(pText);
+    CPPUNIT_ASSERT(pText->GetOutlinerParaObject());
+    CPPUNIT_ASSERT(pText->GetOutlinerParaObject()->GetTextObject().GetText(0).indexOf("Hello card") >= 0);
+    CPPUNIT_ASSERT(dynamic_cast<SdrPathObj*>(pPage->GetObj(1)));
+    // Not an edit.
+    CPPUNIT_ASSERT(!pDoc->IsChanged());
+    if (pUndoManager)
+        CPPUNIT_ASSERT_EQUAL(nUndoBefore, pUndoManager->GetUndoActionCount());
+    // The live page serialises back: the group with its members, the block's
+    // two lines on the model's baselines, the path with its data.
+    tools::JsonWriter aJsonWriter;
+    pImpressDocument->getCommandValues(aJsonWriter, ".uno:PdfPageModel?part=0");
+    const OString aLive = aJsonWriter.finishAndGetAsOString();
+    boost::property_tree::ptree aTree;
+    std::istringstream aStream(std::string(aLive.getStr(), aLive.getLength()));
+    boost::property_tree::read_json(aStream, aTree);
+    CPPUNIT_ASSERT_EQUAL(std::string("pdfpagemodel"), aTree.get<std::string>("type"));
+    CPPUNIT_ASSERT(!aTree.get<bool>("raw"));
+    // Everything on this page is expressible: the page is complete.
+    CPPUNIT_ASSERT(aTree.get<bool>("complete"));
+    CPPUNIT_ASSERT(aTree.get_child("dropped").empty());
+    const auto& rObjects = aTree.get_child("objects");
+    CPPUNIT_ASSERT_EQUAL(size_t(2), rObjects.size());
+    auto it = rObjects.begin();
+    CPPUNIT_ASSERT_EQUAL(std::string("group"), it->second.get<std::string>("kind"));
+    CPPUNIT_ASSERT_EQUAL(std::string("card"), it->second.get<std::string>("role"));
+    const auto& rChildren = it->second.get_child("children");
+    CPPUNIT_ASSERT_EQUAL(size_t(2), rChildren.size());
+    auto itChild = rChildren.begin();
+    CPPUNIT_ASSERT_EQUAL(std::string("rect"), itChild->second.get<std::string>("kind"));
+    CPPUNIT_ASSERT_EQUAL(std::string("#eeeeee"), itChild->second.get<std::string>("fill"));
+    ++itChild;
+    CPPUNIT_ASSERT_EQUAL(std::string("text"), itChild->second.get<std::string>("kind"));
+    const auto& rLines = itChild->second.get_child("lines");
+    CPPUNIT_ASSERT_EQUAL(size_t(2), rLines.size());
+    auto itLine = rLines.begin();
+    CPPUNIT_ASSERT_DOUBLES_EQUAL(72.0, itLine->second.get<double>("baseline"), 1.0);
+    CPPUNIT_ASSERT_EQUAL(std::string("Hello card"),
+                         itLine->second.get_child("runs").begin()->second.get<std::string>("text"));
+    CPPUNIT_ASSERT_EQUAL(700, itLine->second.get_child("runs").begin()->second.get<int>("weight"));
+    ++itLine;
+    CPPUNIT_ASSERT_DOUBLES_EQUAL(86.0, itLine->second.get<double>("baseline"), 1.0);
+    ++it;
+    CPPUNIT_ASSERT_EQUAL(std::string("path"), it->second.get<std::string>("kind"));
+    CPPUNIT_ASSERT(!it->second.get<std::string>("d").empty());
+    CPPUNIT_ASSERT_EQUAL(std::string("#ff0000"), it->second.get<std::string>("fill"));
+}
+
+namespace
+{
+/// Every AcroForm widget type on one page (generated, all ASCII, so the
+/// cross-reference offsets hold in a raw string): a multi-line text field
+/// "name" = "Ada" (MaxLen 10), a checked check box "agree" (export value
+/// "Yes"), a radio group "choice" of "A" and "B" with "B" on, a combo box
+/// "lang" (English / Spanish, "Spanish"), a list box "colors" (Red / Green /
+/// Blue, Green selected), a push button "print" and an unsigned signature
+/// field "sig1" whose appearance is a drawn box.
+constexpr std::string_view aAcroFormWidgetsPdf = R"PDF(%PDF-1.7
+1 0 obj
+<< /Type /Catalog /Pages 2 0 R /AcroForm << /Fields [5 0 R 6 0 R 7 0 R 10 0 R 11 0 R 12 0 R 13 0 R] /DA (/Helv 10 Tf 0 g) /DR << /Font << /Helv 14 0 R >> >> >> >>
+endobj
+2 0 obj
+<< /Type /Pages /Kids [3 0 R] /Count 1 >>
+endobj
+3 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents 4 0 R /Resources << /Font << /Helv 14 0 R >> >> /Annots [5 0 R 6 0 R 8 0 R 9 0 R 10 0 R 11 0 R 12 0 R 13 0 R] >>
+endobj
+4 0 obj
+<<  /Length 46 >>
+stream
+BT /Helv 12 Tf 72 740 Td (Form widgets) Tj ET
+endstream
+endobj
+5 0 obj
+<< /Type /Annot /Subtype /Widget /F 4 /P 3 0 R /DA (/Helv 10 Tf 0 g) /FT /Tx /T (name) /V (Ada) /MaxLen 10 /Ff 4096 /Rect [72 680 272 700] >>
+endobj
+6 0 obj
+<< /Type /Annot /Subtype /Widget /F 4 /P 3 0 R /DA (/Helv 10 Tf 0 g) /FT /Btn /T (agree) /V /Yes /AS /Yes /Rect [72 640 86 654] /AP << /N << /Yes 15 0 R /Off 16 0 R >> >> >>
+endobj
+7 0 obj
+<< /FT /Btn /Ff 49152 /T (choice) /V /B /Kids [8 0 R 9 0 R] >>
+endobj
+8 0 obj
+<< /Type /Annot /Subtype /Widget /F 4 /P 3 0 R /DA (/Helv 10 Tf 0 g) /Parent 7 0 R /AS /Off /Rect [72 600 86 614] /AP << /N << /A 15 0 R /Off 16 0 R >> >> >>
+endobj
+9 0 obj
+<< /Type /Annot /Subtype /Widget /F 4 /P 3 0 R /DA (/Helv 10 Tf 0 g) /Parent 7 0 R /AS /B /Rect [100 600 114 614] /AP << /N << /B 15 0 R /Off 16 0 R >> >> >>
+endobj
+10 0 obj
+<< /Type /Annot /Subtype /Widget /F 4 /P 3 0 R /DA (/Helv 10 Tf 0 g) /FT /Ch /Ff 131072 /T (lang) /Opt [(English) (Spanish)] /V (Spanish) /Rect [72 560 272 580] >>
+endobj
+11 0 obj
+<< /Type /Annot /Subtype /Widget /F 4 /P 3 0 R /DA (/Helv 10 Tf 0 g) /FT /Ch /T (colors) /Opt [(Red) (Green) (Blue)] /V (Green) /I [1] /Rect [72 480 272 540] >>
+endobj
+12 0 obj
+<< /Type /Annot /Subtype /Widget /F 4 /P 3 0 R /DA (/Helv 10 Tf 0 g) /FT /Btn /Ff 65536 /T (print) /MK << /CA (Print) >> /Rect [300 680 400 700] /AP << /N 17 0 R >> >>
+endobj
+13 0 obj
+<< /Type /Annot /Subtype /Widget /F 4 /P 3 0 R /DA (/Helv 10 Tf 0 g) /FT /Sig /T (sig1) /Rect [72 400 272 440] /AP << /N 17 0 R >> >>
+endobj
+14 0 obj
+<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding /WinAnsiEncoding >>
+endobj
+15 0 obj
+<< /Type /XObject /Subtype /Form /BBox [0 0 14 14] /Length 22 >>
+stream
+0 0 0 rg 3 3 8 8 re f
+endstream
+endobj
+16 0 obj
+<< /Type /XObject /Subtype /Form /BBox [0 0 14 14] /Length 1 >>
+stream
+
+endstream
+endobj
+17 0 obj
+<< /Type /XObject /Subtype /Form /BBox [0 0 200 40] /Length 29 >>
+stream
+0 0 1 RG 2 w 1 1 198 38 re S
+endstream
+endobj
+xref
+0 18
+0000000000 65535 f 
+0000000009 00000 n 
+0000000187 00000 n 
+0000000244 00000 n 
+0000000435 00000 n 
+0000000531 00000 n 
+0000000688 00000 n 
+0000000877 00000 n 
+0000000955 00000 n 
+0000001128 00000 n 
+0000001301 00000 n 
+0000001481 00000 n 
+0000001658 00000 n 
+0000001842 00000 n 
+0000001992 00000 n 
+0000002090 00000 n 
+0000002210 00000 n 
+0000002308 00000 n 
+trailer
+<< /Size 18 /Root 1 0 R >>
+startxref
+2436
+%%EOF
+)PDF";
+}
+
+CPPUNIT_TEST_FIXTURE(SdUiImpressTest, testPdfFormWidgetsImport)
+{
+    // Decompose imports EVERY widget type as the form control the PDF export
+    // writes back as the same AcroForm field, with its name, value and
+    // flags; a signature field keeps its appearance as a locked picture.
+    utl::TempFileNamed aFixture(u"acroform", true, u".pdf");
+    aFixture.EnableKillingFile();
+    SvStream* pFixtureStream = aFixture.GetStream(StreamMode::WRITE);
+    CPPUNIT_ASSERT(pFixtureStream);
+    pFixtureStream->WriteBytes(aAcroFormWidgetsPdf.data(), aAcroFormWidgetsPdf.size());
+    aFixture.CloseStream();
+    loadFromURL(aFixture.GetURL());
+
+    comphelper::COKit::setActive(true);
+    comphelper::ScopeGuard aKitGuard([] { comphelper::COKit::setActive(false); });
+    auto xDesktop = frame::Desktop::create(comphelper::getProcessComponentContext());
+    auto pImpressDocument = dynamic_cast<SdXImpressDocument*>(mxComponent.get());
+    CPPUNIT_ASSERT(pImpressDocument);
+    auto pFrame = pImpressDocument->GetDocShell()->GetFrame();
+    CPPUNIT_ASSERT(pFrame);
+    xDesktop->setActiveFrame(pFrame->GetFrame().GetFrameInterface());
+    SdDrawDocument* pDoc = pImpressDocument->GetDoc();
+    CPPUNIT_ASSERT(pDoc->IsPDFDocument());
+    SdPage* pPage = pDoc->GetSdPage(0, PageKind::Standard);
+    CPPUNIT_ASSERT(pPage->GetPdfPageGraphic());
+
+    dispatchCommand(mxComponent, u".uno:TransformDocumentStructure"_ustr,
+                    { comphelper::makePropertyValue(
+                        u"DataJson"_ustr,
+                        u"{ \"Transforms\": { \"SlideCommands\": ["
+                        u"{\"DecomposePdfPages\": true}]}}"_ustr) });
+    CPPUNIT_ASSERT(!pPage->GetPdfPageGraphic());
+
+    std::map<OUString, std::vector<uno::Reference<beans::XPropertySet>>> aControls;
+    SdrGrafObj* pSignature = nullptr;
+    for (size_t n = 0; n < pPage->GetObjCount(); ++n)
+    {
+        SdrObject* pObj = pPage->GetObj(n);
+        if (auto* pUno = dynamic_cast<SdrUnoObj*>(pObj))
+        {
+            uno::Reference<beans::XPropertySet> xProps(pUno->GetUnoControlModel(),
+                                                       uno::UNO_QUERY);
+            CPPUNIT_ASSERT(xProps.is());
+            OUString aName;
+            xProps->getPropertyValue(u"Name"_ustr) >>= aName;
+            aControls[aName].push_back(xProps);
+        }
+        else if (auto* pGraf = dynamic_cast<SdrGrafObj*>(pObj))
+        {
+            if (pGraf->GetName() == "sig1")
+                pSignature = pGraf;
+        }
+    }
+
+    auto prop = [](const uno::Reference<beans::XPropertySet>& xProps, const OUString& rProp) {
+        return xProps->getPropertyValue(rProp);
+    };
+    // text field: value, max length, multi-line
+    CPPUNIT_ASSERT_EQUAL(size_t(1), aControls[u"name"_ustr].size());
+    const auto& xName = aControls[u"name"_ustr].front();
+    CPPUNIT_ASSERT_EQUAL(u"Ada"_ustr, prop(xName, u"Text"_ustr).get<OUString>());
+    CPPUNIT_ASSERT_EQUAL(sal_Int16(10), prop(xName, u"MaxTextLen"_ustr).get<sal_Int16>());
+    CPPUNIT_ASSERT(prop(xName, u"MultiLine"_ustr).get<bool>());
+    // check box: on, with its own export value
+    CPPUNIT_ASSERT_EQUAL(size_t(1), aControls[u"agree"_ustr].size());
+    const auto& xAgree = aControls[u"agree"_ustr].front();
+    CPPUNIT_ASSERT_EQUAL(sal_Int16(1), prop(xAgree, u"State"_ustr).get<sal_Int16>());
+    CPPUNIT_ASSERT_EQUAL(u"Yes"_ustr, prop(xAgree, u"RefValue"_ustr).get<OUString>());
+    // radio group: two buttons, one group, "B" on
+    const auto& rRadios = aControls[u"choice"_ustr];
+    CPPUNIT_ASSERT_EQUAL(size_t(2), rRadios.size());
+    OUString aOn;
+    for (const auto& xRadio : rRadios)
+    {
+        CPPUNIT_ASSERT_EQUAL(sal_Int16(form::FormComponentType::RADIOBUTTON),
+                             prop(xRadio, u"ClassId"_ustr).get<sal_Int16>());
+        CPPUNIT_ASSERT_EQUAL(u"choice"_ustr, prop(xRadio, u"GroupName"_ustr).get<OUString>());
+        if (prop(xRadio, u"State"_ustr).get<sal_Int16>() == 1)
+            aOn = prop(xRadio, u"RefValue"_ustr).get<OUString>();
+    }
+    CPPUNIT_ASSERT_EQUAL(u"B"_ustr, aOn);
+    // combo box: its options and value
+    CPPUNIT_ASSERT_EQUAL(size_t(1), aControls[u"lang"_ustr].size());
+    const auto& xLang = aControls[u"lang"_ustr].front();
+    const auto aLangItems = prop(xLang, u"StringItemList"_ustr).get<cpo::uno::Sequence<OUString>>();
+    CPPUNIT_ASSERT_EQUAL(sal_Int32(2), aLangItems.getLength());
+    CPPUNIT_ASSERT_EQUAL(u"English"_ustr, aLangItems[0]);
+    CPPUNIT_ASSERT_EQUAL(u"Spanish"_ustr, prop(xLang, u"Text"_ustr).get<OUString>());
+    // list box: its options and selection
+    CPPUNIT_ASSERT_EQUAL(size_t(1), aControls[u"colors"_ustr].size());
+    const auto& xColors = aControls[u"colors"_ustr].front();
+    CPPUNIT_ASSERT_EQUAL(sal_Int32(3),
+                         prop(xColors, u"StringItemList"_ustr).get<cpo::uno::Sequence<OUString>>().getLength());
+    const auto aSelected = prop(xColors, u"SelectedItems"_ustr).get<cpo::uno::Sequence<sal_Int16>>();
+    CPPUNIT_ASSERT_EQUAL(sal_Int32(1), aSelected.getLength());
+    CPPUNIT_ASSERT_EQUAL(sal_Int16(1), aSelected[0]);
+    // push button
+    CPPUNIT_ASSERT_EQUAL(size_t(1), aControls[u"print"_ustr].size());
+    CPPUNIT_ASSERT_EQUAL(sal_Int16(form::FormComponentType::COMMANDBUTTON),
+                         prop(aControls[u"print"_ustr].front(), u"ClassId"_ustr).get<sal_Int16>());
+    // signature: its appearance, locked, named after the field
+    CPPUNIT_ASSERT(pSignature);
+    CPPUNIT_ASSERT(pSignature->IsMoveProtect());
+    CPPUNIT_ASSERT(pSignature->IsResizeProtect());
+    // Not an edit.
+    CPPUNIT_ASSERT(!pDoc->IsChanged());
+
+    // The export writes them back as real fields with their values.
+    uno::Reference<frame::XStorable> xStorable(mxComponent, uno::UNO_QUERY);
+    comphelper::SequenceAsHashMap aMediaDescriptor;
+    aMediaDescriptor[u"FilterName"_ustr] <<= u"draw_pdf_Export"_ustr;
+    aMediaDescriptor[u"FilterData"_ustr] <<= comphelper::InitPropertySequence(
+        { { "ExportFormFields", cpo::uno::Any(true) } });
+    xStorable->storeToURL(maTempFile.GetURL(), aMediaDescriptor.getAsConstPropertyValueList());
+    std::unique_ptr<vcl::pdf::PDFiumDocument> pPdf = parsePDFExport();
+    CPPUNIT_ASSERT(pPdf);
+    std::unique_ptr<vcl::pdf::PDFiumPage> pPdfPage = pPdf->openPage(0);
+    CPPUNIT_ASSERT(pPdfPage);
+    std::map<vcl::pdf::PDFFormFieldType, int> aTypes;
+    std::map<OUString, OUString> aValues;
+    for (int nAnnot = 0; nAnnot < pPdfPage->getAnnotationCount(); ++nAnnot)
+    {
+        auto pAnnot = pPdfPage->getAnnotation(nAnnot);
+        if (!pAnnot || pAnnot->getSubType() != vcl::pdf::PDFAnnotationSubType::Widget)
+            continue;
+        ++aTypes[pAnnot->getFormFieldType(pPdf.get())];
+        aValues[pAnnot->getFormFieldName(pPdf.get())] = pAnnot->getFormFieldValue(pPdf.get());
+    }
+    CPPUNIT_ASSERT_EQUAL(1, aTypes[vcl::pdf::PDFFormFieldType::TextField]);
+    CPPUNIT_ASSERT_EQUAL(1, aTypes[vcl::pdf::PDFFormFieldType::CheckBox]);
+    CPPUNIT_ASSERT_EQUAL(2, aTypes[vcl::pdf::PDFFormFieldType::RadioButton]);
+    CPPUNIT_ASSERT_EQUAL(1, aTypes[vcl::pdf::PDFFormFieldType::ComboBox]);
+    CPPUNIT_ASSERT_EQUAL(1, aTypes[vcl::pdf::PDFFormFieldType::ListBox]);
+    CPPUNIT_ASSERT_EQUAL(1, aTypes[vcl::pdf::PDFFormFieldType::PushButton]);
+    CPPUNIT_ASSERT_EQUAL(u"Ada"_ustr, aValues[u"name"_ustr]);
+    CPPUNIT_ASSERT_EQUAL(u"Yes"_ustr, aValues[u"agree"_ustr]);
+    CPPUNIT_ASSERT_EQUAL(u"B"_ustr, aValues[u"choice"_ustr]);
+    CPPUNIT_ASSERT_EQUAL(u"Spanish"_ustr, aValues[u"lang"_ustr]);
+}
+
+namespace
+{
+/// A visible text field "shown" = "Ada", a Hidden (/F 2) text field "helper"
+/// = "42" and a NoView (/F 36: Print | NoView) check box "calc" (generated,
+/// all ASCII, so the cross-reference offsets hold in a raw string).
+constexpr std::string_view aHiddenWidgetsPdf = R"PDF(%PDF-1.7
+1 0 obj
+<< /Type /Catalog /Pages 2 0 R /AcroForm << /Fields [5 0 R 6 0 R 7 0 R] /DA (/Helv 10 Tf 0 g) /DR << /Font << /Helv 8 0 R >> >> >> >>
+endobj
+2 0 obj
+<< /Type /Pages /Kids [3 0 R] /Count 1 >>
+endobj
+3 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents 4 0 R /Resources << /Font << /Helv 8 0 R >> >> /Annots [5 0 R 6 0 R 7 0 R] >>
+endobj
+4 0 obj
+<< /Length 46 >>
+stream
+BT /Helv 12 Tf 72 740 Td (Hidden fields) Tj ET
+endstream
+endobj
+5 0 obj
+<< /Type /Annot /Subtype /Widget /F 4 /P 3 0 R /DA (/Helv 10 Tf 0 g) /FT /Tx /T (shown) /V (Ada) /Rect [72 680 272 700] >>
+endobj
+6 0 obj
+<< /Type /Annot /Subtype /Widget /F 2 /P 3 0 R /DA (/Helv 10 Tf 0 g) /FT /Tx /T (helper) /V (42) /Rect [72 640 272 660] >>
+endobj
+7 0 obj
+<< /Type /Annot /Subtype /Widget /F 36 /P 3 0 R /DA (/Helv 10 Tf 0 g) /FT /Btn /T (calc) /V /Off /AS /Off /Rect [72 600 86 614] >>
+endobj
+8 0 obj
+<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding /WinAnsiEncoding >>
+endobj
+xref
+0 9
+0000000000 65535 f 
+0000000009 00000 n 
+0000000158 00000 n 
+0000000215 00000 n 
+0000000371 00000 n 
+0000000467 00000 n 
+0000000605 00000 n 
+0000000743 00000 n 
+0000000889 00000 n 
+trailer
+<< /Size 9 /Root 1 0 R >>
+startxref
+986
+%%EOF
+)PDF";
+}
+
+CPPUNIT_TEST_FIXTURE(SdUiImpressTest, testPdfHiddenFormWidgetsNotImported)
+{
+    // The export writes only the controls it paints, and it paints no
+    // invisible object: a Hidden or NoView widget imported as a hidden
+    // control was silently dropped by the first canvas save. It is not
+    // imported, so the canvas never shows a field its save does not keep.
+    utl::TempFileNamed aFixture(u"hiddenform", true, u".pdf");
+    aFixture.EnableKillingFile();
+    SvStream* pFixtureStream = aFixture.GetStream(StreamMode::WRITE);
+    CPPUNIT_ASSERT(pFixtureStream);
+    pFixtureStream->WriteBytes(aHiddenWidgetsPdf.data(), aHiddenWidgetsPdf.size());
+    aFixture.CloseStream();
+    loadFromURL(aFixture.GetURL());
+
+    comphelper::COKit::setActive(true);
+    comphelper::ScopeGuard aKitGuard([] { comphelper::COKit::setActive(false); });
+    auto xDesktop = frame::Desktop::create(comphelper::getProcessComponentContext());
+    auto pImpressDocument = dynamic_cast<SdXImpressDocument*>(mxComponent.get());
+    CPPUNIT_ASSERT(pImpressDocument);
+    auto pFrame = pImpressDocument->GetDocShell()->GetFrame();
+    CPPUNIT_ASSERT(pFrame);
+    xDesktop->setActiveFrame(pFrame->GetFrame().GetFrameInterface());
+    SdDrawDocument* pDoc = pImpressDocument->GetDoc();
+    CPPUNIT_ASSERT(pDoc->IsPDFDocument());
+    SdPage* pPage = pDoc->GetSdPage(0, PageKind::Standard);
+
+    dispatchCommand(mxComponent, u".uno:TransformDocumentStructure"_ustr,
+                    { comphelper::makePropertyValue(
+                        u"DataJson"_ustr,
+                        u"{ \"Transforms\": { \"SlideCommands\": ["
+                        u"{\"DecomposePdfPages\": true}]}}"_ustr) });
+    CPPUNIT_ASSERT(!pPage->GetPdfPageGraphic());
+
+    std::vector<OUString> aNames;
+    for (size_t n = 0; n < pPage->GetObjCount(); ++n)
+    {
+        auto* pUno = dynamic_cast<SdrUnoObj*>(pPage->GetObj(n));
+        if (!pUno)
+            continue;
+        uno::Reference<beans::XPropertySet> xProps(pUno->GetUnoControlModel(), uno::UNO_QUERY);
+        CPPUNIT_ASSERT(xProps.is());
+        OUString aName;
+        xProps->getPropertyValue(u"Name"_ustr) >>= aName;
+        // Every control the import makes is one the export paints.
+        CPPUNIT_ASSERT(pUno->IsVisible());
+        aNames.push_back(aName);
+    }
+    CPPUNIT_ASSERT_EQUAL(size_t(1), aNames.size());
+    CPPUNIT_ASSERT_EQUAL(u"shown"_ustr, aNames.front());
+}
+
+namespace
+{
+/// A 40x32 RGB baseline JPEG (a colour gradient), base64.
+constexpr std::string_view aCanvasJpegBase64 =
+    "/9j/4AAQSkZJRgABAQAAAQABAAD/2wBDAAUDBAQEAwUEBAQFBQUGBwwIBwcHBw8LCwkMEQ8S"
+    "EhEPERETFhwXExQaFRERGCEYGh0dHx8fExciJCIeJBweHx7/2wBDAQUFBQcGBw4ICA4eFBEU"
+    "Hh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh7/wAAR"
+    "CAAgACgDAREAAhEBAxEB/8QAHwAAAQUBAQEBAQEAAAAAAAAAAAECAwQFBgcICQoL/8QAtRAA"
+    "AgEDAwIEAwUFBAQAAAF9AQIDAAQRBRIhMUEGE1FhByJxFDKBkaEII0KxwRVS0fAkM2JyggkK"
+    "FhcYGRolJicoKSo0NTY3ODk6Q0RFRkdISUpTVFVWV1hZWmNkZWZnaGlqc3R1dnd4eXqDhIWG"
+    "h4iJipKTlJWWl5iZmqKjpKWmp6ipqrKztLW2t7i5usLDxMXGx8jJytLT1NXW19jZ2uHi4+Tl"
+    "5ufo6erx8vP09fb3+Pn6/8QAHwEAAwEBAQEBAQEBAQAAAAAAAAECAwQFBgcICQoL/8QAtREA"
+    "AgECBAQDBAcFBAQAAQJ3AAECAxEEBSExBhJBUQdhcRMiMoEIFEKRobHBCSMzUvAVYnLRChYk"
+    "NOEl8RcYGRomJygpKjU2Nzg5OkNERUZHSElKU1RVVldYWVpjZGVmZ2hpanN0dXZ3eHl6goOE"
+    "hYaHiImKkpOUlZaXmJmaoqOkpaanqKmqsrO0tba3uLm6wsPExcbHyMnK0tPU1dbX2Nna4uPk"
+    "5ebn6Onq8vP09fb3+Pn6/9oADAMBAAIRAxEAPwD5wtNM6fLX7bUxB5WExZr2mmdPlrjqYg+n"
+    "wmLNe00zp8tcNTEH02ExZr2mmdPlriqYk+mwmLNe00zp8tcdTEn0+ExZzFppnT5a9WpiD+QM"
+    "JizXtNM6fLXHUxB9PhMWa9ppnT5a4qmIPpsJizXtNM6fLXFUxB9PhMWa9ppnT5a4qmIPpsJi"
+    "zmLTTOny161TEH8f4TFGvaaZ0+WuKpiD6fCYo17TTOny1xVMSfTYTFGvaaZ0+WuKpiT6fCYo"
+    "17TTOny1xVMQfTYTFHL2mmdPlr1qmIP5AwmLNe00zp8tcVTEH0+ExZr2mmdPlriqYg+mwmLN"
+    "e00zp8tcVTEH02ExZr2mmdPlrjqYg+nwmLP/2Q==";
+}
+
+CPPUNIT_TEST_FIXTURE(SdUiImpressTest, testPdfCanvasSaveOptions)
+{
+    // What a save of a PDF opened into Draw (the PDF canvas) now exports
+    // with: the FilterData desktop::setPdfSourceSaveFilterData adds in the
+    // kit's .uno:Save branch (desktop/source/lib/init.cxx; that branch needs
+    // the kit, so this test passes the same FilterData itself). The form
+    // comes back as real fields, and a JPEG picture is written through byte
+    // for byte. With only the FilterData the save sent before
+    // (ExportBookmarks, ExportFormFields) PDFExport keeps
+    // ReduceImageResolution on, HasAdequateCompression refuses the
+    // passthrough, and the picture is decoded and re-encoded on every save.
+    utl::TempFileNamed aFixture(u"acroform", true, u".pdf");
+    aFixture.EnableKillingFile();
+    SvStream* pFixtureStream = aFixture.GetStream(StreamMode::WRITE);
+    CPPUNIT_ASSERT(pFixtureStream);
+    pFixtureStream->WriteBytes(aAcroFormWidgetsPdf.data(), aAcroFormWidgetsPdf.size());
+    aFixture.CloseStream();
+    loadFromURL(aFixture.GetURL());
+
+    comphelper::COKit::setActive(true);
+    comphelper::ScopeGuard aKitGuard([] { comphelper::COKit::setActive(false); });
+    auto xDesktop = frame::Desktop::create(comphelper::getProcessComponentContext());
+    auto pImpressDocument = dynamic_cast<SdXImpressDocument*>(mxComponent.get());
+    CPPUNIT_ASSERT(pImpressDocument);
+    auto pFrame = pImpressDocument->GetDocShell()->GetFrame();
+    CPPUNIT_ASSERT(pFrame);
+    xDesktop->setActiveFrame(pFrame->GetFrame().GetFrameInterface());
+    SdDrawDocument* pDoc = pImpressDocument->GetDoc();
+    CPPUNIT_ASSERT(pDoc->IsPDFDocument());
+    SdPage* pPage = pDoc->GetSdPage(0, PageKind::Standard);
+    dispatchCommand(mxComponent, u".uno:TransformDocumentStructure"_ustr,
+                    { comphelper::makePropertyValue(
+                        u"DataJson"_ustr,
+                        u"{ \"Transforms\": { \"SlideCommands\": ["
+                        u"{\"DecomposePdfPages\": true}]}}"_ustr) });
+    CPPUNIT_ASSERT(!pPage->GetPdfPageGraphic());
+
+    // A JPEG picture the way the importer's passthrough (or a paste) hands it
+    // over: the decoded bitmap plus its NativeJpg link.
+    cpo::uno::Sequence<sal_Int8> aJpeg;
+    comphelper::Base64::decode(aJpeg, aCanvasJpegBase64);
+    CPPUNIT_ASSERT(aJpeg.hasElements());
+    SvMemoryStream aJpegStream(const_cast<sal_Int8*>(aJpeg.getConstArray()), aJpeg.getLength(),
+                               StreamMode::READ);
+    Graphic aGraphic;
+    CPPUNIT_ASSERT(GraphicFilter::GetGraphicFilter().ImportGraphic(aGraphic, u"", aJpegStream)
+                   == ERRCODE_NONE);
+    CPPUNIT_ASSERT(aGraphic.IsGfxLink());
+    const GfxLink aLink = aGraphic.GetGfxLink();
+    CPPUNIT_ASSERT(aLink.GetType() == GfxLinkType::NativeJpg);
+    CPPUNIT_ASSERT(aLink.GetData());
+    const std::vector<sal_uInt8> aLinkData(aLink.GetData(), aLink.GetData() + aLink.GetDataSize());
+    rtl::Reference<SdrGrafObj> pPicture
+        = new SdrGrafObj(*pDoc, aGraphic, tools::Rectangle(Point(2000, 20000), Size(4000, 3200)));
+    pPage->NbcInsertObject(pPicture.get());
+
+    uno::Reference<frame::XStorable> xStorable(mxComponent, uno::UNO_QUERY);
+    comphelper::SequenceAsHashMap aMediaDescriptor;
+    aMediaDescriptor[u"FilterName"_ustr] <<= u"draw_pdf_Export"_ustr;
+    aMediaDescriptor[u"FilterData"_ustr] <<= comphelper::InitPropertySequence(
+        { { "ExportBookmarks", cpo::uno::Any(true) },
+          { "ExportFormFields", cpo::uno::Any(true) },
+          { "ReduceImageResolution", cpo::uno::Any(false) },
+          { "UseLosslessCompression", cpo::uno::Any(true) },
+          { "ExportNotes", cpo::uno::Any(true) } });
+    xStorable->storeToURL(maTempFile.GetURL(), aMediaDescriptor.getAsConstPropertyValueList());
+    std::unique_ptr<vcl::pdf::PDFiumDocument> pPdf = parsePDFExport();
+    CPPUNIT_ASSERT(pPdf);
+    std::unique_ptr<vcl::pdf::PDFiumPage> pPdfPage = pPdf->openPage(0);
+    CPPUNIT_ASSERT(pPdfPage);
+
+    // The form: real fields, with their values.
+    std::map<OUString, OUString> aValues;
+    for (int nAnnot = 0; nAnnot < pPdfPage->getAnnotationCount(); ++nAnnot)
+    {
+        auto pAnnot = pPdfPage->getAnnotation(nAnnot);
+        if (pAnnot && pAnnot->getSubType() == vcl::pdf::PDFAnnotationSubType::Widget)
+            aValues[pAnnot->getFormFieldName(pPdf.get())] = pAnnot->getFormFieldValue(pPdf.get());
+    }
+    CPPUNIT_ASSERT_EQUAL(u"Ada"_ustr, aValues[u"name"_ustr]);
+    CPPUNIT_ASSERT_EQUAL(u"Yes"_ustr, aValues[u"agree"_ustr]);
+    CPPUNIT_ASSERT_EQUAL(u"B"_ustr, aValues[u"choice"_ustr]);
+    CPPUNIT_ASSERT_EQUAL(u"Spanish"_ustr, aValues[u"lang"_ustr]);
+
+    // The picture: one DCTDecode image whose stream is the JPEG itself.
+    int nJpegs = 0;
+    std::vector<sal_uInt8> aWritten;
+    std::function<void(vcl::pdf::PDFiumPageObject&)> aVisit
+        = [&](vcl::pdf::PDFiumPageObject& rObject) {
+              if (rObject.getType() == vcl::pdf::PDFPageObjectType::Form)
+              {
+                  for (int n = 0; n < rObject.getFormObjectCount(); ++n)
+                      if (std::unique_ptr<vcl::pdf::PDFiumPageObject> pChild
+                          = rObject.getFormObject(n))
+                          aVisit(*pChild);
+                  return;
+              }
+              if (rObject.getType() != vcl::pdf::PDFPageObjectType::Image)
+                  return;
+              const std::vector<OString> aFilters = rObject.getImageFilters();
+              if (aFilters.size() == 1 && aFilters[0] == "DCTDecode")
+              {
+                  ++nJpegs;
+                  aWritten = rObject.getImageDataRaw();
+              }
+          };
+    for (int n = 0; n < pPdfPage->getObjectCount(); ++n)
+        if (std::unique_ptr<vcl::pdf::PDFiumPageObject> pObject = pPdfPage->getObject(n))
+            aVisit(*pObject);
+    CPPUNIT_ASSERT_EQUAL(1, nJpegs);
+    CPPUNIT_ASSERT_EQUAL(aLinkData.size(), aWritten.size());
+    CPPUNIT_ASSERT(aLinkData == aWritten);
+}
+
+CPPUNIT_TEST_FIXTURE(SdUiImpressTest, testPdfPageModelLiveRotationAndLabel)
+{
+    // The live model (the one attached at save, which the next open builds
+    // from) carries a rectangle's rotation and its own label, and says when
+    // a page holds something it cannot express.
+    createSdDrawDoc("pdf/multipage.pdf");
+    comphelper::COKit::setActive(true);
+    comphelper::ScopeGuard aKitGuard([] { comphelper::COKit::setActive(false); });
+    auto xDesktop = frame::Desktop::create(comphelper::getProcessComponentContext());
+    auto pImpressDocument = static_cast<SdXImpressDocument*>(mxComponent.get());
+    auto pFrame = pImpressDocument->GetDocShell()->GetFrame();
+    CPPUNIT_ASSERT(pFrame);
+    xDesktop->setActiveFrame(pFrame->GetFrame().GetFrameInterface());
+    SdDrawDocument* pDoc = pImpressDocument->GetDoc();
+    SdPage* pPage = pDoc->GetSdPage(0, PageKind::Standard);
+    CPPUNIT_ASSERT(pPage->GetPdfPageGraphic());
+    const double fW = pPage->GetSize().Width() * 72.0 / 2540.0;
+    const double fH = pPage->GetSize().Height() * 72.0 / 2540.0;
+    const OString aModel
+        = "{\"page\":{\"w\":" + OString::number(fW) + ",\"h\":" + OString::number(fH)
+          + "},\"objects\":["
+            "{\"kind\":\"rect\",\"box\":{\"x\":100,\"y\":100,\"w\":120,\"h\":60},\"fill\":\"#336699\","
+            "\"rotate\":30,\"text\":{\"hAdjust\":1,\"vAdjust\":1,\"lines\":["
+            "{\"box\":{\"x\":110,\"y\":110,\"w\":40,\"h\":14},\"baseline\":122,\"runs\":[{\"text\":\"Label\","
+            "\"box\":{\"x\":110,\"y\":110,\"w\":40,\"h\":14},\"family\":\"Liberation Sans\",\"size\":12,"
+            "\"weight\":400,\"italic\":false,\"color\":\"#000000\",\"letterSpacing\":0}]}]}}]}"_ostr;
+    OUStringBuffer aBase64;
+    comphelper::Base64::encode(
+        aBase64, cpo::uno::Sequence<sal_Int8>(reinterpret_cast<const sal_Int8*>(aModel.getStr()),
+                                              aModel.getLength()));
+    const OUString aDataJson = u"{ \"Transforms\": { \"SlideCommands\": [{\"BuildPdfPageModel\": \"0|"_ustr
+                               + aBase64.makeStringAndClear() + u"\"}]}}"_ustr;
+    dispatchCommand(mxComponent, u".uno:TransformDocumentStructure"_ustr,
+                    { comphelper::makePropertyValue(u"DataJson"_ustr, aDataJson) });
+    CPPUNIT_ASSERT(!pPage->GetPdfPageGraphic());
+    CPPUNIT_ASSERT_EQUAL(size_t(1), pPage->GetObjCount());
+    SdrObject* pRect = pPage->GetObj(0);
+    CPPUNIT_ASSERT(pRect->GetObjIdentifier() == SdrObjKind::Rectangle);
+    // Built rotated, with its label.
+    CPPUNIT_ASSERT_EQUAL(sal_Int32(3000), pRect->GetRotateAngle().get());
+    auto* pRectText = DynCastSdrTextObj(pRect);
+    CPPUNIT_ASSERT(pRectText && pRectText->GetOutlinerParaObject());
+    CPPUNIT_ASSERT_EQUAL(u"Label"_ustr,
+                         pRectText->GetOutlinerParaObject()->GetTextObject().GetText(0));
+
+    auto readLive = [&]() {
+        tools::JsonWriter aJsonWriter;
+        pImpressDocument->getCommandValues(aJsonWriter, ".uno:PdfPageModel?part=0");
+        const OString aLive = aJsonWriter.finishAndGetAsOString();
+        boost::property_tree::ptree aTree;
+        std::istringstream aStream(std::string(aLive.getStr(), aLive.getLength()));
+        boost::property_tree::read_json(aStream, aTree);
+        return aTree;
+    };
+    {
+        const boost::property_tree::ptree aTree = readLive();
+        CPPUNIT_ASSERT(aTree.get<bool>("complete"));
+        const auto& rNode = aTree.get_child("objects").begin()->second;
+        CPPUNIT_ASSERT_EQUAL(std::string("rect"), rNode.get<std::string>("kind"));
+        CPPUNIT_ASSERT_DOUBLES_EQUAL(30.0, rNode.get<double>("rotate"), 0.01);
+        // the box is the unrotated rect, its top-left the rotation reference
+        CPPUNIT_ASSERT_DOUBLES_EQUAL(100.0, rNode.get<double>("box.x"), 0.5);
+        CPPUNIT_ASSERT_DOUBLES_EQUAL(120.0, rNode.get<double>("box.w"), 0.5);
+        const auto& rLabelLines = rNode.get_child("text.lines");
+        CPPUNIT_ASSERT(!rLabelLines.empty());
+        CPPUNIT_ASSERT_EQUAL(
+            std::string("Label"),
+            rLabelLines.begin()->second.get_child("runs").begin()->second.get<std::string>("text"));
+    }
+    // A gradient is not expressible: the page says so instead of rebuilding
+    // it as a flat colour on the next open.
+    pRect->SetMergedItem(XFillStyleItem(drawing::FillStyle_GRADIENT));
+    {
+        const boost::property_tree::ptree aTree = readLive();
+        CPPUNIT_ASSERT(!aTree.get<bool>("complete"));
+        bool bGradient = false;
+        for (const auto& rKind : aTree.get_child("dropped"))
+            bGradient = bGradient || rKind.second.get_value<std::string>() == "fill:gradient";
+        CPPUNIT_ASSERT(bGradient);
+    }
+}
+
+CPPUNIT_TEST_FIXTURE(SdUiImpressTest, testDeckInfoFitState)
+{
+    // geometry=1 deck info reports each text box's ideal fit size: a box
+    // resized wider than its text says FitsText false with TextFitWidth
+    // smaller than Width.
+    createSdImpressDoc();
+
+    comphelper::COKit::setActive(true);
+    comphelper::ScopeGuard aKitGuard([] { comphelper::COKit::setActive(false); });
+
+    auto xDesktop = frame::Desktop::create(comphelper::getProcessComponentContext());
+    auto pImpressDocument = static_cast<SdXImpressDocument*>(mxComponent.get());
+    auto pFrame = pImpressDocument->GetDocShell()->GetFrame();
+    CPPUNIT_ASSERT(pFrame);
+    xDesktop->setActiveFrame(pFrame->GetFrame().GetFrameInterface());
+
+    SdPage* pPage = pImpressDocument->GetDoc()->GetSdPage(0, PageKind::Standard);
+    pPage->SetBorder(1000, 800, 1100, 900);
+    const size_t nObjCountBefore = pPage->GetObjCount();
+
+    dispatchCommand(mxComponent, u".uno:TransformDocumentStructure"_ustr,
+                    { comphelper::makePropertyValue(
+                        u"DataJson"_ustr,
+                        u"{ \"Transforms\": { \"SlideCommands\": ["
+                        u"{\"InsertTextBox.0\": \"3000,3000|Snug\"}]}}"_ustr) });
+    SdrTextObj* pBox = DynCastSdrTextObj(pPage->GetObj(nObjCountBefore));
+    CPPUNIT_ASSERT(pBox);
+
+    // Snug by construction: the box owns a FitsText true.
+    {
+        tools::JsonWriter aJsonWriter;
+        pImpressDocument->getCommandValues(
+            aJsonWriter, ".uno:ExtractDocumentStructure?filter=slides&geometry=1&fit=1");
+        const OString aExtract = aJsonWriter.finishAndGetAsOString();
+        CPPUNIT_ASSERT(aExtract.indexOf("\"FitsText\": true") >= 0);
+    }
+
+    // Stretch it well past its text: the reported fit state flips and the
+    // ideal width stays at the text's own size.
+    tools::Rectangle aRect = pBox->GetLogicRect();
+    aRect.AdjustRight(4000);
+    pBox->SetLogicRect(aRect);
+
+    const Size aFitSize = pBox->CalcFitToTextSize();
+    CPPUNIT_ASSERT(aFitSize.Width() < pBox->GetLogicRect().GetWidth() - 25);
+    {
+        tools::JsonWriter aJsonWriter;
+        pImpressDocument->getCommandValues(
+            aJsonWriter, ".uno:ExtractDocumentStructure?filter=slides&geometry=1&fit=1");
+        const OString aExtract = aJsonWriter.finishAndGetAsOString();
+        CPPUNIT_ASSERT(aExtract.indexOf("\"FitsText\": false") >= 0);
+        CPPUNIT_ASSERT(
+            aExtract.indexOf(Concat2View("\"TextFitWidth\": " + OString::number(aFitSize.Width()))) >= 0);
+        CPPUNIT_ASSERT(aExtract.indexOf(Concat2View("\"Width\": "
+                                        + OString::number(pBox->GetLogicRect().GetWidth())))
+                       >= 0);
+    }
+}
+
+CPPUNIT_TEST_FIXTURE(SdUiImpressTest, testBatchRestoresOriginPage)
+{
+    // Agent batches must not hijack the user's view: after a batch the view
+    // is switched back to the page it started on, unless the batch
+    // explicitly ENDS in a bare JumpToSlide - the one sanctioned way for a
+    // batch to navigate.
+    createSdImpressDoc();
+
+    comphelper::COKit::setActive(true);
+    comphelper::ScopeGuard aKitGuard([] { comphelper::COKit::setActive(false); });
+
+    auto xDesktop = frame::Desktop::create(comphelper::getProcessComponentContext());
+    auto pImpressDocument = static_cast<SdXImpressDocument*>(mxComponent.get());
+    auto pFrame = pImpressDocument->GetDocShell()->GetFrame();
+    CPPUNIT_ASSERT(pFrame);
+    xDesktop->setActiveFrame(pFrame->GetFrame().GetFrameInterface());
+
+    auto* pDrawViewShell
+        = dynamic_cast<sd::DrawViewShell*>(pImpressDocument->GetDocShell()->GetViewShell());
+    CPPUNIT_ASSERT(pDrawViewShell);
+
+    // Grow the deck to three slides; the batch's own navigation is restored
+    // away, so the view stays on the entry page.
+    dispatchCommand(mxComponent, u".uno:TransformDocumentStructure"_ustr,
+                    { comphelper::makePropertyValue(
+                        u"DataJson"_ustr,
+                        u"{ \"Transforms\": { \"SlideCommands\": ["
+                        u"{\"DuplicateSlide\": 0}, {\"DuplicateSlide\": 0}]}}"_ustr) });
+    CPPUNIT_ASSERT_EQUAL(sal_uInt16(3),
+                         pImpressDocument->GetDoc()->GetSdPageCount(PageKind::Standard));
+    checkCurrentPageNumber(1);
+
+    // Work from slide 2 like a user would.
+    pDrawViewShell->SwitchPage(1);
+    Scheduler::ProcessEventsToIdle();
+    checkCurrentPageNumber(2);
+
+    // A batch that edits slide 3 mid-flight comes back home...
+    dispatchCommand(mxComponent, u".uno:TransformDocumentStructure"_ustr,
+                    { comphelper::makePropertyValue(
+                        u"DataJson"_ustr,
+                        u"{ \"Transforms\": { \"SlideCommands\": ["
+                        u"{\"JumpToSlide\": 2}, {\"SetText.0\": \"edited elsewhere\"}]}}"_ustr) });
+    checkCurrentPageNumber(2);
+    // ...having really edited it.
+    SdrTextObj* pTitle = DynCastSdrTextObj(
+        pImpressDocument->GetDoc()->GetSdPage(2, PageKind::Standard)->GetObj(0));
+    CPPUNIT_ASSERT(pTitle);
+    CPPUNIT_ASSERT_EQUAL(u"edited elsewhere"_ustr,
+                         pTitle->GetOutlinerParaObject()->GetTextObject().GetText(0));
+
+    // A batch ENDING in a bare JumpToSlide is explicit navigation intent:
+    // the view goes (and stays) where it points.
+    dispatchCommand(mxComponent, u".uno:TransformDocumentStructure"_ustr,
+                    { comphelper::makePropertyValue(
+                        u"DataJson"_ustr,
+                        u"{ \"Transforms\": { \"SlideCommands\": ["
+                        u"{\"JumpToSlide\": 2}]}}"_ustr) });
+    checkCurrentPageNumber(3);
 }
 
 CPPUNIT_TEST_FIXTURE(SdUiImpressTest, testTdf111522)
@@ -2796,6 +4548,852 @@ CPPUNIT_TEST_FIXTURE(SdUiImpressTest, testMultiSelectionPointEditToggle)
     CPPUNIT_ASSERT(pView->IsFrameDragSingles());
     pView->MarkObj(pRect2.get(), pView->GetSdrPageView());
     CPPUNIT_ASSERT(!pView->IsFrameDragSingles());
+}
+
+namespace
+{
+/// A processed-PDF (P0) scan page, generated by
+/// scripts/vulcan-office/pdf-edit-scan-fixture.py (all ASCII so the
+/// cross-reference offsets hold in a raw string; fork-checks fails when this
+/// copy and the generator drift apart): one 64x32 1-bit DeviceGray
+/// image (ASCIIHex; sample 0 is black) drawn upright at 576x288 pt from
+/// (18, 486) inside /VulcanImg <</VulcanId (p1-i0)>> BDC ... EMC. Its only
+/// ink is a printed "line": rows 8-11, columns 8-39. The raw stream's
+/// sha256 is aScanSha256.
+constexpr std::string_view aScanBilevelMarkedPdf = R"PDF(%PDF-1.7
+1 0 obj
+<< /Type /Catalog /Pages 2 0 R >>
+endobj
+2 0 obj
+<< /Type /Pages /Kids [3 0 R] /Count 1 >>
+endobj
+3 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents 4 0 R /Resources << /XObject << /Im0 5 0 R >> >> >>
+endobj
+4 0 obj
+<< /Length 75 >>
+stream
+q 576 0 0 288 18 486 cm /VulcanImg <</VulcanId (p1-i0)>> BDC /Im0 Do EMC Q
+endstream
+endobj
+5 0 obj
+<< /Type /XObject /Subtype /Image /Width 64 /Height 32 /ColorSpace /DeviceGray /BitsPerComponent 1 /Filter /ASCIIHexDecode /Length 520 >>
+stream
+FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF
+FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF
+FF00000000FFFFFFFF00000000FFFFFFFF00000000FFFFFFFF00000000FFFFFF
+FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF
+FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF
+FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF
+FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF
+FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF>
+endstream
+endobj
+xref
+0 6
+0000000000 65535 f 
+0000000009 00000 n 
+0000000058 00000 n 
+0000000115 00000 n 
+0000000245 00000 n 
+0000000369 00000 n 
+trailer
+<< /Size 6 /Root 1 0 R >>
+startxref
+1060
+%%EOF
+)PDF";
+constexpr std::string_view aScanSha256
+    = "fb1b0cfe1437adf69b49d1bdc9d98f218b26fb104efbe0cca983838a113dc5e7";
+
+/// Write aScanBilevelMarkedPdf into rFixture; its URL, to load.
+OUString lcl_WriteScanFixture(utl::TempFileNamed& rFixture)
+{
+    rFixture.EnableKillingFile();
+    SvStream* pFixtureStream = rFixture.GetStream(StreamMode::WRITE);
+    CPPUNIT_ASSERT(pFixtureStream);
+    pFixtureStream->WriteBytes(aScanBilevelMarkedPdf.data(), aScanBilevelMarkedPdf.size());
+    rFixture.CloseStream();
+    return rFixture.GetURL();
+}
+
+/// The loaded fixture as the kit holds it (a PDF opened into Draw), its
+/// frame active.
+SdXImpressDocument* lcl_ActivateScanDoc(const uno::Reference<lang::XComponent>& xComponent)
+{
+    auto pImpressDocument = dynamic_cast<SdXImpressDocument*>(xComponent.get());
+    CPPUNIT_ASSERT(pImpressDocument);
+    auto xDesktop = frame::Desktop::create(comphelper::getProcessComponentContext());
+    auto pFrame = pImpressDocument->GetDocShell()->GetFrame();
+    CPPUNIT_ASSERT(pFrame);
+    xDesktop->setActiveFrame(pFrame->GetFrame().GetFrameInterface());
+    CPPUNIT_ASSERT(pImpressDocument->GetDoc()->IsPDFDocument());
+    return pImpressDocument;
+}
+
+/// The v3 scan page model for the fixture: the scan by reference (sha256
+/// aSha), locked, with one hidden-ink OCR line over the printed line.
+OString lcl_ScanModel(std::string_view aSha)
+{
+    return "{\"page\":{\"w\":612,\"h\":792},\"mode\":\"scan\",\"status\":\"ready\","
+           "\"regions\":[{\"role\":\"signature\",\"box\":{\"x\":400,\"y\":200,\"w\":100,\"h\":50}}],"
+           "\"objects\":["
+           "{\"kind\":\"other\",\"role\":\"vulcan:scan:p1\",\"locked\":true,"
+           "\"box\":{\"x\":18,\"y\":18,\"w\":576,\"h\":288},"
+           "\"src\":{\"pdf\":{\"page\":1,\"id\":\"p1-i0\"},\"sha256\":\""
+           + OString(aSha.data(), static_cast<sal_Int32>(aSha.size()))
+           + "\",\"px\":[64,32]}},"
+             "{\"kind\":\"text\",\"id\":\"p1-l1\",\"block\":\"p1-b1\",\"role\":\"ocr:p1-l1\","
+             "\"ink\":\"hidden\",\"conf\":0.97,\"box\":{\"x\":90,\"y\":90,\"w\":288,\"h\":36},"
+             "\"cover\":{\"x\":88,\"y\":88,\"w\":292,\"h\":40},\"suspects\":[],\"lineHeight\":null,"
+             "\"lines\":[{\"box\":{\"x\":90,\"y\":90,\"w\":288,\"h\":36},\"baseline\":120,"
+             "\"runs\":[{\"text\":\"Scanned line\",\"box\":{\"x\":90,\"y\":90,\"w\":288,\"h\":36},"
+             "\"family\":\"Liberation Sans\",\"size\":20,\"weight\":400,\"italic\":false,"
+             "\"color\":\"#102030\",\"letterSpacing\":0}]}]}]}";
+}
+
+/// The TransformDocumentStructure arguments that build rModel on page 0.
+cpo::uno::Sequence<beans::PropertyValue> lcl_BuildScanModelArgs(const OString& rModel)
+{
+    OUStringBuffer aBase64;
+    comphelper::Base64::encode(
+        aBase64, cpo::uno::Sequence<sal_Int8>(reinterpret_cast<const sal_Int8*>(rModel.getStr()),
+                                              rModel.getLength()));
+    const OUString aDataJson
+        = u"{ \"Transforms\": { \"SlideCommands\": [{\"BuildPdfPageModel\": \"0|"_ustr
+          + aBase64.makeStringAndClear() + u"\"}]}}"_ustr;
+    return { comphelper::makePropertyValue(u"DataJson"_ustr, aDataJson) };
+}
+
+/// The kept scan and the OCR line a built fixture page holds.
+std::pair<SdrGrafObj*, SdrTextObj*> lcl_ScanAndLine(SdPage& rPage)
+{
+    SdrGrafObj* pScan = nullptr;
+    SdrTextObj* pLine = nullptr;
+    for (size_t n = 0; n < rPage.GetObjCount(); ++n)
+    {
+        SdrObject* pObj = rPage.GetObj(n);
+        if (pObj->GetName() == "vulcan:scan:p1")
+            pScan = dynamic_cast<SdrGrafObj*>(pObj);
+        else if (pObj->GetName() == "ocr:p1-l1")
+            pLine = DynCastSdrTextObj(pObj);
+    }
+    return { pScan, pLine };
+}
+
+/// Is the fixture scan's pixel (x, y) ink (dark)?
+bool lcl_IsInk(const SdrGrafObj& rScan, tools::Long nX, tools::Long nY)
+{
+    return rScan.GetGraphic().GetBitmap().GetPixelColor(nX, nY).GetLuminance() < 128;
+}
+
+/// Write ink at (x, y) of the scan in place, as another view's edit of the
+/// same scan would (every view of a document shares the one picture).
+void lcl_SetInk(SdrGrafObj& rScan, tools::Long nX, tools::Long nY)
+{
+    Bitmap aBitmap(rScan.GetGraphic().GetBitmap());
+    {
+        BitmapScopedWriteAccess pWrite(aBitmap);
+        CPPUNIT_ASSERT(pWrite);
+        pWrite->SetPixel(nY, nX, pWrite->GetBestMatchingColor(BitmapColor(COL_BLACK)));
+    }
+    rScan.SetGraphic(Graphic(aBitmap));
+    CPPUNIT_ASSERT(lcl_IsInk(rScan, nX, nY));
+}
+
+/// Does the view's text edit still hold hidden (alpha-0) ink? The object's
+/// own text is only written back when text edit ends; this is the edit.
+bool lcl_EditIsHidden(sd::View& rView)
+{
+    SdrOutliner* pOutliner = rView.GetTextEditOutliner();
+    CPPUNIT_ASSERT(pOutliner);
+    std::optional<OutlinerParaObject> oText
+        = pOutliner->CreateParaObject(0, pOutliner->GetParagraphCount());
+    CPPUNIT_ASSERT(oText);
+    return sd::hiddenink::TextHasHiddenInk(oText->GetTextObject());
+}
+
+/// Is the fixture's printed line ink at (x, y), and nothing else?
+bool lcl_FixtureInk(tools::Long nX, tools::Long nY)
+{
+    return nY >= 8 && nY <= 11 && nX >= 8 && nX <= 39;
+}
+}
+
+CPPUNIT_TEST_FIXTURE(SdUiImpressTest, testPdfScanBilevelImportKeepsNativePixels)
+{
+    // A 1-bit image comes in bilevel at its own resolution (a two-entry
+    // palette, not 32-bit BGRA scaled to the display budget), and every
+    // imported picture carries where it came from: inside a /VulcanImg mark,
+    // the innermost VulcanId and the raw stream's sha256.
+    utl::TempFileNamed aFixture(u"scanbilevel", true, u".pdf");
+    comphelper::COKit::setActive(true);
+    comphelper::ScopeGuard aKitGuard([] { comphelper::COKit::setActive(false); });
+    loadFromURL(lcl_WriteScanFixture(aFixture));
+    SdXImpressDocument* pImpressDocument = lcl_ActivateScanDoc(mxComponent);
+    SdDrawDocument* pDoc = pImpressDocument->GetDoc();
+    SdPage* pPage = pDoc->GetSdPage(0, PageKind::Standard);
+    dispatchCommand(mxComponent, u".uno:TransformDocumentStructure"_ustr,
+                    { comphelper::makePropertyValue(
+                        u"DataJson"_ustr,
+                        u"{ \"Transforms\": { \"SlideCommands\": ["
+                        u"{\"DecomposePdfPages\": true}]}}"_ustr) });
+    CPPUNIT_ASSERT(!pPage->GetPdfPageGraphic());
+    SdrGrafObj* pGraf = nullptr;
+    for (size_t n = 0; n < pPage->GetObjCount() && !pGraf; ++n)
+        pGraf = dynamic_cast<SdrGrafObj*>(pPage->GetObj(n));
+    CPPUNIT_ASSERT(pGraf);
+    const Bitmap aBitmap = pGraf->GetGraphic().GetBitmap();
+    CPPUNIT_ASSERT_EQUAL(Size(64, 32), aBitmap.GetSizePixel());
+    CPPUNIT_ASSERT_EQUAL(vcl::PixelFormat::N8_BPP, aBitmap.getPixelFormat());
+    {
+        BitmapScopedReadAccess pRead(aBitmap);
+        CPPUNIT_ASSERT(pRead);
+        CPPUNIT_ASSERT(pRead->HasPalette());
+        CPPUNIT_ASSERT_EQUAL(sal_uInt16(2), pRead->GetPaletteEntryCount());
+    }
+    // Ink where the file has it, paper elsewhere.
+    CPPUNIT_ASSERT(lcl_IsInk(*pGraf, 20, 9));
+    CPPUNIT_ASSERT(!lcl_IsInk(*pGraf, 20, 20));
+    const svx::vulcan::ImageProvenance* pProvenance = svx::vulcan::GetImageProvenance(*pGraf);
+    CPPUNIT_ASSERT(pProvenance);
+    CPPUNIT_ASSERT_EQUAL(u"p1-i0"_ustr, pProvenance->maId);
+    CPPUNIT_ASSERT_EQUAL(OString(aScanSha256.data(), static_cast<sal_Int32>(aScanSha256.size())),
+                         pProvenance->maSha256);
+    CPPUNIT_ASSERT_EQUAL(Size(64, 32), pProvenance->maPixels);
+    CPPUNIT_ASSERT(!pDoc->IsChanged());
+}
+
+CPPUNIT_TEST_FIXTURE(SdUiImpressTest, testPdfScanPageModelKeepsScanByMark)
+{
+    // A v3 scan page: the scan kept from the import by its VulcanId (sha256
+    // and pixel size checked), named from its role and locked; the
+    // OCR line built as hidden ink - move and resize protected, still
+    // markable - with its id, block and cover. Nothing about it is an edit,
+    // and the live model writes the scan back as the same reference.
+    utl::TempFileNamed aFixture(u"scanmodel", true, u".pdf");
+    comphelper::COKit::setActive(true);
+    comphelper::ScopeGuard aKitGuard([] { comphelper::COKit::setActive(false); });
+    loadFromURL(lcl_WriteScanFixture(aFixture));
+    SdXImpressDocument* pImpressDocument = lcl_ActivateScanDoc(mxComponent);
+    SdDrawDocument* pDoc = pImpressDocument->GetDoc();
+    SdPage* pPage = pDoc->GetSdPage(0, PageKind::Standard);
+    sd::UndoManager* pUndoManager = pDoc->GetUndoManager();
+    const size_t nUndoBefore = pUndoManager ? pUndoManager->GetUndoActionCount() : 0;
+
+    dispatchCommand(mxComponent, u".uno:TransformDocumentStructure"_ustr,
+                    lcl_BuildScanModelArgs(lcl_ScanModel(aScanSha256)));
+
+    CPPUNIT_ASSERT(!pPage->GetPdfPageGraphic());
+    CPPUNIT_ASSERT_EQUAL(size_t(2), pPage->GetObjCount());
+    auto [pScan, pLine] = lcl_ScanAndLine(*pPage);
+    CPPUNIT_ASSERT(pScan);
+    CPPUNIT_ASSERT(pLine);
+    // The scan cannot be marked, moved or resized.
+    CPPUNIT_ASSERT(pScan->IsMarkProtect());
+    CPPUNIT_ASSERT(pScan->IsMoveProtect());
+    CPPUNIT_ASSERT(pScan->IsResizeProtect());
+    // Kept at its own pixels, bilevel.
+    CPPUNIT_ASSERT_EQUAL(Size(64, 32), pScan->GetGraphic().GetSizePixel());
+    const svx::vulcan::ImageProvenance* pProvenance = svx::vulcan::GetImageProvenance(*pScan);
+    CPPUNIT_ASSERT(pProvenance);
+    CPPUNIT_ASSERT(pProvenance->mbKept);
+    CPPUNIT_ASSERT_EQUAL(size_t(1), pProvenance->maProtected.size());
+    // The line paints nothing, takes the caret, and is not draggable.
+    CPPUNIT_ASSERT(sd::hiddenink::IsHiddenLine(*pLine));
+    CPPUNIT_ASSERT(!pLine->IsMarkProtect());
+    CPPUNIT_ASSERT(pLine->IsMoveProtect());
+    CPPUNIT_ASSERT(pLine->IsResizeProtect());
+    const svx::vulcan::LineData* pLineData = svx::vulcan::GetLineData(*pLine);
+    CPPUNIT_ASSERT(pLineData);
+    CPPUNIT_ASSERT_EQUAL(u"p1-l1"_ustr, pLineData->maId);
+    CPPUNIT_ASSERT(!pLineData->maCover.IsEmpty());
+    // The printed line is still in the scan.
+    CPPUNIT_ASSERT(lcl_IsInk(*pScan, 20, 9));
+    // Not an edit.
+    CPPUNIT_ASSERT(!pDoc->IsChanged());
+    if (pUndoManager)
+        CPPUNIT_ASSERT_EQUAL(nUndoBefore, pUndoManager->GetUndoActionCount());
+
+    // Select-all never reaches the scan.
+    sd::ViewShell* pViewShell = pImpressDocument->GetDocShell()->GetViewShell();
+    CPPUNIT_ASSERT(pViewShell);
+    SdrView* pView = pViewShell->GetView();
+    pView->MarkAllObj(pView->GetSdrPageView());
+    const SdrMarkList& rMarks = pView->GetMarkedObjectList();
+    for (size_t n = 0; n < rMarks.GetMarkCount(); ++n)
+        CPPUNIT_ASSERT(rMarks.GetMark(n)->GetMarkedSdrObj() != pScan);
+    pView->UnmarkAll();
+
+    // The payload flags both for the client's hit tests.
+    {
+        tools::JsonWriter aJsonWriter;
+        pImpressDocument->getCommandValues(aJsonWriter, ".uno:VectorPrimitives?part=0");
+        const OString aPayload = aJsonWriter.finishAndGetAsOString();
+        CPPUNIT_ASSERT(aPayload.indexOf("\"locked\": true") >= 0);
+        CPPUNIT_ASSERT(aPayload.indexOf("\"hiddenInk\": true") >= 0);
+    }
+    // The live model: the scan as the reference it was built from (never
+    // image bytes), the line still hidden, with its cover.
+    tools::JsonWriter aJsonWriter;
+    pImpressDocument->getCommandValues(aJsonWriter, ".uno:PdfPageModel?part=0");
+    const OString aLive = aJsonWriter.finishAndGetAsOString();
+    boost::property_tree::ptree aTree;
+    std::istringstream aStream(std::string(aLive.getStr(), aLive.getLength()));
+    boost::property_tree::read_json(aStream, aTree);
+    bool bSawScan = false, bSawLine = false;
+    for (const auto& rNode : aTree.get_child("objects"))
+    {
+        const std::string aRole = rNode.second.get<std::string>("role", "");
+        if (aRole == "vulcan:scan:p1")
+        {
+            bSawScan = true;
+            CPPUNIT_ASSERT_EQUAL(std::string("other"), rNode.second.get<std::string>("kind"));
+            CPPUNIT_ASSERT(rNode.second.get<bool>("locked", false));
+            CPPUNIT_ASSERT_EQUAL(std::string("p1-i0"), rNode.second.get<std::string>("src.pdf.id"));
+            CPPUNIT_ASSERT_EQUAL(std::string(aScanSha256),
+                                 rNode.second.get<std::string>("src.sha256"));
+            CPPUNIT_ASSERT(!rNode.second.get_child_optional("data"));
+        }
+        else if (aRole == "ocr:p1-l1")
+        {
+            bSawLine = true;
+            CPPUNIT_ASSERT_EQUAL(std::string("hidden"), rNode.second.get<std::string>("ink"));
+            CPPUNIT_ASSERT_EQUAL(std::string("p1-l1"), rNode.second.get<std::string>("id"));
+            CPPUNIT_ASSERT(rNode.second.get_child_optional("cover"));
+        }
+    }
+    CPPUNIT_ASSERT(bSawScan);
+    CPPUNIT_ASSERT(bSawLine);
+    CPPUNIT_ASSERT(aTree.get<bool>("complete", false));
+}
+
+CPPUNIT_TEST_FIXTURE(SdUiImpressTest, testPdfScanPageModelUnresolvedLockFailsPage)
+{
+    // A locked node whose reference does not name these bytes (another
+    // sha256) fails the page build: nothing is built and the page keeps its
+    // graphic, rather than showing hidden lines over no scan.
+    utl::TempFileNamed aFixture(u"scanunresolved", true, u".pdf");
+    comphelper::COKit::setActive(true);
+    comphelper::ScopeGuard aKitGuard([] { comphelper::COKit::setActive(false); });
+    loadFromURL(lcl_WriteScanFixture(aFixture));
+    SdXImpressDocument* pImpressDocument = lcl_ActivateScanDoc(mxComponent);
+    SdPage* pPage = pImpressDocument->GetDoc()->GetSdPage(0, PageKind::Standard);
+    dispatchCommand(mxComponent, u".uno:TransformDocumentStructure"_ustr,
+                    lcl_BuildScanModelArgs(lcl_ScanModel(
+                        "0000000000000000000000000000000000000000000000000000000000000000")));
+    CPPUNIT_ASSERT(pPage->GetPdfPageGraphic());
+    CPPUNIT_ASSERT_EQUAL(size_t(1), pPage->GetObjCount());
+    CPPUNIT_ASSERT(!pImpressDocument->GetDoc()->IsChanged());
+}
+
+CPPUNIT_TEST_FIXTURE(SdUiImpressTest, testHiddenInkCoverPixels)
+{
+    // The cover as a pure function over a scan bitmap: the ink inside the
+    // cover box is filled with the box's paper; a ruling line (a dark run of
+    // 90 px or more), a protected region and everything outside the box
+    // keep their pixels.
+    Bitmap aScan(Size(200, 100), vcl::PixelFormat::N24_BPP);
+    aScan.Erase(COL_WHITE);
+    {
+        BitmapScopedWriteAccess pWrite(aScan);
+        const BitmapColor aBlack(COL_BLACK);
+        for (tools::Long nY = 40; nY < 50; ++nY)
+            for (tools::Long nX = 20; nX <= 60; ++nX)
+                pWrite->SetPixel(nY, nX, aBlack); // printed text
+        for (tools::Long nX = 10; nX <= 190; ++nX)
+            pWrite->SetPixel(70, nX, aBlack); // a form rule
+        for (tools::Long nY = 40; nY < 50; ++nY)
+            for (tools::Long nX = 150; nX <= 170; ++nX)
+                pWrite->SetPixel(nY, nX, aBlack); // a signature stroke
+        pWrite->SetPixel(5, 5, aBlack); // ink outside the box
+    }
+    // 10 logic units per pixel.
+    const tools::Rectangle aScanRect(Point(0, 0), Size(2000, 1000));
+    const tools::Rectangle aCover(Point(100, 300), Size(1800, 500));
+    const std::vector<tools::Rectangle> aProtected{ tools::Rectangle(Point(1450, 380),
+                                                                     Size(300, 150)) };
+    const Graphic aCovered
+        = sd::hiddenink::CoverScanPixels(Graphic(aScan), aScanRect, aCover, aProtected);
+    CPPUNIT_ASSERT(aCovered.GetType() == GraphicType::Bitmap);
+    const Bitmap aOut = aCovered.GetBitmap();
+    CPPUNIT_ASSERT_EQUAL(aScan.GetSizePixel(), aOut.GetSizePixel());
+    // the text is gone, dilated edges included
+    CPPUNIT_ASSERT_EQUAL(COL_WHITE, Color(aOut.GetPixelColor(40, 45)));
+    CPPUNIT_ASSERT_EQUAL(COL_WHITE, Color(aOut.GetPixelColor(20, 40)));
+    CPPUNIT_ASSERT_EQUAL(COL_WHITE, Color(aOut.GetPixelColor(60, 49)));
+    // the rule, the signature and the ink outside the box stay
+    CPPUNIT_ASSERT_EQUAL(COL_BLACK, Color(aOut.GetPixelColor(100, 70)));
+    CPPUNIT_ASSERT_EQUAL(COL_BLACK, Color(aOut.GetPixelColor(160, 45)));
+    CPPUNIT_ASSERT_EQUAL(COL_BLACK, Color(aOut.GetPixelColor(5, 5)));
+    // the original is untouched (the cover edits a copy)
+    CPPUNIT_ASSERT_EQUAL(COL_BLACK, Color(aScan.GetPixelColor(40, 45)));
+    // A box with no ink changes nothing.
+    const Graphic aNothing = sd::hiddenink::CoverScanPixels(
+        Graphic(aScan), aScanRect, tools::Rectangle(Point(1000, 850), Size(500, 100)), {});
+    CPPUNIT_ASSERT(aNothing.GetType() == GraphicType::NONE);
+}
+
+CPPUNIT_TEST_FIXTURE(SdUiImpressTest, testHiddenInkFirstChangeIsOneUndo)
+{
+    // Placing the caret in a hidden line is not an edit. The first real
+    // change makes the line visible and removes the printed ink under it from
+    // the scan's own pixels; ending text edit records both as ONE undo
+    // action, and one undo puts the hidden line and the ink back together.
+    utl::TempFileNamed aFixture(u"scanfirstchange", true, u".pdf");
+    comphelper::COKit::setActive(true);
+    comphelper::ScopeGuard aKitGuard([] { comphelper::COKit::setActive(false); });
+    loadFromURL(lcl_WriteScanFixture(aFixture));
+    SdXImpressDocument* pImpressDocument = lcl_ActivateScanDoc(mxComponent);
+    SdDrawDocument* pDoc = pImpressDocument->GetDoc();
+    SdPage* pPage = pDoc->GetSdPage(0, PageKind::Standard);
+    dispatchCommand(mxComponent, u".uno:TransformDocumentStructure"_ustr,
+                    lcl_BuildScanModelArgs(lcl_ScanModel(aScanSha256)));
+    auto [pScan, pLine] = lcl_ScanAndLine(*pPage);
+    CPPUNIT_ASSERT(pScan);
+    CPPUNIT_ASSERT(pLine);
+    CPPUNIT_ASSERT(lcl_IsInk(*pScan, 20, 9));
+    sd::UndoManager* pUndoManager = pDoc->GetUndoManager();
+    CPPUNIT_ASSERT(pUndoManager);
+    const size_t nUndoBefore = pUndoManager->GetUndoActionCount();
+
+    sd::ViewShell* pViewShell = pImpressDocument->GetDocShell()->GetViewShell();
+    CPPUNIT_ASSERT(pViewShell);
+    sd::View* pView = pViewShell->GetView();
+    CPPUNIT_ASSERT(pView->SdrBeginTextEdit(pLine));
+    CPPUNIT_ASSERT(pView->IsTextEdit());
+    // The caret alone changes nothing.
+    CPPUNIT_ASSERT(sd::hiddenink::IsHiddenLine(*pLine));
+    CPPUNIT_ASSERT(lcl_IsInk(*pScan, 20, 9));
+
+    // The first key's hook (FuText::KeyInput calls it before the key lands).
+    sd::hiddenink::BeforeTextChange(*pView);
+    OutlinerView* pOutlinerView = pView->GetTextEditOutlinerView();
+    CPPUNIT_ASSERT(pOutlinerView);
+    pOutlinerView->InsertText(u"X"_ustr);
+    // The printed ink is gone from the scan as soon as the line is real.
+    CPPUNIT_ASSERT(!lcl_IsInk(*pScan, 20, 9));
+    pView->SdrEndTextEdit();
+
+    CPPUNIT_ASSERT(!sd::hiddenink::IsHiddenLine(*pLine));
+    CPPUNIT_ASSERT(pLine->GetOutlinerParaObject()->GetTextObject().GetText(0).indexOf("X") >= 0);
+    CPPUNIT_ASSERT(!pLine->IsMoveProtect());
+    CPPUNIT_ASSERT(!lcl_IsInk(*pScan, 20, 9));
+    // Paper outside the cover is untouched, and the scan keeps its pixels.
+    CPPUNIT_ASSERT(!lcl_IsInk(*pScan, 20, 20));
+    CPPUNIT_ASSERT_EQUAL(Size(64, 32), pScan->GetGraphic().GetSizePixel());
+    CPPUNIT_ASSERT(pDoc->IsChanged());
+    CPPUNIT_ASSERT_EQUAL(nUndoBefore + 1, pUndoManager->GetUndoActionCount());
+
+    // One undo: the hidden line and the printed ink, together.
+    pUndoManager->Undo();
+    CPPUNIT_ASSERT(sd::hiddenink::IsHiddenLine(*pLine));
+    CPPUNIT_ASSERT(pLine->IsMoveProtect());
+    CPPUNIT_ASSERT(lcl_IsInk(*pScan, 20, 9));
+}
+
+CPPUNIT_TEST_FIXTURE(SdUiImpressTest, testHiddenInkChangeWithoutHookIsMadeVisible)
+{
+    // The safety net: a hidden line whose text changed through a path no
+    // hook covers is made visible, and covered, when text edit ends - never
+    // left as text nobody can see.
+    utl::TempFileNamed aFixture(u"scannet", true, u".pdf");
+    comphelper::COKit::setActive(true);
+    comphelper::ScopeGuard aKitGuard([] { comphelper::COKit::setActive(false); });
+    loadFromURL(lcl_WriteScanFixture(aFixture));
+    SdXImpressDocument* pImpressDocument = lcl_ActivateScanDoc(mxComponent);
+    SdPage* pPage = pImpressDocument->GetDoc()->GetSdPage(0, PageKind::Standard);
+    dispatchCommand(mxComponent, u".uno:TransformDocumentStructure"_ustr,
+                    lcl_BuildScanModelArgs(lcl_ScanModel(aScanSha256)));
+    auto [pScan, pLine] = lcl_ScanAndLine(*pPage);
+    CPPUNIT_ASSERT(pScan);
+    CPPUNIT_ASSERT(pLine);
+    sd::ViewShell* pViewShell = pImpressDocument->GetDocShell()->GetViewShell();
+    sd::View* pView = pViewShell->GetView();
+    CPPUNIT_ASSERT(pView->SdrBeginTextEdit(pLine));
+    pView->GetTextEditOutlinerView()->InsertText(u"Y"_ustr);
+    pView->SdrEndTextEdit();
+    CPPUNIT_ASSERT(!sd::hiddenink::IsHiddenLine(*pLine));
+    CPPUNIT_ASSERT(!lcl_IsInk(*pScan, 20, 9));
+}
+
+CPPUNIT_TEST_FIXTURE(SdUiImpressTest, testHiddenInkTypedOnMarkedLineIsVisibleAtOnce)
+{
+    // The kit's way in: the line is marked (a click), and the first typed
+    // character starts its text edit (FuPoor::KeyInput -> SID_ATTR_CHAR ->
+    // ImpAddPrintableCharactersToTextEdit), past FuText::KeyInput. The line
+    // is visible and the scan covered BEFORE text edit ends - never typed
+    // invisibly. Undo and redo of the cover touch only this line's pixels:
+    // a pixel another view wrote on the same scan since stays.
+    utl::TempFileNamed aFixture(u"scantyped", true, u".pdf");
+    comphelper::COKit::setActive(true);
+    comphelper::ScopeGuard aKitGuard([] { comphelper::COKit::setActive(false); });
+    loadFromURL(lcl_WriteScanFixture(aFixture));
+    SdXImpressDocument* pImpressDocument = lcl_ActivateScanDoc(mxComponent);
+    SdDrawDocument* pDoc = pImpressDocument->GetDoc();
+    SdPage* pPage = pDoc->GetSdPage(0, PageKind::Standard);
+    dispatchCommand(mxComponent, u".uno:TransformDocumentStructure"_ustr,
+                    lcl_BuildScanModelArgs(lcl_ScanModel(aScanSha256)));
+    auto [pScan, pLine] = lcl_ScanAndLine(*pPage);
+    CPPUNIT_ASSERT(pScan);
+    CPPUNIT_ASSERT(pLine);
+    sd::UndoManager* pUndoManager = pDoc->GetUndoManager();
+    CPPUNIT_ASSERT(pUndoManager);
+    const size_t nUndoBefore = pUndoManager->GetUndoActionCount();
+    sd::ViewShell* pViewShell = pImpressDocument->GetDocShell()->GetViewShell();
+    CPPUNIT_ASSERT(pViewShell);
+    sd::View* pView = pViewShell->GetView();
+
+    pView->MarkObj(pLine, pView->GetSdrPageView());
+    Scheduler::ProcessEventsToIdle();
+    CPPUNIT_ASSERT(!pView->IsTextEdit());
+    typeString(pImpressDocument, u"X");
+    CPPUNIT_ASSERT(pView->IsTextEdit());
+    CPPUNIT_ASSERT_EQUAL(static_cast<SdrTextObj*>(pLine), pView->GetTextEditObject());
+    CPPUNIT_ASSERT(!lcl_EditIsHidden(*pView));
+    CPPUNIT_ASSERT(!lcl_IsInk(*pScan, 20, 9));
+
+    lcl_SetInk(*pScan, 60, 28); // outside this line's cover
+    pView->SdrEndTextEdit();
+    CPPUNIT_ASSERT(!sd::hiddenink::IsHiddenLine(*pLine));
+    CPPUNIT_ASSERT_EQUAL(nUndoBefore + 1, pUndoManager->GetUndoActionCount());
+
+    pUndoManager->Undo();
+    CPPUNIT_ASSERT(sd::hiddenink::IsHiddenLine(*pLine));
+    CPPUNIT_ASSERT(lcl_IsInk(*pScan, 20, 9));
+    CPPUNIT_ASSERT(lcl_IsInk(*pScan, 60, 28));
+    pUndoManager->Redo();
+    CPPUNIT_ASSERT(!lcl_IsInk(*pScan, 20, 9));
+    CPPUNIT_ASSERT(lcl_IsInk(*pScan, 60, 28));
+}
+
+CPPUNIT_TEST_FIXTURE(SdUiImpressTest, testHiddenInkKeyThatChangesNothingKeepsTheLine)
+{
+    // A text-changing key makes the line visible before it lands
+    // (FuText::KeyInput) - but a key that changes nothing (Backspace at the
+    // start of the line), or text typed and deleted again, leaves the line
+    // what it was: hidden, its printed ink back, move-protected, and nothing
+    // in the undo stack. The ink comes back only where this line's cover
+    // wrote it: a pixel another view wrote on the scan meanwhile stays.
+    utl::TempFileNamed aFixture(u"scannochange", true, u".pdf");
+    comphelper::COKit::setActive(true);
+    comphelper::ScopeGuard aKitGuard([] { comphelper::COKit::setActive(false); });
+    loadFromURL(lcl_WriteScanFixture(aFixture));
+    SdXImpressDocument* pImpressDocument = lcl_ActivateScanDoc(mxComponent);
+    SdDrawDocument* pDoc = pImpressDocument->GetDoc();
+    SdPage* pPage = pDoc->GetSdPage(0, PageKind::Standard);
+    dispatchCommand(mxComponent, u".uno:TransformDocumentStructure"_ustr,
+                    lcl_BuildScanModelArgs(lcl_ScanModel(aScanSha256)));
+    auto [pScan, pLine] = lcl_ScanAndLine(*pPage);
+    CPPUNIT_ASSERT(pScan);
+    CPPUNIT_ASSERT(pLine);
+    sd::UndoManager* pUndoManager = pDoc->GetUndoManager();
+    CPPUNIT_ASSERT(pUndoManager);
+    const size_t nUndoBefore = pUndoManager->GetUndoActionCount();
+    sd::ViewShell* pViewShell = pImpressDocument->GetDocShell()->GetViewShell();
+    CPPUNIT_ASSERT(pViewShell);
+    sd::View* pView = pViewShell->GetView();
+
+    const auto enterLine = [&]() {
+        pView->MarkObj(pLine, pView->GetSdrPageView());
+        dispatchCommand(mxComponent, u".uno:Text"_ustr, {}); // F2 on the marked line
+        CPPUNIT_ASSERT(pView->IsTextEdit());
+        CPPUNIT_ASSERT_EQUAL(static_cast<SdrTextObj*>(pLine), pView->GetTextEditObject());
+        // The caret alone changes nothing.
+        CPPUNIT_ASSERT(lcl_EditIsHidden(*pView));
+        CPPUNIT_ASSERT(lcl_IsInk(*pScan, 20, 9));
+    };
+    const auto assertUntouched = [&]() {
+        CPPUNIT_ASSERT(!pView->IsTextEdit());
+        CPPUNIT_ASSERT(sd::hiddenink::IsHiddenLine(*pLine));
+        CPPUNIT_ASSERT_EQUAL(u"Scanned line"_ustr,
+                             pLine->GetOutlinerParaObject()->GetTextObject().GetText(0));
+        CPPUNIT_ASSERT(lcl_IsInk(*pScan, 20, 9));
+        CPPUNIT_ASSERT(pLine->IsMoveProtect());
+        CPPUNIT_ASSERT(pLine->IsResizeProtect());
+        CPPUNIT_ASSERT_EQUAL(nUndoBefore, pUndoManager->GetUndoActionCount());
+    };
+
+    // Backspace at the start of the line.
+    enterLine();
+    typeKey(pImpressDocument, KEY_HOME);
+    CPPUNIT_ASSERT(lcl_EditIsHidden(*pView)); // moving the caret is not a change
+    typeKey(pImpressDocument, KEY_BACKSPACE);
+    CPPUNIT_ASSERT(!lcl_EditIsHidden(*pView));
+    CPPUNIT_ASSERT(!lcl_IsInk(*pScan, 20, 9));
+    lcl_SetInk(*pScan, 60, 28); // another view's change, after this cover
+    pView->SdrEndTextEdit();
+    assertUntouched();
+    CPPUNIT_ASSERT(lcl_IsInk(*pScan, 60, 28));
+
+    // Delete at the end of the line.
+    enterLine();
+    typeKey(pImpressDocument, KEY_END);
+    typeKey(pImpressDocument, KEY_DELETE);
+    CPPUNIT_ASSERT(!lcl_EditIsHidden(*pView));
+    pView->SdrEndTextEdit();
+    assertUntouched();
+
+    // A character typed and deleted again.
+    enterLine();
+    typeKey(pImpressDocument, KEY_END);
+    typeString(pImpressDocument, u"Z");
+    CPPUNIT_ASSERT(!lcl_EditIsHidden(*pView));
+    typeKey(pImpressDocument, KEY_BACKSPACE);
+    pView->SdrEndTextEdit();
+    assertUntouched();
+}
+
+CPPUNIT_TEST_FIXTURE(SdUiImpressTest, testHiddenInkImeInputIsVisibleAtOnce)
+{
+    // The kit types through ExtTextInput (FuPoor::Command), not key events:
+    // the first composition makes the line visible and covers the scan
+    // before text edit ends.
+    utl::TempFileNamed aFixture(u"scanime", true, u".pdf");
+    comphelper::COKit::setActive(true);
+    comphelper::ScopeGuard aKitGuard([] { comphelper::COKit::setActive(false); });
+    loadFromURL(lcl_WriteScanFixture(aFixture));
+    SdXImpressDocument* pImpressDocument = lcl_ActivateScanDoc(mxComponent);
+    SdPage* pPage = pImpressDocument->GetDoc()->GetSdPage(0, PageKind::Standard);
+    dispatchCommand(mxComponent, u".uno:TransformDocumentStructure"_ustr,
+                    lcl_BuildScanModelArgs(lcl_ScanModel(aScanSha256)));
+    auto [pScan, pLine] = lcl_ScanAndLine(*pPage);
+    CPPUNIT_ASSERT(pScan);
+    CPPUNIT_ASSERT(pLine);
+    sd::ViewShell* pViewShell = pImpressDocument->GetDocShell()->GetViewShell();
+    CPPUNIT_ASSERT(pViewShell);
+    sd::View* pView = pViewShell->GetView();
+    pView->MarkObj(pLine, pView->GetSdrPageView());
+    dispatchCommand(mxComponent, u".uno:Text"_ustr, {});
+    CPPUNIT_ASSERT(pView->IsTextEdit());
+    typeKey(pImpressDocument, KEY_END);
+    CPPUNIT_ASSERT(lcl_EditIsHidden(*pView));
+
+    const VclPtr<vcl::Window> xWindow(pViewShell->GetActiveWindow());
+    CPPUNIT_ASSERT(xWindow);
+    KitHelper::postExtTextEventAsync(xWindow, KIT_EXT_TEXTINPUT, u"Q"_ustr);
+    Scheduler::ProcessEventsToIdle();
+    CPPUNIT_ASSERT(!lcl_EditIsHidden(*pView));
+    CPPUNIT_ASSERT(!lcl_IsInk(*pScan, 20, 9));
+    KitHelper::postExtTextEventAsync(xWindow, KIT_EXT_TEXTINPUT_END, u"Q"_ustr);
+    Scheduler::ProcessEventsToIdle();
+    pView->SdrEndTextEdit();
+    CPPUNIT_ASSERT(!sd::hiddenink::IsHiddenLine(*pLine));
+    CPPUNIT_ASSERT(pLine->GetOutlinerParaObject()->GetTextObject().GetText(0).endsWith("Q"));
+}
+
+CPPUNIT_TEST_FIXTURE(SdUiImpressTest, testHiddenInkDeleteUntouchedLineTakesItsInk)
+{
+    // Deleting an untouched line deletes the printed line: its ink leaves
+    // the scan in the same undo action (DrawView::DeleteMarked ->
+    // BeforeDeleteMarked), and one undo brings both back.
+    utl::TempFileNamed aFixture(u"scandelete", true, u".pdf");
+    comphelper::COKit::setActive(true);
+    comphelper::ScopeGuard aKitGuard([] { comphelper::COKit::setActive(false); });
+    loadFromURL(lcl_WriteScanFixture(aFixture));
+    SdXImpressDocument* pImpressDocument = lcl_ActivateScanDoc(mxComponent);
+    SdDrawDocument* pDoc = pImpressDocument->GetDoc();
+    SdPage* pPage = pDoc->GetSdPage(0, PageKind::Standard);
+    dispatchCommand(mxComponent, u".uno:TransformDocumentStructure"_ustr,
+                    lcl_BuildScanModelArgs(lcl_ScanModel(aScanSha256)));
+    auto [pScan, pLine] = lcl_ScanAndLine(*pPage);
+    CPPUNIT_ASSERT(pScan);
+    CPPUNIT_ASSERT(pLine);
+    sd::UndoManager* pUndoManager = pDoc->GetUndoManager();
+    CPPUNIT_ASSERT(pUndoManager);
+    const size_t nUndoBefore = pUndoManager->GetUndoActionCount();
+    sd::View* pView = pImpressDocument->GetDocShell()->GetViewShell()->GetView();
+
+    pView->MarkObj(pLine, pView->GetSdrPageView());
+    pView->DeleteMarked();
+    CPPUNIT_ASSERT_EQUAL(size_t(1), pPage->GetObjCount());
+    CPPUNIT_ASSERT(!lcl_IsInk(*pScan, 20, 9));
+    CPPUNIT_ASSERT(!lcl_IsInk(*pScan, 20, 20));
+    CPPUNIT_ASSERT_EQUAL(nUndoBefore + 1, pUndoManager->GetUndoActionCount());
+
+    pUndoManager->Undo();
+    CPPUNIT_ASSERT_EQUAL(size_t(2), pPage->GetObjCount());
+    CPPUNIT_ASSERT(lcl_IsInk(*pScan, 20, 9));
+}
+
+CPPUNIT_TEST_FIXTURE(SdUiImpressTest, testHiddenInkTextHitOnlyOnOcrLines)
+{
+    // The text-only hit test (text edit entry, URL fields) finds the text of
+    // a hidden-ink OCR line, which paints nothing. The same fully
+    // transparent text on any other object stays unhittable, as before: a
+    // hidden watermark or an invisible label must not take the caret.
+    utl::TempFileNamed aFixture(u"scanhit", true, u".pdf");
+    comphelper::COKit::setActive(true);
+    comphelper::ScopeGuard aKitGuard([] { comphelper::COKit::setActive(false); });
+    loadFromURL(lcl_WriteScanFixture(aFixture));
+    SdXImpressDocument* pImpressDocument = lcl_ActivateScanDoc(mxComponent);
+    SdPage* pPage = pImpressDocument->GetDoc()->GetSdPage(0, PageKind::Standard);
+    dispatchCommand(mxComponent, u".uno:TransformDocumentStructure"_ustr,
+                    lcl_BuildScanModelArgs(lcl_ScanModel(aScanSha256)));
+    SdrTextObj* pLine = lcl_ScanAndLine(*pPage).second;
+    CPPUNIT_ASSERT(pLine);
+    sd::View* pView = pImpressDocument->GetDocShell()->GetViewShell()->GetView();
+    const SdrPageView* pPageView = pView->GetSdrPageView();
+    CPPUNIT_ASSERT(pPageView);
+    // Inside the first glyphs of "Scanned line" (20 pt, from the box's left).
+    const tools::Rectangle aBox = pLine->GetLogicRect();
+    const Point aInText(aBox.Left() + aBox.GetWidth() / 8, aBox.Center().Y());
+    const basegfx::B2DVector aNoTolerance(0.0, 0.0);
+
+    CPPUNIT_ASSERT_EQUAL(static_cast<SdrObject*>(pLine),
+                         SdrObjectPrimitiveHit(*pLine, aInText, aNoTolerance, *pPageView,
+                                               nullptr, /*bTextOnly*/ true));
+    pLine->SetName(u"label"_ustr);
+    CPPUNIT_ASSERT(sd::hiddenink::TextHasHiddenInk(pLine->GetOutlinerParaObject()->GetTextObject()));
+    CPPUNIT_ASSERT_EQUAL(static_cast<SdrObject*>(nullptr),
+                         SdrObjectPrimitiveHit(*pLine, aInText, aNoTolerance, *pPageView,
+                                               nullptr, /*bTextOnly*/ true));
+}
+
+CPPUNIT_TEST_FIXTURE(SdUiImpressTest, testPdfScanExportInvisibleTextAndOneBitScan)
+{
+    // The canvas save: a hidden line goes out as render-mode-3 text (the
+    // saved scan stays searchable, painting nothing), and the bilevel scan
+    // as a 1-bit image, losslessly - not 32-bit RGB plus a soft mask.
+    // Without ExportInvisibleText (every other PDF export) the hidden line
+    // writes no text at all, as before. Nothing inside the hidden line's
+    // group paints, not even a decoration (an underline) the processor
+    // writes as a fill or stroke sequence. And the saved scan comes back as
+    // the same bilevel pixels - palette order and decode direction included -
+    // on reopen, and again after a second save (E6).
+    utl::TempFileNamed aFixture(u"scanexport", true, u".pdf");
+    comphelper::COKit::setActive(true);
+    comphelper::ScopeGuard aKitGuard([] { comphelper::COKit::setActive(false); });
+    loadFromURL(lcl_WriteScanFixture(aFixture));
+    SdXImpressDocument* pImpressDocument = lcl_ActivateScanDoc(mxComponent);
+    dispatchCommand(mxComponent, u".uno:TransformDocumentStructure"_ustr,
+                    lcl_BuildScanModelArgs(lcl_ScanModel(aScanSha256)));
+    SdrTextObj* pLine
+        = lcl_ScanAndLine(*pImpressDocument->GetDoc()->GetSdPage(0, PageKind::Standard)).second;
+    CPPUNIT_ASSERT(pLine);
+
+    struct Found
+    {
+        int nInvisible = 0; // render mode 3 text objects holding the line
+        int nVisibleLine = 0; // any other render mode holding the line
+        int nOneBitImages = 0;
+        int nImages = 0;
+        int nPaths = 0; // anything stroked or filled
+    };
+    const auto store = [this](const OUString& rURL, bool bInvisibleText) {
+        uno::Reference<frame::XStorable> xStorable(mxComponent, uno::UNO_QUERY);
+        comphelper::SequenceAsHashMap aMediaDescriptor;
+        aMediaDescriptor[u"FilterName"_ustr] <<= u"draw_pdf_Export"_ustr;
+        aMediaDescriptor[u"FilterData"_ustr] <<= comphelper::InitPropertySequence(
+            { { "ReduceImageResolution", cpo::uno::Any(false) },
+              { "UseLosslessCompression", cpo::uno::Any(true) },
+              { "ExportInvisibleText", cpo::uno::Any(bInvisibleText) } });
+        xStorable->storeToURL(rURL, aMediaDescriptor.getAsConstPropertyValueList());
+    };
+    const auto exportAndRead = [this, &store](bool bInvisibleText) {
+        store(maTempFile.GetURL(), bInvisibleText);
+        std::unique_ptr<vcl::pdf::PDFiumDocument> pPdf = parsePDFExport();
+        CPPUNIT_ASSERT(pPdf);
+        std::unique_ptr<vcl::pdf::PDFiumPage> pPdfPage = pPdf->openPage(0);
+        CPPUNIT_ASSERT(pPdfPage);
+        std::unique_ptr<vcl::pdf::PDFiumTextPage> pTextPage = pPdfPage->getTextPage();
+        Found aFound;
+        std::function<void(vcl::pdf::PDFiumPageObject&)> aVisit
+            = [&](vcl::pdf::PDFiumPageObject& rObject) {
+                  switch (rObject.getType())
+                  {
+                      case vcl::pdf::PDFPageObjectType::Form:
+                          for (int n = 0; n < rObject.getFormObjectCount(); ++n)
+                              if (std::unique_ptr<vcl::pdf::PDFiumPageObject> pChild
+                                  = rObject.getFormObject(n))
+                                  aVisit(*pChild);
+                          break;
+                      case vcl::pdf::PDFPageObjectType::Text:
+                          if (rObject.getText(pTextPage).indexOf("Scanned") >= 0)
+                          {
+                              if (rObject.getTextRenderMode()
+                                  == vcl::pdf::PDFTextRenderMode::Invisible)
+                                  ++aFound.nInvisible;
+                              else
+                                  ++aFound.nVisibleLine;
+                          }
+                          break;
+                      case vcl::pdf::PDFPageObjectType::Image:
+                          ++aFound.nImages;
+                          if (rObject.getImageBitsPerPixel(*pPdfPage) == 1)
+                              ++aFound.nOneBitImages;
+                          break;
+                      case vcl::pdf::PDFPageObjectType::Path:
+                          ++aFound.nPaths;
+                          break;
+                      default:
+                          break;
+                  }
+              };
+        for (int n = 0; n < pPdfPage->getObjectCount(); ++n)
+            if (std::unique_ptr<vcl::pdf::PDFiumPageObject> pObject = pPdfPage->getObject(n))
+                aVisit(*pObject);
+        return aFound;
+    };
+
+    const Found aCanvas = exportAndRead(true);
+    CPPUNIT_ASSERT(aCanvas.nInvisible >= 1);
+    CPPUNIT_ASSERT_EQUAL(0, aCanvas.nVisibleLine);
+    CPPUNIT_ASSERT_EQUAL(1, aCanvas.nImages);
+    CPPUNIT_ASSERT_EQUAL(1, aCanvas.nOneBitImages);
+    CPPUNIT_ASSERT_EQUAL(0, aCanvas.nPaths);
+
+    const Found aOther = exportAndRead(false);
+    CPPUNIT_ASSERT_EQUAL(0, aOther.nInvisible);
+    CPPUNIT_ASSERT_EQUAL(0, aOther.nVisibleLine);
+
+    // A hidden line that carries a decoration (set on the object, past the
+    // hooks, so it is still hidden): the underline paints nothing either.
+    pLine->SetMergedItem(SvxUnderlineItem(LINESTYLE_SINGLE, EE_CHAR_UNDERLINE));
+    CPPUNIT_ASSERT(sd::hiddenink::IsHiddenLine(*pLine));
+    const Found aUnderlined = exportAndRead(true);
+    CPPUNIT_ASSERT(aUnderlined.nInvisible >= 1);
+    CPPUNIT_ASSERT_EQUAL(0, aUnderlined.nVisibleLine);
+    CPPUNIT_ASSERT_EQUAL(0, aUnderlined.nPaths);
+
+    // E6: reopen the canvas save; the scan is the same bilevel picture.
+    const auto reopenScan = [this](const OUString& rURL) {
+        loadFromURL(rURL);
+        SdXImpressDocument* pReopened = lcl_ActivateScanDoc(mxComponent);
+        dispatchCommand(mxComponent, u".uno:TransformDocumentStructure"_ustr,
+                        { comphelper::makePropertyValue(
+                            u"DataJson"_ustr,
+                            u"{ \"Transforms\": { \"SlideCommands\": ["
+                            u"{\"DecomposePdfPages\": true}]}}"_ustr) });
+        SdPage* pReopenedPage = pReopened->GetDoc()->GetSdPage(0, PageKind::Standard);
+        for (size_t n = 0; n < pReopenedPage->GetObjCount(); ++n)
+            if (auto pGraf = dynamic_cast<SdrGrafObj*>(pReopenedPage->GetObj(n)))
+                return pGraf->GetGraphic().GetBitmap();
+        CPPUNIT_FAIL("the reopened save has no picture");
+        return Bitmap();
+    };
+    const auto assertFixturePixels = [](const Bitmap& rBitmap) {
+        CPPUNIT_ASSERT_EQUAL(Size(64, 32), rBitmap.GetSizePixel());
+        CPPUNIT_ASSERT_EQUAL(vcl::PixelFormat::N8_BPP, rBitmap.getPixelFormat());
+        BitmapScopedReadAccess pRead(rBitmap);
+        CPPUNIT_ASSERT(pRead);
+        CPPUNIT_ASSERT(pRead->HasPalette());
+        CPPUNIT_ASSERT_EQUAL(sal_uInt16(2), pRead->GetPaletteEntryCount());
+        for (tools::Long nY = 0; nY < 32; ++nY)
+            for (tools::Long nX = 0; nX < 64; ++nX)
+                CPPUNIT_ASSERT_EQUAL_MESSAGE(
+                    OString("pixel " + OString::number(nX) + "," + OString::number(nY)).getStr(),
+                    lcl_FixtureInk(nX, nY), pRead->GetColor(nY, nX).GetLuminance() < 128);
+    };
+    const Bitmap aFirst = reopenScan(maTempFile.GetURL());
+    assertFixturePixels(aFirst);
+
+    // Save the reopened document again and reopen that: the same pixels.
+    utl::TempFileNamed aSecondSave(u"scanresave", true, u".pdf");
+    aSecondSave.EnableKillingFile();
+    store(aSecondSave.GetURL(), true);
+    const Bitmap aSecond = reopenScan(aSecondSave.GetURL());
+    assertFixturePixels(aSecond);
 }
 
 CPPUNIT_PLUGIN_IMPLEMENT();

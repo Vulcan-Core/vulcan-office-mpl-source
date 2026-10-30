@@ -30,9 +30,10 @@ describe(['tagdesktop', 'tagnextcloud', 'tagproxy'], 'Shape alignment guides.', 
 			var section = getHandlesSection(win);
 			var extraInfo = win.app.definitions.graphicSelection.extraInfo;
 
-			// Object-boundary guides are only computed when snap-to-grid is off
-			// (otherwise the grid wins). The test environment may load with it on,
-			// so force it off before driving the snap.
+			// Object guides now blend with grid snap (alignment wins its axis,
+			// grid fills the rest); force grid off so the expectations below
+			// are pure object-alignment values regardless of the environment's
+			// default grid setting.
 			win.app.map.stateChangeHandler.setItemValue('.uno:GridUse', 'false');
 
 			// Core sends the rectangles of the objects (in pixels) so the browser
@@ -83,6 +84,27 @@ describe(['tagdesktop', 'tagnextcloud', 'tagproxy'], 'Shape alignment guides.', 
 			expect(p.centerSnapX, 'centerSnapX').to.be.null;
 			expect(p.centerSnapY, 'centerSnapY').to.be.null;
 			expect(p.draggedCenter, 'draggedCenter').to.be.null;
+
+			// The dashed-line list leads with the snapped winner on each axis.
+			expect(p.guideLinesX, 'guideLinesX').to.be.an('array');
+			expect(p.guideLinesX[0], 'guideLinesX[0]').to.be.closeTo(other[0], 1);
+			expect(p.guideLinesY, 'guideLinesY').to.be.an('array');
+			expect(p.guideLinesY[0], 'guideLinesY[0]').to.be.closeTo(other[1], 1);
+		});
+	});
+
+	// Regression test for snapping to the slide's own left/top edge: 0 is a
+	// legitimate snap ordinate and must not be dropped as "no snap".
+	it('Snaps to the slide edge at the document origin.', function() {
+		withSelectedShape(function(section, position, size) {
+			// Drag so the selected shape's left and top edges meet the slide's.
+			section.checkHelperLinesAndSnapPoints(size, position, [-position[0], -position[1]]);
+
+			var p = section.sectionProperties;
+			expect(p.closestX, 'closestX').to.equal(0);
+			expect(p.closestY, 'closestY').to.equal(0);
+			expect(p.snapOffsetX, 'snapOffsetX').to.equal(0);
+			expect(p.snapOffsetY, 'snapOffsetY').to.equal(0);
 		});
 	});
 

@@ -1428,8 +1428,13 @@ CPPUNIT_TEST_FIXTURE(SdOOXMLExportTest1, testCustomshapeBitmapfillSrcrect)
     // - XPath '/p:sld/p:cSld/p:spTree/p:sp/p:spPr/a:blipFill/a:srcRect' number of nodes is incorrect
     // i.e. <a:srcRect> was exported as <a:fillRect> in <a:stretch>, which made part of the image
     // invisible.
+    //
+    // the source of this fixture is a <p:pic> whose placeholder geometry is a
+    // roundRect, so it used to export as a <p:sp> carrying the image as a decorative
+    // fill - which PowerPoint renders as an empty frame. It now exports as a picture
+    // again, so the same assertions moved from p:sp/p:spPr to p:pic.
 
-    assertXPath(pXmlDoc, "/p:sld/p:cSld/p:spTree/p:sp/p:spPr/a:blipFill/a:srcRect");
+    assertXPath(pXmlDoc, "/p:sld/p:cSld/p:spTree/p:pic/p:blipFill/a:srcRect");
 
     // tdf#134210
     // Original values of attribute of l and r in xml files: <a:srcRect l="4393" r="4393"/>
@@ -1438,10 +1443,10 @@ CPPUNIT_TEST_FIXTURE(SdOOXMLExportTest1, testCustomshapeBitmapfillSrcrect)
     // future if we add core feature to LibreOffice, we should change the control value with
     // 4393.
 
-    assertXPathNoAttribute(pXmlDoc, "/p:sld/p:cSld/p:spTree/p:sp/p:spPr/a:blipFill/a:srcRect", "l");
-    assertXPathNoAttribute(pXmlDoc, "/p:sld/p:cSld/p:spTree/p:sp/p:spPr/a:blipFill/a:srcRect", "r");
-    assertXPathNoAttribute(pXmlDoc, "/p:sld/p:cSld/p:spTree/p:sp/p:spPr/a:blipFill/a:srcRect", "t");
-    assertXPathNoAttribute(pXmlDoc, "/p:sld/p:cSld/p:spTree/p:sp/p:spPr/a:blipFill/a:srcRect", "b");
+    assertXPathNoAttribute(pXmlDoc, "/p:sld/p:cSld/p:spTree/p:pic/p:blipFill/a:srcRect", "l");
+    assertXPathNoAttribute(pXmlDoc, "/p:sld/p:cSld/p:spTree/p:pic/p:blipFill/a:srcRect", "r");
+    assertXPathNoAttribute(pXmlDoc, "/p:sld/p:cSld/p:spTree/p:pic/p:blipFill/a:srcRect", "t");
+    assertXPathNoAttribute(pXmlDoc, "/p:sld/p:cSld/p:spTree/p:pic/p:blipFill/a:srcRect", "b");
 }
 
 CPPUNIT_TEST_FIXTURE(SdOOXMLExportTest1, testTdf100348FontworkBitmapFill)

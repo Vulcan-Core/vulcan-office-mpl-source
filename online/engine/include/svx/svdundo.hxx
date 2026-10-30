@@ -129,6 +129,10 @@ class SVXCORE_DLLPUBLIC SdrUndoObj : public SdrUndoAction
 protected:
     rtl::Reference<SdrObject> mxObj;
 
+public:
+    /// Vulcan fork: the object this action changes, for per-view (out-of-order) undo.
+    const SdrObject* GetUndoObject() const { return mxObj.get(); }
+
 protected:
     SdrUndoObj(SdrObject& rNewObj);
     virtual ~SdrUndoObj() override;

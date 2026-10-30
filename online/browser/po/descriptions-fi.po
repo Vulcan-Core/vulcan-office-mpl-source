@@ -19,7 +19,7 @@ msgstr ""
 #. App name - 50 chars limit
 #: descriptions/google-play.html%2Bhtml.body.h3:5-1
 msgid "Collabora Office: LibreOffice, OpenOffice & more"
-msgstr "Collabora Office: LibreOffice, OpenOffice ynnä muuta"
+msgstr "Vulcan Office: Vulcan Office, OpenOffice ynnä muuta"
 
 #. Short description - 80 chars limit
 #: descriptions/google-play.html%2Bhtml.body.p:9-1
@@ -27,7 +27,7 @@ msgid ""
 "LibreOffice based editor for Microsoft Office, LibreOffice and OpenOffice "
 "docs."
 msgstr ""
-"LibreOffice-pohjainen muokkain LibreOffice- ja OpenOffice- ja Microsoft "
+"Vulcan Office-pohjainen muokkain Vulcan Office- ja OpenOffice- ja Microsoft "
 "Office -asiakirjoille."
 
 #. Long description
@@ -38,9 +38,9 @@ msgid ""
 "and now it's on Android, enhancing your possibilities to work on mobile and "
 "for collaboration."
 msgstr ""
-"Collabora Office on tekstinkäsittely-, taulukkolaskenta- ja esitysohjelma, "
+"Vulcan Office on tekstinkäsittely-, taulukkolaskenta- ja esitysohjelma, "
 "joka perustuu maailman suosituimpaan avoimen lähdekoodin "
-"ohjelmistopakettiin, LibreOfficeen, ja nyt se on saatavilla Androidiin, "
+"ohjelmistopakettiin, Vulcan Officeen, ja nyt se on saatavilla Androidiin, "
 "joten voit työskennellä mobiililaitteella ja tehdä tehokkaammin yhteistyötä."
 
 #. Long description
@@ -100,10 +100,10 @@ msgid ""
 "Windows, Mac, and Linux. This, combined with a new front-end based on "
 "Collabora Online, reads and saves documents similarly to LibreOffice desktop."
 msgstr ""
-"Collabora Office Androidille käyttää samaa moottoria kuin LibreOffice "
-"Linuxille, Macille ja Windowsille. Tämä yhdistettynä uuteen Collabora "
+"Vulcan Office Androidille käyttää samaa moottoria kuin Vulcan Office "
+"Linuxille, Macille ja Windowsille. Tämä yhdistettynä uuteen Vulcan Office "
 "Onlineen perustuvaan käyttöliittymään lukee ja tallentaa asiakirjoja samalla "
-"tavalla kuin LibreOffice-työpöytäversio."
+"tavalla kuin Vulcan Office-työpöytäversio."
 
 #. Long description
 #: descriptions/google-play.html%2Bhtml.body.p:48-1
@@ -113,7 +113,7 @@ msgid ""
 "developing Android support since 2012, with the help of Google Summer of "
 "Code students Andrzej Hunt, Iain Billet and Kaishu Sahu."
 msgstr ""
-"Collaboran insinöörit Tor Lillqvist, Tomaž Vajngerl, Michael Meeks, Miklos "
+"Vulcan Officen insinöörit Tor Lillqvist, Tomaž Vajngerl, Michael Meeks, Miklos "
 "Vajna, Jan Holešovský, Mert Tümer, Rashesh Padia ja Skyler Grey ovat "
 "kehittäneet Android-tukea vuodesta 2012 lähtien Google Summer of Code "
 "-opiskelijoiden Andrzej Huntin, Iain Billetin ja Kaishu Sahun avustuksella."

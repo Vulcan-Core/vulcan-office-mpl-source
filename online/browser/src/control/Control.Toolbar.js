@@ -11,10 +11,10 @@
  */
 
 /*
- * Collabora Online toolbar
+ * Vulcan Office toolbar
  */
 
-/* global app $ _ _UNO JSDialog URLPopUpSection cool */
+/* global app $ _ _UNO JSDialog URLPopUpSection cool VulcanUndoNotice */
 /*eslint indent: [error, "tab", { "outerIIFEBody": 0 }]*/
 
 (function(global) {
@@ -50,6 +50,27 @@ function getBorderStyleUNOCommand(
 	horiz,
 	vert,
 	color,
+	// The six arguments above are FLAGS — 1 draws that edge, 0 leaves it. These
+	// two say what a drawn edge is drawn AT: `width` is the BorderLine2
+	// OuterLineWidth field IN TWIPS — `.uno:SetBorderStyle` is a METHOD slot,
+	// and core's SvxBoxItem::PutValue takes the widths as they arrive
+	// (sfx2 appuno.cxx TransformParameters: `PutValue(value, 0)`, no
+	// CONVERT_TWIPS), so 15 is 15 twips = 0.75pt. Definitions.Menu.ts's
+	// LO_BorderLineWidth names 15 as 0.75pt "Thin", 30 as 1.50pt "Medium",
+	// 45 as 2.25pt "Thick", and the shipped desktop line-style menu sends
+	// exactly those numbers in this same struct. NOT 1/100 mm — a "fix" that
+	// converted 15 twips to 1/100 mm would send 26, which core reads as 26
+	// twips = 1.3pt: "Thin" drawn near Medium.
+	// `lineStyle` is com.sun.star.table.BorderLineStyle (offapi
+	// BorderLineStyle.idl: 0 SOLID, 1 DOTTED, 2 DASHED, 3 DOUBLE).
+	//
+	// Both default to what this builder hardcoded before them, so
+	// setBorderStyle's twelve presets and the mobile border selector behind it
+	// send byte-identical commands. The phone Calc borders palette
+	// (VulcanCalcBorderPalette.ts) passes them, because the reference's
+	// palette carries a style tier and the fork's widget did not.
+	width,
+	lineStyle,
 ) {
 	// flags are the same as core's SvxBoxInfoItemValidFlags
 	const funParams = [top, bottom, left, right, horiz, vert]
@@ -60,6 +81,15 @@ function getBorderStyleUNOCommand(
 		// 0x7f maps to all flags except DISABLE set
 		valid = 0x7f;
 	}
+	// AFTER `valid`, which is read off the flags and must not see the widths.
+	const w = width === undefined ? 1 : width;
+	const s = lineStyle === undefined ? 0 : lineStyle;
+	left = left ? w : 0;
+	right = right ? w : 0;
+	bottom = bottom ? w : 0;
+	top = top ? w : 0;
+	horiz = horiz ? w : 0;
+	vert = vert ? w : 0;
 	const params = {
 		OuterBorder: {
 			type: '[]any',
@@ -71,7 +101,7 @@ function getBorderStyleUNOCommand(
 						InnerLineWidth: { type: 'short', value: 0 },
 						OuterLineWidth: { type: 'short', value: left },
 						LineDistance: { type: 'short', value: 0 },
-						LineStyle: { type: 'short', value: 0 },
+						LineStyle: { type: 'short', value: s },
 						LineWidth: { type: 'unsigned long', value: 0 },
 					},
 				},
@@ -82,7 +112,7 @@ function getBorderStyleUNOCommand(
 						InnerLineWidth: { type: 'short', value: 0 },
 						OuterLineWidth: { type: 'short', value: right },
 						LineDistance: { type: 'short', value: 0 },
-						LineStyle: { type: 'short', value: 0 },
+						LineStyle: { type: 'short', value: s },
 						LineWidth: { type: 'unsigned long', value: 0 },
 					},
 				},
@@ -93,7 +123,7 @@ function getBorderStyleUNOCommand(
 						InnerLineWidth: { type: 'short', value: 0 },
 						OuterLineWidth: { type: 'short', value: bottom },
 						LineDistance: { type: 'short', value: 0 },
-						LineStyle: { type: 'short', value: 0 },
+						LineStyle: { type: 'short', value: s },
 						LineWidth: { type: 'unsigned long', value: 0 },
 					},
 				},
@@ -104,7 +134,7 @@ function getBorderStyleUNOCommand(
 						InnerLineWidth: { type: 'short', value: 0 },
 						OuterLineWidth: { type: 'short', value: top },
 						LineDistance: { type: 'short', value: 0 },
-						LineStyle: { type: 'short', value: 0 },
+						LineStyle: { type: 'short', value: s },
 						LineWidth: { type: 'unsigned long', value: 0 },
 					},
 				},
@@ -125,7 +155,7 @@ function getBorderStyleUNOCommand(
 						InnerLineWidth: { type: 'short', value: 0 },
 						OuterLineWidth: { type: 'short', value: horiz },
 						LineDistance: { type: 'short', value: 0 },
-						LineStyle: { type: 'short', value: 0 },
+						LineStyle: { type: 'short', value: s },
 						LineWidth: { type: 'unsigned long', value: 0 },
 					},
 				},
@@ -136,7 +166,7 @@ function getBorderStyleUNOCommand(
 						InnerLineWidth: { type: 'short', value: 0 },
 						OuterLineWidth: { type: 'short', value: vert },
 						LineDistance: { type: 'short', value: 0 },
-						LineStyle: { type: 'short', value: 0 },
+						LineStyle: { type: 'short', value: s },
 						LineWidth: { type: 'unsigned long', value: 0 },
 					},
 				},
@@ -545,7 +575,51 @@ const shapeGroupTitles = {
 	'Connectors': _UNO('.uno:ConnectorToolbox')
 };
 
-function createShapesPanel(shapeType) {
+/*
+	The shape groups Google Slides' PHONE shape picker offers, in its order.
+
+	google-slides.json, "Insert > Shape submenu" (insert / common): "Opens a
+	categorized grid — general shapes, arrows, callouts, and equation symbols.
+	Tapping one drops it at a default size on the slide, selected and ready to
+	drag/resize."
+
+	Mapped onto the six groups of the `insertshapes` collection above:
+	  general shapes   → 'Basic Shapes'       (22 shapes)
+	  arrows           → 'Block Arrows'       (26)
+	  callouts         → 'Callouts'           (7)
+	  equation symbols → NO SOURCE IN THIS FORK, see below.
+
+	Cut, because Google's phone picker has no category for them and the
+	standing rule is that what Slides does not ship on phone is a cut rather
+	than a gap: 'Symbol Shapes' (18 — smiley/sun/moon/heart, not equation
+	glyphs), 'Stars and Banners' (12), 'Flowchart' (28). 58 of 113 shapes go;
+	55 stay. All six groups remain on DESKTOP, which takes the other branch of
+	_openInsertShapesWizard() and opens the full InsertShapesMenu grid, and in
+	the notebookbar's own shapes dropdowns.
+
+	🔴 THE FOURTH CATEGORY IS NOT DELIVERED AND IS NOT FAKED. Slides' fourth
+	is "equation symbols" — plus/minus/multiply/divide/equal/not-equal.
+	LibreOffice keeps those in a MathShapes group that this fork does not
+	carry: there is no 'mathshapes' key in the table above and no
+	`mathshapes_` artwork anywhere under images/ to draw one with (checked
+	against both images/ and images/dark/). Substituting 'Symbol
+	Shapes' because the word "symbol" matches would put smileys under a label
+	that promises operators. So the phone picker ships three of Google's four
+	categories, and this row is IMPROVED, NOT CLOSED.
+
+	Draw is deliberately excluded from the trim at the call site — a Draw
+	document has no Slides catalogue to copy and flowchart/connector work is
+	most of what it is for.
+*/
+const VULCAN_PHONE_SHAPE_GROUPS = ['Basic Shapes', 'Block Arrows', 'Callouts'];
+
+/*
+	`groups`, when given, is an ALLOWLIST of group names to render, applied in
+	the collection's own order. Omitting it is the pre-existing behaviour, byte
+	for byte: every group in the collection, which is what every caller other
+	than the phone Impress branch passes.
+*/
+function createShapesPanel(shapeType, groups) {
 	const wrapper = document.createElement('div');
 	wrapper.className = 'ui-grid-cell';
 	wrapper.id = 'insertshape-wrapper';
@@ -554,23 +628,41 @@ function createShapesPanel(shapeType) {
 	grid.className = 'insertshape-grid insertshapes';
 
 	var collection = shapes[shapeType];
+	const phoneSlidesPicker = Array.isArray(groups);
+	let phoneGroupIndex = 0;
 
 	for (var s in collection) {
+		if (groups && groups.indexOf(s) === -1)
+			continue;
+
 		const rowHeader = document.createElement('div');
 		rowHeader.className = 'row-header cool-font';
 		rowHeader.textContent = shapeGroupTitles[s] || _(s);
+		if (phoneSlidesPicker) {
+			rowHeader.id = 'vulcan-phone-shape-group-' + phoneGroupIndex;
+			rowHeader.dataset.shapeGroup = s;
+		}
 		grid.appendChild(rowHeader);
 
 		const row = document.createElement('div');
 		row.className = 'row';
+		if (phoneSlidesPicker) {
+			row.setAttribute('role', 'group');
+			row.setAttribute('aria-labelledby', rowHeader.id);
+			phoneGroupIndex++;
+		}
 		grid.appendChild(row);
 
 		for (let idx = 0; idx < collection[s].length; ++idx) {
 			const shape = collection[s][idx];
 
-			const col = document.createElement('div');
+			const col = document.createElement(phoneSlidesPicker ? 'button' : 'div');
 			col.className = 'col w2ui-icon ' + shape.img;
 			col.dataset.uno = shape.uno;
+			if (phoneSlidesPicker) {
+				col.type = 'button';
+				col.setAttribute('aria-label', shape.text);
+			}
 			row.appendChild(col);
 		}
 	}
@@ -831,19 +923,34 @@ function unoCmdToToolbarId(commandname)
 	return id;
 }
 
-function onInsertGraphic() {
-	var insertGraphic = window.L.DomUtil.get('insertgraphic');
-	if ('files' in insertGraphic) {
-		for (var i = 0; i < insertGraphic.files.length; i++) {
-			var file = insertGraphic.files[i];
+// Shared by the two image inputs in cool.html.m4 -- #insertgraphic (the OS
+// file/photo picker) and #insertgraphiccamera (capture="environment", the
+// camera). One body rather than two so the value=null reset below cannot end
+// up on only one of them; see the comment beside the camera input for why the
+// camera has to be a separate element instead of an attribute on the first.
+function insertGraphicFromInput(input) {
+	if (!input)
+		return false;
+
+	if ('files' in input) {
+		for (var i = 0; i < input.files.length; i++) {
+			var file = input.files[i];
 			map.insertGraphic(file);
 		}
 	}
 
 	// Set the value to null everytime so that onchange event is triggered,
 	// even if the same file is selected
-	insertGraphic.value = null;
+	input.value = null;
 	return false;
+}
+
+function onInsertGraphic() {
+	return insertGraphicFromInput(window.L.DomUtil.get('insertgraphic'));
+}
+
+function onInsertGraphicCamera() {
+	return insertGraphicFromInput(window.L.DomUtil.get('insertgraphiccamera'));
 }
 
 function onInsertMultimedia() {
@@ -1028,13 +1135,10 @@ function onCommandResult(e) {
 		map.fire('postMessage', {msgId: 'Action_Save_Resp', args: postMessageObj});
 	}
 	else if ((commandName === '.uno:Undo' || commandName === '.uno:Redo') &&
-		e.success === true && e.result.value && !isNaN(e.result.value)) { /*UNDO_CONFLICT*/
-		var alertOptions = {
-			messages: [
-				_('Conflict Undo/Redo with multiple users. Please use document repair to resolve')
-			],
-		};
-		JSDialog.showInfoModalWithOptions('undo-conflict-error', alertOptions);
+		VulcanUndoNotice.handle(map, commandName, e.result)) {
+		// Vulcan: per-view undo. A refused undo/redo gets one short line
+		// (and, when the AI is in the way, the "Revert AI changes" pointer),
+		// never upstream's modal conflict dialog.
 	} else if (map.zotero &&
 		((commandName === '.uno:DeleteTextFormField' && e.result.DeleteTextFormField.startsWith('ADDIN ZOTERO_')) ||
 		(commandName === '.uno:DeleteField' && e.result.DeleteField.startsWith('ZOTERO_')) ||
@@ -1082,13 +1186,26 @@ function onUpdatePermission(e) {
 		if (window.mode.isDesktop())
 			return;
 
+		// CS-1: `editmode-on` is what paints #toolbar-mobile-back as a TICK
+		// (lc_listitem-selected.svg, device-mobile.css:44-46) — the second
+		// checkmark in the product, meaning something different from the fx
+		// bar's. Under phone chrome that element is not rendered at all, so
+		// never apply the art, not even transiently. The closemobile toolitem
+		// update is untouched.
+		var vulcanPhoneChrome =
+			document.documentElement.classList.contains('vulcan-mobile-chrome');
+
 		if (e.detail.perm === 'edit') {
-			$('#toolbar-mobile-back').removeClass('editmode-off');
-			$('#toolbar-mobile-back').addClass('editmode-on');
+			if (!vulcanPhoneChrome) {
+				$('#toolbar-mobile-back').removeClass('editmode-off');
+				$('#toolbar-mobile-back').addClass('editmode-on');
+			}
 			toolbar.updateItem({id: 'closemobile', type: 'customtoolitem', w2icon: 'editmode'});
 		} else {
-			$('#toolbar-mobile-back').removeClass('editmode-on');
-			$('#toolbar-mobile-back').addClass('editmode-off');
+			if (!vulcanPhoneChrome) {
+				$('#toolbar-mobile-back').removeClass('editmode-on');
+				$('#toolbar-mobile-back').addClass('editmode-off');
+			}
 			toolbar.updateItem({id: 'closemobile', type: 'customtoolitem', w2icon: 'closemobile'});
 		}
 	}
@@ -1124,6 +1241,15 @@ $(document).ready(function() {
 		insertgraphic.addEventListener('change', onInsertGraphic);
 	}
 
+	// Deliberately NOT given supportedGraphicMime: the camera input keeps the
+	// accept="image/*" it is declared with, which is the form `capture` is
+	// specified against, and no camera returns the vector types in that filter.
+	// Only the change listener is attached here.
+	const insertgraphiccamera = window.L.DomUtil.get('insertgraphiccamera');
+	if (insertgraphiccamera) {
+		insertgraphiccamera.addEventListener('change', onInsertGraphicCamera);
+	}
+
 	const insertmultimedia = window.L.DomUtil.get('insertmultimedia');
 	if (insertmultimedia) {
 		insertmultimedia.accept = supportedMediaMime;
@@ -1147,6 +1273,10 @@ function setupToolbar(e) {
 	map = e;
 
 	map.on('search', function (e) {
+		// The Writer agent bridge's own counts are not the reader's search
+		// (CanvasTileLayer._claimBridgeSearch).
+		if (e && e.vulcanBridge)
+			return;
 		var searchInput = window.L.DomUtil.get('search-input');
 		var toolbar = window.mode.isSmallScreenDevice() ? app.map.mobileSearchBar: app.map.statusBar;
 		if (!toolbar) {
@@ -1192,7 +1322,9 @@ function setupToolbar(e) {
 	});
 
 	app.events.on('updatepermission', onUpdatePermission);
-	map.on('wopiprops', onWopiProps);
+	// app.onWopiProps replays CheckFileInfo props that arrived before
+	// setupToolbar ran and fires on arrival/refresh otherwise.
+	app.onWopiProps(onWopiProps);
 	map.on('commandresult', onCommandResult);
 
 	if (map.options.wopi && window.L.Params.closeButtonEnabled && !window.mode.isSmallScreenDevice()) {
@@ -1225,6 +1357,7 @@ global.getInsertTablePopupElements = getInsertTablePopupElements;
 global.getShapesPopupElements = getShapesPopupElements;
 global.getConnectorsPopupElements = getConnectorsPopupElements;
 global.createShapesPanel = createShapesPanel;
+global.VulcanPhoneShapeGroups = VULCAN_PHONE_SHAPE_GROUPS;
 global.getUNOCommand = getUNOCommand;
 global.unoCmdToToolbarId = unoCmdToToolbarId;
 global.onCommandStateChanged = onCommandStateChanged;

@@ -972,6 +972,13 @@ ScUndoPaste::ScUndoPaste( ScDocShell& rNewDocShell, const ScRangeList& rRanges,
     SetChangeTrack();
 }
 
+std::optional<ScRange> ScUndoPaste::getAffectedRange() const
+{
+    if (pRefUndoData || mpDrawUndo || maBlockRanges.empty())
+        return std::nullopt;
+    return maBlockRanges.Combine();
+}
+
 ScUndoPaste::~ScUndoPaste()
 {
     pUndoDoc.reset();

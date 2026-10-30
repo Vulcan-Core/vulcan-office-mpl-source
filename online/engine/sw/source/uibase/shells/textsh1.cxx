@@ -136,6 +136,7 @@
 #include <boost/property_tree/json_parser.hpp>
 #include <formatcontentcontrol.hxx>
 #include <rtl/uri.hxx>
+#include <tools/json_writer.hxx>
 #include <unotxdoc.hxx>
 #include <expfld.hxx>
 #include <sax/tools/converter.hxx>
@@ -2491,11 +2492,29 @@ void SwTextShell::Execute(SfxRequest &rReq)
                 throw;
             }
 
+            const auto aResponseChannel
+                = aTree.get_optional<std::string>("ResponseChannel");
+            auto setTransformResult = [&rReq, &aResponseChannel](bool bSuccess) {
+                if (!aResponseChannel)
+                    return;
+
+                tools::JsonWriter aResult;
+                aResult.put("success", bSuccess);
+                aResult.put("responseChannel", *aResponseChannel);
+                rReq.SetReturnValue(SfxStringItem(
+                    FN_PARAM_1, OUString::fromUtf8(aResult.finishAndGetAsOString())));
+            };
+
+            try
+            {
             // get the loaded content controls
             uno::Reference<text::XContentControlsSupplier> xCCSupplier(
                 GetView().GetDocShell()->GetModel(), uno::UNO_QUERY);
             if (!xCCSupplier.is())
+            {
+                setTransformResult(true);
                 break;
+            }
 
             uno::Reference<container::XIndexAccess> xContentControls
                 = xCCSupplier->getContentControls();
@@ -2515,11 +2534,17 @@ void SwTextShell::Execute(SfxRequest &rReq)
             uno::Reference<text::XTextEmbeddedObjectsSupplier> xEOS(
                 GetView().GetDocShell()->GetModel(), uno::UNO_QUERY);
             if (!xEOS.is())
+            {
+                setTransformResult(true);
                 break;
+            }
             uno::Reference<container::XIndexAccess> xEmbeddeds(xEOS->getEmbeddedObjects(),
                                                                uno::UNO_QUERY);
             if (!xEmbeddeds.is())
+            {
+                setTransformResult(true);
                 break;
+            }
 
             sal_Int32 nEOcount = xEmbeddeds->getCount();
 
@@ -3587,6 +3612,16 @@ void SwTextShell::Execute(SfxRequest &rReq)
                 {
                     KitHelper::dispatchUnoCommand(aItem.second);
                 }
+            }
+            setTransformResult(true);
+            }
+            catch (...)
+            {
+                if (!aResponseChannel)
+                    throw;
+                lcl_LogWarning(
+                    "FillApi Transform failed; returning correlated broker failure.");
+                setTransformResult(false);
             }
         }
         break;

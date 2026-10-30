@@ -27,6 +27,7 @@
 #include <vcl/svapp.hxx>
 #include <o3tl/string_view.hxx>
 #include <osl/diagnose.h>
+#include <comphelper/kit.hxx>
 
 #include <vector>
 #include <ViewShell.hxx>
@@ -314,7 +315,13 @@ void FrameView::Update(SdOptions const * pOptions)
     double aFractX = double(pOptions->GetFieldDrawX()) / (pOptions->GetFieldDrawX() / ( pOptions->GetFieldDivisionX() ? pOptions->GetFieldDivisionX() : 1 ));
     double aFractY = double(pOptions->GetFieldDrawY()) / (pOptions->GetFieldDrawY() / ( pOptions->GetFieldDivisionY() ? pOptions->GetFieldDivisionY() : 1 ));
     SetSnapGridWidth(aFractX, aFractY);
-    SetQuickEdit(pOptions->IsQuickEdit());
+    // COKit: PowerPoint select-first parity. With quick editing, the first
+    // click on a text object drops straight into text edit (the hatched
+    // edit frame, no handles) while a plain shape gets the selection
+    // handles — two different-looking selections for one gesture. Select
+    // first instead: uniform handles everywhere, text edit on
+    // double-click / F2 (DoubleClickTextEdit stays on below).
+    SetQuickEdit(pOptions->IsQuickEdit() && !comphelper::COKit::isActive());
 
     // #i26631#
     SetMasterPagePaintCaching( pOptions->IsMasterPagePaintCaching() );

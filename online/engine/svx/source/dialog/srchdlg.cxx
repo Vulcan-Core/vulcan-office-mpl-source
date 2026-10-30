@@ -389,12 +389,22 @@ SvxSearchDialog::~SvxSearchDialog()
 
 void SvxSearchDialog::SetReplaceCtrlsVisible(bool bVisible)
 {
-    m_xFindTabBtn->set_active(!bVisible);
-    m_xReplaceTabBtn->set_active(bVisible);
+    // The phone-specific findreplacedialog-mobile.ui intentionally has no
+    // Find/Replace tab buttons. Its replacement controls live in a frame in
+    // the single mobile sheet; the Online client turns that frame into a
+    // collapsed expander. Keep the desktop tab state in sync when those
+    // controls exist, without dereferencing the absent phone widgets.
+    if (m_xFindTabBtn)
+        m_xFindTabBtn->set_active(!bVisible);
+    if (m_xReplaceTabBtn)
+        m_xReplaceTabBtn->set_active(bVisible);
 
-    m_xReplaceFrame->set_visible(bVisible);
-    m_xReplaceBtn->set_visible(bVisible);
-    m_xReplaceAllBtn->set_visible(bVisible);
+    // With no tabs there is no later core action that can reveal this frame.
+    // Always serialize it for the phone client, which owns the disclosure.
+    const bool bShowReplace = bVisible || !m_xFindTabBtn || !m_xReplaceTabBtn;
+    m_xReplaceFrame->set_visible(bShowReplace);
+    m_xReplaceBtn->set_visible(bShowReplace);
+    m_xReplaceAllBtn->set_visible(bShowReplace);
 
     m_xDialog->resize_to_request();
 }
@@ -664,8 +674,10 @@ void SvxSearchDialog::InitControls_Impl()
 
     m_xSearchLB->connect_changed( LINK( this, SvxSearchDialog, ModifyHdl_Impl ) );
     m_xReplaceLB->connect_changed( LINK( this, SvxSearchDialog, ModifyHdl_Impl ) );
-    m_xFindTabBtn->connect_toggled(LINK(this, SvxSearchDialog, OnTabBtnClick));
-    m_xReplaceTabBtn->connect_toggled(LINK(this, SvxSearchDialog, OnTabBtnClick));
+    if (m_xFindTabBtn)
+        m_xFindTabBtn->connect_toggled(LINK(this, SvxSearchDialog, OnTabBtnClick));
+    if (m_xReplaceTabBtn)
+        m_xReplaceTabBtn->connect_toggled(LINK(this, SvxSearchDialog, OnTabBtnClick));
 
     Link<weld::Widget&,void> aLink = LINK( this, SvxSearchDialog, FocusHdl_Impl );
     m_xSearchLB->connect_focus_in( aLink );
@@ -2525,6 +2537,29 @@ void SvxSearchDialogWrapper::SetSearchLabel(const OUString& sStr)
     if (SvxSearchDialogWrapper *pWrp = static_cast<SvxSearchDialogWrapper*>( pViewFrame->
             GetChildWindow( SvxSearchDialogWrapper::GetChildWindowId() )))
         pWrp->getDialog()->SetSearchLabel(sStr);
+}
+
+// Vulcan: "3 of 12" -- see the declaration in include/svx/srchdlg.hxx for why
+// this is an overload rather than a SearchLabel member, and who consumes it.
+//
+// It deliberately does NOT reach the label directly: it formats and hands off
+// to the OUString overload above, so the two sinks stay in one place. If a
+// rebase moves either sink, this follows for free.
+//
+// Out-of-range input is dropped rather than clamped. A caller that has not
+// actually established both numbers must leave whatever the search itself put
+// in the label ("Search key not found", "Reached the end of the sheet"), which
+// is more useful than a fabricated position -- and silently correcting a bad
+// ordinal would hide the producer bug that generated it.
+void SvxSearchDialogWrapper::SetSearchLabel(sal_Int32 nCurrent, sal_Int32 nTotal)
+{
+    if (nTotal < 1 || nCurrent < 1 || nCurrent > nTotal)
+        return;
+
+    OUString sStr = SvxResId(RID_SVXSTR_SEARCH_MATCH_ORDINAL);
+    sStr = sStr.replaceFirst("%1", OUString::number(nCurrent));
+    sStr = sStr.replaceFirst("%2", OUString::number(nTotal));
+    SetSearchLabel(sStr);
 }
 
 /* vim:set shiftwidth=4 softtabstop=4 expandtab: */

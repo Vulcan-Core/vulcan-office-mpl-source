@@ -36,7 +36,17 @@ class TileCoordData {
 		this.part = part !== null ? part : app.map._docLayer._selectedPart;
 		this.mode = mode !== null ? mode : 0;
 
-		this.scale = Math.pow(1.2, this.z - 10);
+		this.scale = TileCoordData.scaleForZoom(this.z);
+	}
+
+	// The zoom-frame source scan constructs one of these per candidate tile
+	// per rung; memoize the ~18 rung scales instead of Math.pow each time.
+	private static scaleCache: { [zoom: number]: number } = {};
+	private static scaleForZoom(zoom: number): number {
+		let scale = TileCoordData.scaleCache[zoom];
+		if (scale === undefined)
+			scale = TileCoordData.scaleCache[zoom] = Math.pow(1.2, zoom - 10);
+		return scale;
 	}
 
 	getPos() {

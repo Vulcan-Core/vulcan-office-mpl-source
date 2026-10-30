@@ -6925,7 +6925,7 @@ msgstr ""
 
 #, fuzzy
 #~ msgid "Oops, there is a problem connecting the document"
-#~ msgstr "Obbo! Collabora Online xizmatiga ulanishda muammo yuz berdi: "
+#~ msgstr "Obbo! Vulcan Office xizmatiga ulanishda muammo yuz berdi: "
 
 #~ msgid "Cancel the search"
 #~ msgstr "Izlashni bekor qilish"

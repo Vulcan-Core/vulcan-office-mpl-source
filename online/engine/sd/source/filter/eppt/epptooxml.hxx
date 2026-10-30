@@ -111,7 +111,8 @@ private:
     sal_Int32 GetLayoutFileId( sal_Int32 nOffset, sal_uInt32 nMasterNum );
 
     // shapes
-    void WriteShapeTree( const ::sax_fastparser::FSHelperPtr& pFS, PageType ePageType, bool bMaster );
+    void WriteShapeTree( const ::sax_fastparser::FSHelperPtr& pFS, PageType ePageType, bool bMaster,
+                         bool bSlideMasterPart = false, sal_uInt32 nMasterNum = 0 );
 
     sal_uInt32 GetNewSlideId() { return mnSlideIdMax ++; }
     sal_uInt32 GetNewSlideMasterId() { return mnSlideMasterIdMax ++; }
@@ -127,14 +128,18 @@ private:
 
     virtual OUString SAL_CALL getImplementationName() override;
 
-    /** Create a new placeholder index for a master placeholder shape
+    /** The placeholder index of a master placeholder shape, allocating one on first use
 
         @param rXShape Master placeholder shape
         @returns Placeholder index
     */
-    sal_Int32 CreateNewPlaceholderIndex(const css::uno::Reference<css::drawing::XShape>& rXShape);
+    sal_Int32 GetOrCreatePlaceholderIndex(const css::uno::Reference<css::drawing::XShape>& rXShape);
     css::uno::Reference<css::drawing::XShape> GetReferencedPlaceholderXShape(const PlaceholderType eType, PageType ePageType) const;
     void WritePlaceholderReferenceShapes(PowerPointShapeExport& rDML, PageType ePageType);
+    /** Writes the master page's content placeholders into the layout they belong on */
+    void WriteLayoutContentPlaceholders(PowerPointShapeExport& rDML);
+    /** Writes the placeholders a slide master holds that the page standing for it has none of */
+    void WriteMasterOwnPlaceholders(PowerPointShapeExport& rDML, sal_uInt32 nMasterNum);
 
     void FindEquivalentMasterPages();
     sal_uInt32 GetEquivalentMasterPage(sal_uInt32 nMasterPage);
@@ -202,6 +207,11 @@ private:
     void WriteAuthors();
 
     void WritePresentationProps();
+
+    /** VULCAN: writes back the parts the import kept as the file had them, since no
+        part of the document model holds them: ppt/tableStyles.xml, which defines the styles the
+        tables cite by id, and ppt/viewProps.xml, with the drawing guides */
+    void WriteKeptParts();
 
     /// If this is PPTM, output the VBA stream.
     void WriteVBA();

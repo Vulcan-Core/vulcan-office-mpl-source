@@ -65,6 +65,17 @@ class CalcNotifications {
 			_('Deletion created #REF! errors in other formulas. Undo to restore.'),
 			_('Find First'),
 			function () {
+				// This button is the SECOND door onto the orphaned-cell-edit
+				// brick (round-7 F2): on a phone, a `.uno:GoToCell` issued
+				// while core holds an edit the chrome is not showing reaps the
+				// EditView and leaves ScInputHandler wedged, after which
+				// nothing enters edit again for the rest of the session. The
+				// agent bridge takes the same door; the guard is shared, in
+				// VulcanEscape, and is a no-op off the phone chrome and
+				// whenever core is idle or the edit is visible.
+				const escape = (window as any).VulcanEscape;
+				if (escape && escape.disarmOrphanedCellEdit)
+					escape.disarmOrphanedCellEdit(map);
 				map.sendUnoCommand('.uno:GoToCell', {
 					ToPoint: { type: 'string', value: cellAddr },
 				});

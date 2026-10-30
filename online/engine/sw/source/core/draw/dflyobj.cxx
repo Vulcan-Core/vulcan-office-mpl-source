@@ -1119,7 +1119,9 @@ void SwVirtFlyDrawObj::NbcResize(const Point& rRef, double xFact, double yFact)
             {
                 nRelWidth  = pSh->GetBrowseWidth();
                 nRelHeight = pSh->VisArea().Height();
-                const Size aBorder = pSh->GetOut()->PixelToLogic( pSh->GetBrowseBorder() );
+                // VULCAN (R6-15): formatting reference, not the current
+                // device (GetBrowseBorderTwips).
+                const Size aBorder = pSh->GetBrowseBorderTwips();
                 nRelHeight -= 2*aBorder.Height();
             }
             else

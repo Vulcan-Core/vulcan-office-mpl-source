@@ -66,8 +66,8 @@ void WopiProxy::handleRequest(std::istream & message,
     // Before we create DocBroker with a SocketPoll thread, a ClientSession, and a Kit process,
     // we need to vet this request by invoking CheckFileInfo.
     // For that, we need the storage settings to create a connection.
-    const StorageBase::StorageType storageType =
-        StorageBase::validate(uriPublic, /*takeOwnership=*/false);
+    const StorageBase::StorageType storageType = StorageBase::validate(
+        uriPublic, /*takeOwnership=*/false, _requestDetails.isServerToServer());
     switch (storageType)
     {
         case StorageBase::StorageType::Unsupported:
@@ -222,7 +222,8 @@ void WopiProxy::checkFileInfo(const std::shared_ptr<TerminatingPoll>& poll, cons
     };
 
     // CheckFileInfo asynchronously.
-    _checkFileInfo = std::make_shared<CheckFileInfo>(poll, uri, std::move(cfiContinuation));
+    _checkFileInfo = std::make_shared<CheckFileInfo>(
+        poll, uri, _requestDetails.isServerToServer(), std::move(cfiContinuation));
     _checkFileInfo->checkFileInfo(redirectLimit);
 }
 

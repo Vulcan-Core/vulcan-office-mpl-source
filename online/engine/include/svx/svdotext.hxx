@@ -396,6 +396,10 @@ public:
     // FitToSize and Fontwork are not taken into account in GetTextSize()!
     virtual const Size& GetTextSize() const;
     void FitFrameToTextSize();
+    /** The frame size FitFrameToTextSize would resize to (text extent plus
+        the text distances), laid out against the current frame size. Does
+        not modify the object; empty when there is no text. */
+    Size CalcFitToTextSize() const;
 
     double GetFontScale() const;
     double GetSpacingScale() const;

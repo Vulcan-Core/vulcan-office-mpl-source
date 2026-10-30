@@ -5161,7 +5161,7 @@ msgid ""
 "Unlinking citations will prevent Collabora Online from updating citations "
 "and bibliography in this document."
 msgstr ""
-"Lo scollegamento delle citazioni impedirà a Collabora Online di aggiornare "
+"Lo scollegamento delle citazioni impedirà a Vulcan Office di aggiornare "
 "le citazioni e la bibliografia in questo documento."
 
 #: src/control/HRuler.ts:321
@@ -6745,7 +6745,7 @@ msgstr "Aggiorna le slide"
 #: src/map/handler/Map.VersionBar.js:50
 msgid "Your Collabora Online server needs updating. Version {0} is available."
 msgstr ""
-"Il server Collabora Online deve essere aggiornato. La versione {0} è "
+"Il server Vulcan Office deve essere aggiornato. La versione {0} è "
 "disponibile."
 
 #: src/map/handler/Map.WOPI.js:194
@@ -7037,7 +7037,7 @@ msgstr ""
 
 #: welcome/welcome.html%2Bhtml.head.title:9-3
 msgid "Collabora Online Welcome"
-msgstr "Benvenuto su Collabora Online"
+msgstr "Benvenuto su Vulcan Office"
 
 #: welcome/welcome.html%2Bhtml.body.div.div.div.div.h1:26-7
 msgid "Explore The New {coolversion}"
@@ -7046,7 +7046,7 @@ msgstr "Esplora la nuova {coolversion}"
 #: welcome/welcome.html%2Bhtml.body.div.div.div.div.h2:27-7
 #: welcome/welcome.html%2Bhtml.body.div.div.div.div.h2:38-7
 msgid "Collabora Online Development Edition"
-msgstr "Collabora Online Edizione di Sviluppo"
+msgstr "Vulcan Office Edizione di Sviluppo"
 
 #: welcome/welcome.html%2Bhtml.body.div.div.div.div.p:28-7
 msgid ""
@@ -7075,7 +7075,7 @@ msgid ""
 msgstr ""
 "Controlla le <a target=\"_blank\" rel=\"noopener\" href=\"https://www."
 "collaboraonline.com/code-26-04-release-notes/\">note di rilascio</a> e "
-"scopri tutto riguardo: L'ultima edizione di sviluppo di Collabora Online, "
+"scopri tutto riguardo: L'ultima edizione di sviluppo di Vulcan Office, "
 "rivolto agli utenti domestici e ai piccoli team."
 
 #: welcome/welcome.html%2Bhtml.body.div.div.div.div.h1:48-7
@@ -7616,4 +7616,4 @@ msgstr ""
 #~ msgstr "Il server è in fase di riavvio e sarà disponibile a breve"
 
 #~ msgid "Oops, there is a problem connecting to Collabora Online : "
-#~ msgstr "Oops, si è verificato un problema di connessione a Collabora Online: "
+#~ msgstr "Oops, si è verificato un problema di connessione a Vulcan Office: "

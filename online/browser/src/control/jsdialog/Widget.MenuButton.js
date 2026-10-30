@@ -97,9 +97,55 @@ function _menubuttonControl (parentContainer, data, builder) {
 		$(control.label).unbind('click');
 
 		var dropdownId = data.id;
+		var vulcanPhoneMenu = data.vulcanPhoneMenu;
 		var clickFunction = function () {
 			if (control.container.hasAttribute('disabled'))
 				return;
+
+			/*
+			 * VULCAN — A MENUBUTTON MAY DECLARE ITS OWN PHONE SURFACE.
+			 *
+			 * The dropdown this function otherwise opens is a DESKTOP combobox
+			 * and the phone chrome has no tier for one: every
+			 * `.jsdialog-window.modalpopup` / `.ui-combobox-entry` restyling
+			 * rule the fork owns is scoped `html.vulcan-desktop-chrome`. So on
+			 * a phone it renders exactly as upstream draws it, and that was
+			 * measured on the one menubutton a finger can reach in Calc (the
+			 * sheet list): 30px rows under the 44px floor, entries 15px wider
+			 * than the card holding them, the active row painted in the raw
+			 * per-doctype accent, and -- the reason this is a behaviour hook
+			 * and not a stylesheet -- a card that lands ON TOP of the button
+			 * that opened it, because Control.JSDialog.setPosition NUDGES an
+			 * overflowing dropdown back inside the viewport instead of
+			 * flipping it above its anchor. For a bottom-docked trigger the
+			 * nudge always parks the list over the trigger, so the universal
+			 * "tap it again to dismiss" gesture lands on a list row: measured
+			 * selectedPart 0 -> 1, a document-state change from a dismissal,
+			 * with no undo affordance.
+			 *
+			 * Rather than invent a phone tier for a surface class this fork
+			 * does not otherwise have, an owner can hand over its own phone
+			 * surface -- in practice a #mobile-wizard bottom sheet, which is
+			 * what every other phone menu here already is, and which is
+			 * 44px-row, fork-skinned and safe-area-aware by construction.
+			 *
+			 * OPT-IN, so nothing that does not ask for it changes: desktop and
+			 * tablet never reach this branch (the predicate is both halves of
+			 * the phone-chrome test), and a menubutton without the property
+			 * opens the same dropdown it always did.
+			 */
+			/* Screen half FIRST, class half last: the gate registry's shape
+			 * layer reads a window that ENDS at the class reference, so a
+			 * screen term written below it is outside what the matcher can
+			 * see and this both-halves gate would have to register as
+			 * 'class-only' — a weaker claim than the one made above. Same
+			 * conjunction, same value; only the order is load-bearing. */
+			if (vulcanPhoneMenu &&
+				window.mode && window.mode.isSmallScreenDevice() &&
+				document.documentElement.classList.contains('vulcan-mobile-chrome')) {
+				vulcanPhoneMenu();
+				return;
+			}
 
 			var callback = function(objectType, eventType, object, data, entry /* : MenuDefinition | JSBuilder */) {
 				if ((eventType === 'selected' && entry && entry.items) || eventType === 'showsubmenu') {

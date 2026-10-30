@@ -42,8 +42,8 @@ msgid ""
 "Technology, provided by Collabora Productivity. See "
 "https://collaboraoffice.com"
 msgstr ""
-"Collabora Office, uredski paket za produktivnost temeljen na LibreOffice "
-"tehnologiji od Collabora Productivity. Pogledaj https://collaboraoffice.com"
+"Vulcan Office, uredski paket za produktivnost temeljen na Vulcan Office "
+"tehnologiji od Vulcan AI. Pogledaj https://collaboraoffice.com"
 
 #. 4rBwc
 #: include/svx/strings.hrc:1040
@@ -166,7 +166,7 @@ msgid ""
 "href=\"https://collaboraoffice.com\">https://CollaboraOffice.com/</a>."
 msgstr ""
 "Za više informacija posjeti početnu stranicu za ${PRODUCTNAME} na <a "
-"href=\"https://collaboraoffice.com\">https://CollaboraOffice.com/</a>."
+"href=\"https://collaboraoffice.com\">https://Vulcan OfficeOffice.com/</a>."
 
 #. SbQew
 #: chart2/inc/strings.hrc:51

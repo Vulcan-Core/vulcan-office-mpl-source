@@ -195,6 +195,8 @@ public:
     static void notifyCurrentPageSizeChangedAllViews(const vcl::ITiledRenderable* pDoc);
     /// Emits a KIT_CALLBACK_DOCUMENT_SIZE_CHANGED for all views of the same document with the same part
     static void notifyPartSizeChangedAllViews(vcl::ITiledRenderable* pDoc, int nPart);
+    /// Invalidates one exact tiled part in every view of the owning document.
+    static void notifyPartInvalidationAllViews(const vcl::ITiledRenderable* pDoc, int nPart);
     /// Emits a KIT_CALLBACK_INVALIDATE_VISIBLE_CURSOR
     static void notifyCursorInvalidation(SfxViewShell const* pThisView, tools::Rectangle const * pRect, bool bControlEvent, int windowID);
     /// Emits a KIT_CALLBACK_INVALIDATE_TILES, but tweaks it according to setOptionalFeatures() if needed.

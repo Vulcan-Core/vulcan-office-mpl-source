@@ -490,33 +490,23 @@ CPPUNIT_TEST_FIXTURE(Test, testTdf153255)
     xmlDocUniquePtr pXml = parseExport(u"word/footnotes.xml"_ustr);
     CPPUNIT_ASSERT(pXml);
 
+    // Vulcan fork: a footnote reference shows the footnote whose w:id it cites, as in Word (vdoc
+    // divergence D2c, upstream tdf#172184). This hand-edited file stores its footnotes with the
+    // ids 3, 50, -1, 2, 1 and 40, in that order, but its references cite 0, 1, 2, 3, 4 and 5, so
+    // only the references to 1, 2 and 3 have a footnote. Upstream expected "Footnote for pg1" to
+    // "Footnote for pg 6" in reference order: the k-th reference paired with the footnote of the
+    // k-th lowest id, whatever id it cites. Now the references to 0, 4 and 5 get empty footnotes,
+    // and the footnotes -1, 40 and 50, which no reference cites, are not shown.
     uno::Reference<text::XFootnotesSupplier> xFootnotesSupplier(mxComponent, uno::UNO_QUERY);
     uno::Reference<container::XIndexAccess> xFootnotes = xFootnotesSupplier->getFootnotes();
-    uno::Reference<text::XTextRange> xLastFootnote(xFootnotes->getByIndex(5), uno::UNO_QUERY);
-    // This was "Footnote for pg2" (replaced footnotes)
-    CPPUNIT_ASSERT_EQUAL(u"Footnote for pg 6"_ustr, xLastFootnote->getString().trim());
-
-    uno::Reference<text::XTextRange> xLastButOne(xFootnotes->getByIndex(4), uno::UNO_QUERY);
-    // This was "Footnote for pg 6" (replaced footnotes)
-    CPPUNIT_ASSERT_EQUAL(u"Footnote for pg5"_ustr, xLastButOne->getString().trim());
-
-    // check all the remaining footnotes
-
-    uno::Reference<text::XTextRange> xFootnote1(xFootnotes->getByIndex(0), uno::UNO_QUERY);
-    // This was "Footnote for pg3" (replaced footnotes)
-    CPPUNIT_ASSERT_EQUAL(u"Footnote for pg1"_ustr, xFootnote1->getString().trim());
-
-    uno::Reference<text::XTextRange> xFootnote2(xFootnotes->getByIndex(1), uno::UNO_QUERY);
-    // This was "Footnote for pg5" (replaced footnotes)
-    CPPUNIT_ASSERT_EQUAL(u"Footnote for pg2"_ustr, xFootnote2->getString().trim());
-
-    uno::Reference<text::XTextRange> xFootnote3(xFootnotes->getByIndex(2), uno::UNO_QUERY);
-    // This was "Footnote for pg4." (replaced footnotes)
-    CPPUNIT_ASSERT_EQUAL(u"Footnote for pg3"_ustr, xFootnote3->getString().trim());
-
-    uno::Reference<text::XTextRange> xFootnote4(xFootnotes->getByIndex(3), uno::UNO_QUERY);
-    // This was "Footnote for pg1" (replaced footnotes)
-    CPPUNIT_ASSERT_EQUAL(u"Footnote for pg4."_ustr, xFootnote4->getString().trim());
+    CPPUNIT_ASSERT_EQUAL(static_cast<sal_Int32>(6), xFootnotes->getCount());
+    const OUString aExpected[] = { u""_ustr, u"Footnote for pg2"_ustr, u"Footnote for pg3"_ustr,
+                                   u"Footnote for pg4."_ustr, u""_ustr, u""_ustr };
+    for (sal_Int32 i = 0; i < 6; ++i)
+    {
+        uno::Reference<text::XTextRange> xFootnote(xFootnotes->getByIndex(i), uno::UNO_QUERY);
+        CPPUNIT_ASSERT_EQUAL(aExpected[i], xFootnote->getString().trim());
+    }
 }
 
 CPPUNIT_TEST_FIXTURE(Test, testTdf153804)

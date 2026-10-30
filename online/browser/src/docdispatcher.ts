@@ -333,6 +333,31 @@ class Dispatcher {
 			app.map.insertComment();
 		};
 
+		// PDF page-canvas document actions. On desktop the fork's bar is the ONE
+		// bar (the host header hides while we are active), so these dispatch to
+		// the host, which owns the password and combine flows and their save
+		// gate. Form-field AUTHORING is edit behaviour: arm a draw tool; the
+		// next drag on the page inserts a movable form control.
+		this.actionsMap['formtext'] = () => {
+			VulcanImpressInsertPlace.armTool('formtext');
+		};
+		this.actionsMap['formcheck'] = () => {
+			VulcanImpressInsertPlace.armTool('formcheck');
+		};
+		this.actionsMap['setpassword'] = () => {
+			app.map.fire('postMessage', { msgId: 'Vulcan_DocumentAction', args: { Action: 'password' } });
+		};
+		this.actionsMap['combinepdfs'] = () => {
+			app.map.fire('postMessage', { msgId: 'Vulcan_DocumentAction', args: { Action: 'combine' } });
+		};
+		// Save and view: the host owns the save (its own acknowledged save,
+		// then the swap back to the viewer), so this only asks; a save
+		// requested here would race the host's.
+		this.actionsMap['savedone'] = () => {
+			VulcanImpressInsertPlace.disarmTool();
+			app.map.fire('postMessage', { msgId: 'Vulcan_DocumentAction', args: { Action: 'view' } });
+		};
+
 		this.actionsMap['fold'] = () => {
 			app.map.uiManager.toggleMenubar();
 		};
@@ -620,6 +645,20 @@ class Dispatcher {
 		};
 
 		this.actionsMap['exportdirectpdf'] = function () {
+			// A PDF opened on the page canvas is a drawing, and its fields must
+			// come back out as real AcroForm fields. ExportDirectToPDF (sfx2)
+			// skips doc_saveAs, so the PDF filter falls back to its config
+			// default ExportFormFields=false and flattens them; the ordinary
+			// download (doc_saveAs, as the backstage's fallback does) keeps them.
+			if (app.map.getDocType && app.map.getDocType() === 'drawing') {
+				const fileName: string = app.map['wopi']?.BaseFileName || 'document';
+				const dot = fileName.lastIndexOf('.');
+				app.map.downloadAs(
+					(dot > 0 ? fileName.substring(0, dot) : fileName) + '.pdf',
+					'pdf',
+				);
+				return;
+			}
 			app.map.sendUnoCommand('.uno:ExportDirectToPDF', {
 				SynchronMode: {
 					type: 'boolean',
@@ -645,26 +684,32 @@ class Dispatcher {
 		};
 
 		this.actionsMap['acceptformula'] = function () {
-			if (window.mode.isSmallScreenDevice()) {
-				app.map.focus();
-				app.map._docLayer.postKeyboardEvent(
-					'input',
-					app.map.keyboard.keyCodes.enter,
-					app.map.keyboard._toUNOKeyCode(app.map.keyboard.keyCodes.enter),
-				);
-			} else {
-				app.map.sendUnoCommand('.uno:AcceptFormula');
-			}
+			// ✓ is ACCEPT, not accept-and-advance. Google Sheets' phone grammar
+			// keeps them distinct: ✓ commits and the SAME cell stays selected;
+			// only the return key commits-and-moves-down (SPEC-sheets §3.1/§9.5).
+			// The phone branch used to post a raw Enter here, which is the
+			// return verb — and with no edit live it still moved the selection,
+			// so a double-tapped ✓ walked the cursor down the sheet. Core's
+			// SID_ACCEPT_FORMULA (engine sc/source/ui/view/cellsh3.cxx) commits
+			// via InputEnterHandler with no cursor move and is a no-op without a
+			// live edit view, for the fx-bar and in-cell editors alike — the
+			// same one desktop ✓ has always sent. The VulcanEscape celledit rung
+			// and closeapp's exit save both dispatch this action, so all three
+			// commit surfaces keep the cell in place.
+			app.map.sendUnoCommand('.uno:AcceptFormula');
 
-			app.map.onFormulaBarBlur();
-			app.map.formulabarBlur();
+			// The whole teardown (cursor-mirror prologue, suggestion-strip
+			// close, chrome + blur, publish-last) is ONE seam —
+			// Toolbar.vulcanEndCellEditSession. A direct blur pair here would
+			// be a second, prologue-less exit path: the resize re-arm zombie's
+			// door (R7 hunt #6).
+			app.map.vulcanEndCellEditSession();
 			app.map.formulabarSetDirty();
 		};
 
 		this.actionsMap['cancelformula'] = function () {
 			app.map.sendUnoCommand('.uno:Cancel');
-			app.map.onFormulaBarBlur();
-			app.map.formulabarBlur();
+			app.map.vulcanEndCellEditSession();
 			app.map.formulabarSetDirty();
 		};
 
@@ -712,7 +757,10 @@ class Dispatcher {
 			app.map.sendUnoCommand('.uno:ToggleRelative');
 		};
 		this.actionsMap['focusonaddressinput'] = function () {
-			document.getElementById('#addressInput input').focus();
+			const addressInput = document.querySelector<HTMLInputElement>(
+				'#addressInput input',
+			);
+			addressInput?.focus();
 		};
 
 		// sheets toolbar
@@ -724,16 +772,23 @@ class Dispatcher {
 		this.actionsMap['firstrecord'] = function () {
 			$('#spreadsheet-tab-scroll').scrollLeft(0);
 		};
+		// ‹ › page through the sheet tabs by the strip's visible width (less a
+		// sliver of overlap), like the arrows in Sheets and Excel. A fixed
+		// 60px step (30px back) meant several clicks per tab on a workbook
+		// with dozens of sheets.
+		const pageSheetTabs = function (direction: number) {
+			const strip = document.getElementById('spreadsheet-tab-scroll');
+			if (!strip) return;
+			strip.scrollBy({
+				left: direction * Math.max(80, strip.clientWidth - 48),
+				behavior: 'smooth',
+			});
+		};
 		this.actionsMap['nextrecord'] = function () {
-			// TODO: We should get visible tab's width instead of 60px
-			$('#spreadsheet-tab-scroll').scrollLeft(
-				$('#spreadsheet-tab-scroll').scrollLeft() + 60,
-			);
+			pageSheetTabs(1);
 		};
 		this.actionsMap['prevrecord'] = function () {
-			$('#spreadsheet-tab-scroll').scrollLeft(
-				$('#spreadsheet-tab-scroll').scrollLeft() - 30,
-			);
+			pageSheetTabs(-1);
 		};
 		this.actionsMap['lastrecord'] = function () {
 			// Set a very high value, so that scroll is set to the maximum possible value internally.
@@ -868,6 +923,19 @@ class Dispatcher {
 			}
 		};
 
+		// The statusbar Overview button: toggle the all-slides view. The
+		// upstream item carried a placeholder uno command that INSERTED a
+		// blank slide on every press.
+		this.actionsMap['overview'] = function () {
+			// The view-switch methods are Impress-only and live on the JS
+			// tile layer, not DocLayerInterface.
+			const docLayer: any = app.map._docLayer;
+			if (!docLayer || app.map.getDocType() !== 'presentation') return;
+			if (app.file.fileBasedView) docLayer._switchToPartBasedView();
+			else docLayer._switchToFileBasedView();
+			app.map.focus();
+		};
+
 		this.actionsMap['firstpart'] = function () {
 			if (app && app.file.fileBasedView === true) {
 				const partToSelect = 0;
@@ -921,17 +989,72 @@ class Dispatcher {
 		};
 
 		this.actionsMap['notesmode'] = function () {
+			// PHONE IMPRESS TAKES THE READ-ONLY STRIP, NOT CORE'S NOTES VIEW.
+			//
+			// The kebab row that lands here already says "Speaker Notes"
+			// (Control.Menubar.ts, mobilepresentation > view), and what it
+			// did was .uno:NotesMode — which swaps the whole canvas for the
+			// notes PAGE: a full A4 notes layout with the slide shrunk into
+			// its top half, rendered into a 390px-wide phone. That is the
+			// desktop authoring view, and it is the opposite of the row
+			// google-slides.json describes: "a region appears below the
+			// slide", with the slide still the hero.
+			//
+			// So under the Vulcan phone chrome the same row raises
+			// Control.SpeakerNotes.ts instead. Everywhere else — desktop,
+			// tablet, and a phone forced to desktop chrome with
+			// ?vulcanChrome=desktop — falls through to the stock behaviour
+			// below unchanged, which is also what the desktop View menu's
+			// own "Notes View" row (Control.Menubar.ts) still means.
+			//
+			// The gate lives in isPhoneImpressChrome() so the dispatcher and
+			// the strip's stylesheet cannot disagree about who is on the
+			// phone surface: both halves of the phone gate plus the
+			// presentation doctype.
+			//
+			// 🔴 THE ROW REALLY DOES RENDER IN BOTH PHONE POSTURES, traced
+			// rather than assumed, because "the array contains it" is not the
+			// same claim as "it ships" and this row is the strip's ONLY entry
+			// point. A first pass here got it backwards and added a
+			// read-posture allowance in Control.Menubar.ts that does nothing;
+			// that edit was withdrawn. The actual chain, for the next person:
+			//   - the phone kebab does NOT build the <ul> menubar. #main-menu-
+			//     state's change handler calls generateFullMenuStructure() and
+			//     fires 'mobilewizard' with it (Control.Menubar.ts), so the
+			//     wizard is what the ⋮ opens on a small-screen device.
+			//   - that structure filters through _checkItemVisibility ONLY —
+			//     for the top-level items and again for each child. It never
+			//     consults allowedViewModeActions, which is the read-only
+			//     action filter and lives exclusively in the <ul> path.
+			//   - walking _checkItemVisibility for this row: no mobileapp /
+			//     iosapp flag; type is 'action', so the read-only
+			//     allowedReadonlyMenus test (which applies to type 'menu')
+			//     does not reach it; 'notesmode' is in neither the read-only
+			//     nor the edit-mode id switch; and none of the ~25 later
+			//     id-keyed WOPI tests names it. It returns true.
+			//   - its parent, the 'view' drill-in, IS type 'menu' and IS in
+			//     allowedReadonlyMenus, so the drill-in opens in the read
+			//     posture too.
+			//   - selection routes back here: JSDialogBuilder calls
+			//     menubar._executeAction, whose 'notesmode' case dispatches
+			//     this action.
+			// So the strip is reachable in the read posture — where a viewer-
+			// first product wants a display verb — without any menu change.
+			if (VulcanSpeakerNotes.isPhoneImpressChrome()) {
+				VulcanSpeakerNotes.get().toggle();
+				return;
+			}
 			if (app.impress.notesMode)
 				app.map.sendUnoCommand('.uno:NormalMultiPaneGUI');
 			else app.map.sendUnoCommand('.uno:NotesMode');
 		};
 
 		this.actionsMap['animationdeck'] = () => {
-			app.map.sidebarFromNotebookbar.openAnimationsSidebar();
+			app.map.sidebarFromNotebookbar.toggleAnimationsSidebar();
 		};
 
 		this.actionsMap['transitiondeck'] = () => {
-			app.map.sidebarFromNotebookbar.openTransitionsSidebar();
+			app.map.sidebarFromNotebookbar.toggleTransitionsSidebar();
 		};
 	}
 
@@ -957,6 +1080,19 @@ class Dispatcher {
 	}
 
 	private addWriterCommands() {
+		// Word-parity heading shortcuts (Ctrl+Alt+1/2/3). JSON args instead of
+		// the .uno:StyleApply?Style=… query form: style names contain spaces
+		// and the kit's 'uno' message tokenizes on them.
+		const applyParagraphStyle = (style: string) => {
+			app.map.sendUnoCommand('.uno:StyleApply', {
+				Style: { type: 'string', value: style },
+				FamilyName: { type: 'string', value: 'ParagraphStyles' },
+			});
+		};
+		this.actionsMap['applyheading1'] = () => applyParagraphStyle('Heading 1');
+		this.actionsMap['applyheading2'] = () => applyParagraphStyle('Heading 2');
+		this.actionsMap['applyheading3'] = () => applyParagraphStyle('Heading 3');
+
 		this.actionsMap['.uno:ShowResolvedAnnotations'] = function () {
 			const items = app.map['stateChangeHandler'];
 			let val = items.getItemValue('.uno:ShowResolvedAnnotations');
@@ -1159,9 +1295,49 @@ class Dispatcher {
 		};
 		this.actionsMap['mobile_wizard'] = () => {
 			const configuration = window as any;
+			// Google-style "A" sheet (docs/mobile-redesign/01 §3, 02 §4;
+			// supersedes 03-impress.md §4, which recorded Impress keeping
+			// the LO sidebar drill-in "this phase"): on phones the format
+			// button opens the client-built
+			// sheet — Text/Paragraph for Writer, Text/Cell for Calc,
+			// Text/Paragraph/Shape for Impress — instead of the LO sidebar
+			// drill-in. Google Slides: "Select text or an object, then tap
+			// the Format icon (an 'A' with lines) in the bottom bar. A
+			// draggable bottom sheet rises with tabbed formatting."
+			//
+			// Impress was left out of this gate when the sheet was built, so
+			// the same glyph the user learned in Calc fell through to
+			// .uno:SidebarShow — a server round trip, then the desktop
+			// LibreOffice sidebar deck rendered inside a 390px wizard. Only
+			// Draw still takes that path.
+			//
+			// This widens the doctype list and nothing else: the form-factor
+			// half of the condition is left exactly as the Writer and Calc
+			// branches already had it, so all three doctypes keep one rule.
+			//
+			// 🔴 That one rule is isSmallScreenDevice() ALONE, not the usual
+			// both-halves phone-chrome gate. It is deliberate here (matching
+			// the shipped Writer/Calc branches beats making Impress the odd
+			// doctype out), but it means ?vulcanChrome=desktop on a phone
+			// STILL opens this sheet — the class is off while the gate is
+			// true. Anything that has to be true wherever the sheet opens
+			// must therefore not be scoped to html.vulcan-mobile-chrome. The
+			// live case is the 44px back box: vulcan-theme.css §13i.10 is
+			// keyed on body[data-doctype='presentation'] only, for exactly
+			// this reason. If this gate is ever tightened to both halves,
+			// tighten that selector with it — and do it for all three
+			// doctypes at once.
+			const useVulcanFormatSheet =
+				window.mode.isSmallScreenDevice() &&
+				app.map._docLayer &&
+				(app.map._docLayer._docType === 'text' ||
+					app.map._docLayer._docType === 'spreadsheet' ||
+					app.map._docLayer._docType === 'presentation') &&
+				(window as any).VulcanMobileFormat;
 			if (configuration.mobileWizard) {
 				configuration.mobileWizard = false;
-				app.map.sendUnoCommand('.uno:SidebarHide');
+				if (!useVulcanFormatSheet)
+					app.map.sendUnoCommand('.uno:SidebarHide');
 				app.map.fire('closemobilewizard');
 				app.map.mobileTopBar.selectItem('mobile_wizard', false);
 			} else {
@@ -1170,11 +1346,16 @@ class Dispatcher {
 				else if (configuration.commentWizard)
 					app.dispatcher.dispatch('comment_wizard');
 				configuration.mobileWizard = true;
-				app.map.sendUnoCommand('.uno:SidebarShow');
-				app.map.fire('showwizardsidebar');
+				if (useVulcanFormatSheet) {
+					(window as any).VulcanMobileFormat.open(app.map);
+				} else {
+					app.map.sendUnoCommand('.uno:SidebarShow');
+					app.map.fire('showwizardsidebar');
+				}
 				app.map.mobileTopBar.selectItem('mobile_wizard', true);
 			}
 		};
+
 		this.actionsMap['insertion_mobile_wizard'] = () => {
 			const configuration = window as any;
 			if (configuration.insertionMobileWizard) {
@@ -1236,6 +1417,11 @@ class Dispatcher {
 	}
 
 	public dispatch(action: string, data?: any) {
+		// Named-action telemetry (save/showsearchbar/presentation/…): action
+		// ids are a fixed code-defined vocabulary — never user text.
+		if (app.telemetry)
+			app.telemetry.recordAppAction(action);
+
 		// Don't allow to execute new actions while any dialog is visible.
 		// It prevents launching multiple instances of the same dialog.
 		// Exception: validatedialogsa11y needs to run when dialogs are open.

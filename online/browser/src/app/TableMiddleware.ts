@@ -24,6 +24,7 @@ class TableMiddleware {
 	public resizeMarkerMaxApproximation = 10 * app.dpiScale; // in pixels
 
 	private tableAnchorSection: ShapeHandleAnchorSubSection | null = null;
+	private tableChipSection: VulcanImpressTableChipSection | null = null;
 	private tableMarkersDragged = false;
 	private resizeMarkerWidth = 0;
 	private resizeMarkerHeight = 0;
@@ -44,6 +45,35 @@ class TableMiddleware {
 		return (
 			this.currentTableData.rows != null ||
 			this.currentTableData.columns != null
+		);
+	}
+
+	private isVulcanPhoneWriter(): boolean {
+		return (
+			window.mode.isSmallScreenDevice() &&
+			document.documentElement.classList.contains('vulcan-mobile-chrome') &&
+			!!app.map._docLayer &&
+			app.map._docLayer._docType === 'text'
+		);
+	}
+
+	/*
+		VO-P-0012 / M-0017 §A/§D — the phone-Impress table gate.
+
+		Both halves, for the reason the fork-gate registry exists:
+		`?vulcanChrome=desktop` on a real phone leaves isSmallScreenDevice()
+		TRUE and the class ABSENT, and a site gated on the screen test alone
+		fires there, in desktop chrome. The doctype half is this record's own
+		scope — M-0017 is an Impress capture and RU-16 forbids carrying an
+		Impress measurement onto another app — and Draw keeps its stock table
+		ops by explicit ruling (03-impress.md §9).
+	*/
+	private isVulcanPhoneImpress(): boolean {
+		return (
+			window.mode.isSmallScreenDevice() &&
+			document.documentElement.classList.contains('vulcan-mobile-chrome') &&
+			!!app.map._docLayer &&
+			app.map._docLayer._docType === 'presentation'
 		);
 	}
 
@@ -151,6 +181,11 @@ class TableMiddleware {
 		if (this.tableAnchorSection) {
 			app.sectionContainer.removeSection(this.tableAnchorSection.name);
 			this.tableAnchorSection = null;
+		}
+
+		if (this.tableChipSection) {
+			app.sectionContainer.removeSection(this.tableChipSection.name);
+			this.tableChipSection = null;
 		}
 	}
 
@@ -429,6 +464,23 @@ class TableMiddleware {
 		app.sectionContainer.addSection(this.tableAnchorSection);
 	}
 
+	/*
+		VO-P-0012 / M-0017 §A — the select-table chip.
+
+		The reference paints a grey square outside the table's top-left corner
+		and gives it one job: one tap back to the whole-table selection, the
+		escape from §D's (parity) inert body drag. Our own top-left corner
+		affordance there is the 20 x 20 move ANCHOR, whose box sits in exactly
+		the square the chip's measured gap puts the chip in — two affordances
+		cannot hold one corner, and the record enumerates the table's chrome
+		with a chip in it and no move anchor at all (§A; §D makes the BODY the
+		drag surface). So on phone Impress the corner carries the chip, and
+		desktop, tablet and every other doctype keep the anchor byte for byte.
+
+		The anchor's own move route is not lost by parity's reckoning: with
+		the whole table selected the body still drags (ShapeHandlesSection),
+		and the chip is what returns a cell selection to that state.
+	*/
 	private updateMoveMarkerVisibility() {
 		if (
 			this.currentTableData &&
@@ -438,8 +490,21 @@ class TableMiddleware {
 			app.map.getDocType() === 'presentation' &&
 			this.currentTableData.rectangle &&
 			!this.tableAnchorSection
-		)
-			this.addMoveMarker();
+		) {
+			if (this.isVulcanPhoneImpress()) {
+				if (!this.tableChipSection) this.addSelectTableChip();
+			} else this.addMoveMarker();
+		}
+	}
+
+	private addSelectTableChip() {
+		const position = VulcanImpressTableChipSection.boxTopLeftTwips(
+			parseInt(this.currentTableData.rectangle.x),
+			parseInt(this.currentTableData.rectangle.y),
+		);
+
+		this.tableChipSection = new VulcanImpressTableChipSection(position);
+		app.sectionContainer.addSection(this.tableChipSection);
 	}
 
 	public getTableTopY(): number {
@@ -603,6 +668,9 @@ class TableMiddleware {
 		this.lastTableMarkerJson = this.currentTableMarkerJson;
 
 		this.clearTableMarkers();
+		// On phone Writer, table actions stay deliberate in Format > Table; a
+		// caret tap must not surround the document with row/column controls.
+		if (this.isVulcanPhoneWriter()) return;
 
 		if (this.currentTableData && this.currentTableData.columns) {
 			this.ensureDataIntegrity();

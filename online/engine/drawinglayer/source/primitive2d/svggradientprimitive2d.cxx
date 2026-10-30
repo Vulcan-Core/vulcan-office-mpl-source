@@ -738,6 +738,27 @@ namespace drawinglayer::primitive2d
             return aUnitGradientToObject;
         }
 
+        basegfx::B2DPoint SvgRadialGradientPrimitive2D::createUnitGradientFocal() const
+        {
+            if(!isFocalSet())
+                return basegfx::B2DPoint(0.0, 0.0);
+
+            // map to object coordinates exactly as
+            // createUnitGradientToObjectTransformation maps the centre
+            const basegfx::B2DRange aPolyRange(getPolyPolygon().getB2DRange());
+            const basegfx::B2DHomMatrix aObjectTransform(
+                basegfx::utils::createScaleTranslateB2DHomMatrix(
+                    aPolyRange.getWidth(), aPolyRange.getHeight(),
+                    aPolyRange.getMinX(), aPolyRange.getMinY()));
+            const basegfx::B2DPoint aObjectFocal(getUseUnitCoordinates()
+                ? aObjectTransform * (getGradientTransform() * getFocal())
+                : getGradientTransform() * (aObjectTransform * getFocal()));
+
+            basegfx::B2DHomMatrix aObjectToUnitGradient(createUnitGradientToObjectTransformation());
+            aObjectToUnitGradient.invert();
+            return aObjectToUnitGradient * aObjectFocal;
+        }
+
         Primitive2DReference SvgRadialGradientPrimitive2D::create2DDecomposition(const geometry::ViewInformation2D& /*rViewInformation*/) const
         {
             if(getSingleEntry())

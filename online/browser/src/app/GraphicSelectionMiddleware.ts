@@ -22,6 +22,10 @@ class GraphicSelection {
 		null;
 	public static chartContextToolbarSaveStyle: ChartContextButtonSection = null;
 	public static diagramButton: DiagramButtonSection = null;
+	// UI-B-004: how many selection answers core has sent (EMPTY, INPLACE and
+	// a post-zoom replay are not answers). MouseControl reads it to tell
+	// core's answer to tap 1 of a phone-Impress double tap from older state.
+	public static vulcanAnswers: number = 0;
 
 	public static hasActiveSelection() {
 		return this.rectangle !== null;
@@ -167,7 +171,17 @@ class GraphicSelection {
 
 		this.extraInfo = extraInfo;
 
-		if (app.map._docLayer._docType === 'presentation')
+		// Convert the per-member ObjectRectangles (used to draw a multi-
+		// selection's frames) for the whole sd family: a deck AND the PDF
+		// page canvas (a Draw doc, _docType 'drawing'). Scoped to
+		// 'presentation' before, the page canvas left them in twips, so a
+		// multi-selection's member frames drew ~15x off-screen — an
+		// invisible selection that still dragged and grouped, which read as
+		// "multi-select and Ctrl+G do nothing".
+		if (
+			app.map._docLayer._docType === 'presentation' ||
+			app.map._docLayer._docType === 'drawing'
+		)
 			this.convertObjectRectangleTwipsToPixels();
 	}
 
@@ -198,8 +212,27 @@ class GraphicSelection {
 		if (this.hasActiveSelection()) {
 			// Hide the keyboard on graphic selection, unless cursor is visible.
 			// Don't interrupt editing in dialogs
-			if (!JSDialog.IsAnyInputFocused())
-				app.map.focus(app.file.textCursor.visible);
+			// VULCAN: a caret core opened inside a picture keeps the Android
+			// keyboard down here too: core resends the picture's graphicselection
+			// under that caret (CanvasTileLayer._vulcanCaretInTextlessObject).
+			const docLayer: any = app.map._docLayer;
+			const textlessCaret =
+				!!docLayer &&
+				typeof docLayer._vulcanCaretInTextlessObject === 'function' &&
+				docLayer._vulcanCaretInTextlessObject();
+			if (!JSDialog.IsAnyInputFocused()) {
+				// UI-B-004: the same caret in a picture, reached here first. A
+				// keyboard-door hold (TextInput.focus) would swallow focus(false)
+				// and keep the keyboard over the picture, so the hold ends first.
+				// This needs a VISIBLE caret: while the caret is still hidden, this
+				// focus(false) is the door's own round trip, and the hold must keep
+				// absorbing it (B-0287).
+				if (app.file.textCursor.visible && textlessCaret) {
+					const textInput: any = app.map._textInput;
+					textInput._vulcanImpressDoorAt = 0;
+				}
+				app.map.focus(app.file.textCursor.visible && !textlessCaret);
+			}
 
 			let editMode = app.map.isEditMode();
 			if (!editMode) {
@@ -354,9 +387,18 @@ class GraphicSelection {
 	}
 
 	public static onMessage(textMsg: string) {
+		// UI-B-004: read before textMsg is rewritten below. 'INPLACE' also
+		// matches 'INPLACE EXIT'.
+		const vulcanAnswer =
+			!textMsg.match('EMPTY') &&
+			!textMsg.match('INPLACE') &&
+			!(app.sectionContainer && app.sectionContainer.isPostZoomReplay());
+
 		URLPopUpSection.closeURLPopUp();
 
 		if (textMsg.match('EMPTY')) {
+			VulcanImpressNudge.reset();
+			VulcanImpressSelectEcho.onGraphicSelectionEmptied();
 			this.resetSelectionRanges();
 		} else if (textMsg.match('INPLACE EXIT')) {
 			app.map._docLayer._oleCSelections.clear();
@@ -381,6 +423,10 @@ class GraphicSelection {
 			this.transformGraphicSelection(msgData);
 
 			this.extractAndSetGraphicSelection(msgData);
+
+			VulcanImpressNudge.onGraphicSelectionUpdated();
+			VulcanImpressSelectEcho.onGraphicSelectionUpdated();
+			VulcanImpressInsertPlace.onGraphicSelectionUpdated();
 
 			// Update the dark overlay on zooming & scrolling
 			if (!app.map._docLayer._oleCSelections.empty()) {
@@ -470,6 +516,19 @@ class GraphicSelection {
 
 		GraphicSelection.checkChartData();
 		GraphicSelection.checkDiagramData();
+
+		// UI-B-004: a phone-Impress double tap waiting on this answer is
+		// decided now, with the selection above already in place (a picture:
+		// no count 2; an embedded object: the count 2 goes; either way the
+		// keyboard goes down in this task).
+		if (vulcanAnswer) {
+			GraphicSelection.vulcanAnswers++;
+			const mc: any = app.activeDocument
+				? app.activeDocument.mouseControl
+				: null;
+			if (mc && typeof mc.vulcanImpressOnSelectionAnswer === 'function')
+				mc.vulcanImpressOnSelectionAnswer();
+		}
 	}
 
 	/*

@@ -28,6 +28,17 @@ export class TilesSection extends CanvasSectionObject {
 	isJSDOM: boolean = false; // testing
 	checkpattern: any;
 
+	// The desktop Writer sheet, as the pre-tile pass of this frame measured
+	// it, for the post-tile pass to decorate. Absolute view coordinates in
+	// device pixels, every edge snapped. null when this frame drew no sheet
+	// (phone, tablet, multi-page view, no pages yet).
+	private writerSheet: {
+		x0: number; y0: number; x1: number; y1: number;
+		dx0: number; dy0: number; dx1: number; dy1: number;
+		gaps: { y0: number; y1: number }[];
+		rules: number[];
+	} | null = null;
+
 	constructor () {
 		super(app.CSections.Tiles.name);
 
@@ -36,9 +47,27 @@ export class TilesSection extends CanvasSectionObject {
 		this.sectionProperties.docLayer = this.map._docLayer;
 		this.sectionProperties.tsManager = this.sectionProperties.docLayer._painter;
 		this.sectionProperties.pageBackgroundInnerMargin = 0; // In core pixels. We don't want backgrounds to have exact same borders with tiles for not making them visible when tiles are rendered.
-		this.sectionProperties.pageBackgroundBorderColor = 'lightgrey';
-		this.sectionProperties.pageBackgroundTextColor = 'grey';
 		this.sectionProperties.pageBackgroundFont = String(40 * app.roundedDpiScale) + 'px Arial';
+
+		// Theme-dependent page decoration colors (--vulcan-* tokens). Read
+		// once here and again on 'darkmodechanged' — never per frame.
+		this.refreshPageDecorationColors();
+		this.map.on('darkmodechanged', this.refreshPageDecorationColors, this);
+
+		// Floating-page drop shadows are part of the desktop-only chrome
+		// (global.js stamps the marker at boot) AND canvas shadowBlur is real
+		// per-page paint cost — mobile keeps the stock flat pages.
+		this.sectionProperties.desktopChrome =
+			document.documentElement.classList.contains('vulcan-desktop-chrome');
+
+		// Phone chrome, same two-part test the rest of the phone work uses
+		// (CanvasTileLayer._recalcZoom's one-slide fit, ImpressTileLayer's
+		// view-mode flip). Both halves are fixed for the session — global.js
+		// stamps the marker pre-paint and only when isSmallScreenDevice() — so
+		// this is read once here rather than per frame, like desktopChrome.
+		this.sectionProperties.phoneChrome =
+			window.mode.isSmallScreenDevice() &&
+			document.documentElement.classList.contains('vulcan-mobile-chrome');
 
 		// Loading-state skeleton: for a subtle hint of a heading / cell content
 		// drawn over a page's white background before tiles arrive.
@@ -48,6 +77,253 @@ export class TilesSection extends CanvasSectionObject {
 		this.isJSDOM = typeof window === 'object' && window.name === 'nodejs';
 
 		this.checkpattern = this.makeCheckPattern();
+	}
+
+	// Cache the theme-dependent page decoration colors from the vulcan-theme
+	// tokens. getComputedStyle is too expensive to run per frame
+	// (drawPageBackgrounds runs on every draw), so this is called once from
+	// the constructor and again whenever UIManager fires 'darkmodechanged'
+	// (loadLightMode/loadDarkMode) — same pattern as
+	// setCanvasColorAfterModeChange / ScrollSection.refreshScrollBarColors.
+	private refreshPageDecorationColors(): void {
+		const style = getComputedStyle(document.documentElement);
+		this.sectionProperties.pageOutlineColor =
+			style.getPropertyValue('--vulcan-page-outline').trim() || 'rgba(15, 23, 42, 0.28)';
+		// The two-layer chrome shadow — the SAME recipe the glass bars paint
+		// (--vulcan-glass-shadow), read from the geometry + colour tokens so the
+		// page and the bars above it can never drift to different weights.
+		this.sectionProperties.pageShadow = VulcanPageShadow.read(style);
+
+		// Legacy page chrome (file-based view border + page numbers): follow
+		// the same tokens instead of the old hardcoded lightgrey/grey.
+		this.sectionProperties.pageBackgroundBorderColor =
+			this.sectionProperties.pageOutlineColor;
+		this.sectionProperties.pageBackgroundTextColor =
+			style.getPropertyValue('--vulcan-muted').trim() || 'grey';
+	}
+
+	/*
+	 * THE PHONE WRITER SURFACE, AS DATA. (R6-15)
+	 *
+	 * Founder directive: "google docs doesn't have separately shaded 'sheets'
+	 * -- it has dotted line breaks on a white background".
+	 *
+	 * MEASURED on served build #10 (slot-02, Dinosaurs.docx, 393x852 dpr 3;
+	 * ~/.cache/voffice-evidence/round6/r6-15-writer-viewmodel/m1-in2.png): the
+	 * phone paints four white cards on the #f0f0f0 workspace, each stroked on
+	 * all four sides, with grey gutters between and around them. That is the
+	 * shaded sheet. The reflowed posture (m1-00-rest.png) is the same
+	 * treatment with one card -- grey bands left, right and top, and a box
+	 * around the reading column.
+	 *
+	 * So: one sheet of paper spanning every page AND every gap, and a dotted
+	 * rule where each page ends. Returned as data rather than drawn here so
+	 * the geometry is testable without a canvas, and so the draw below is a
+	 * thin consumer of it.
+	 *
+	 * Everything is twips, the units pageRectangleList arrives in. A rule sits
+	 * at the MIDDLE of the gap it marks -- on a page it would be a line across
+	 * prose that does not break there -- and spans the page it separates. N
+	 * pages give N-1 rules, so the reflowed single page gets none, which is
+	 * correct: there is no break in it.
+	 *
+	 * null for an empty list: before the first `status:` there is nothing to
+	 * paint, and a zero-sized fill is not the same answer.
+	 */
+	public static continuousSurfacePlan(
+		pageRectsTwips: number[][],
+	): {
+		paper: { x: number; y: number; w: number; h: number };
+		rules: { y: number; x: number; w: number }[];
+	} | null {
+		if (!pageRectsTwips || pageRectsTwips.length === 0) return null;
+
+		let left = Infinity;
+		let right = -Infinity;
+		let top = Infinity;
+		let bottom = -Infinity;
+		for (const p of pageRectsTwips) {
+			if (!p || p.length < 4) continue;
+			left = Math.min(left, p[0]);
+			right = Math.max(right, p[0] + p[2]);
+			top = Math.min(top, p[1]);
+			bottom = Math.max(bottom, p[1] + p[3]);
+		}
+		if (!isFinite(left) || !isFinite(top) || right <= left || bottom <= top)
+			return null;
+
+		const rules: { y: number; x: number; w: number }[] = [];
+		for (let i = 0; i + 1 < pageRectsTwips.length; i++) {
+			const a = pageRectsTwips[i];
+			const b = pageRectsTwips[i + 1];
+			if (!a || !b || a.length < 4 || b.length < 4) continue;
+			const gapTop = a[1] + a[3];
+			const gapBottom = b[1];
+			// Pages that overlap or abut still get their crease, on the seam.
+			const y = Math.round((gapTop + Math.max(gapTop, gapBottom)) / 2);
+			const x = Math.min(a[0], b[0]);
+			const w = Math.max(a[0] + a[2], b[0] + b[2]) - x;
+			rules.push({ y: y, x: x, w: w });
+		}
+
+		return {
+			paper: { x: left, y: top, w: right - left, h: bottom - top },
+			rules: rules,
+		};
+	}
+
+	/*
+	 * WHERE THE PAGE OUTLINE IS STROKED, AS DATA.
+	 *
+	 * The hairline is one device pixel (`unit`) wide and sits OUTSIDE the
+	 * page by default: its inner edge is the page edge, so the tiles that
+	 * over-paint the interior can never cover it. Every edge is rounded
+	 * first -- a page edge on a fractional pixel (x = 13.26 at 150%) would
+	 * split the line across two columns, and which column the tiles then
+	 * cover differs per side, so the same stroke read twice as dark on the
+	 * left as on the right. Both ends are rounded, not the origin and the
+	 * size, so the far edge stays on the pixel the tiles' own rounding puts
+	 * it on.
+	 *
+	 * THE DEFECT THIS ALSO ANSWERS. "Outside the page" is off the canvas
+	 * whenever the page edge sits on the canvas edge. Desktop Writer opens
+	 * on the TEXT fit (VulcanWriterFit.textFitLevel): the page is centred
+	 * and its margins overhang the column on purpose, so the sheet's left
+	 * and right edges are at or past the section's sides while its top is
+	 * a DOCUMENTBORDER band below the section's top. The top stroke landed
+	 * on canvas; the two side strokes were clipped -- the owner saw a
+	 * hairline along the top of the page and none down either side.
+	 *
+	 * So the stroke column is kept ON canvas, per axis:
+	 *
+	 *   sides   -- clamped into the view. A page wider than the column is a
+	 *              LAYOUT state (the fit overhangs the margins, or the
+	 *              reader zoomed past it), the whole visible width is paper,
+	 *              and the outline runs down the outermost column on each
+	 *              side, where the page's own edge would be if it fit.
+	 *   top and -- moved inside only while the edge row is itself in view
+	 *   bottom     (the page starts on the first row, the slide fits the
+	 *              height). An edge scrolled OFF the canvas is a SCROLL
+	 *              state: the text continues past the row, and a line
+	 *              pinned across the viewport there would cut the prose
+	 *              under the toolbar on every frame. Those strokes stay
+	 *              where they are, off canvas and unseen.
+	 *
+	 * The result is a strokeRect: (x, y) is the centre of the top-left
+	 * corner, so the stroke covers [x - unit/2, x + unit/2) -- a whole
+	 * device pixel column when x is on a half pixel, which every value here
+	 * is. The view is the section's own rectangle in the caller's
+	 * coordinates; pass ±Infinity when there is no canvas to clip against.
+	 */
+	public static pageOutlineStrokeRect(
+		x: number, y: number, w: number, h: number,
+		unit: number,
+		view: { left: number; top: number; right: number; bottom: number },
+	): { x: number; y: number; w: number; h: number } {
+		const x0 = Math.round(x);
+		const y0 = Math.round(y);
+		const x1 = Math.round(x + w);
+		const y1 = Math.round(y + h);
+
+		// Each stroke as the first device pixel of its column / row.
+		let left = x0 - unit;
+		let right = x1;
+		let top = y0 - unit;
+		let bottom = y1;
+
+		// Sides: the column is always on canvas.
+		left = Math.max(left, view.left);
+		right = Math.min(right, view.right - unit);
+
+		// Top and bottom: on canvas while the edge itself is.
+		if (top < view.top && y0 >= view.top) top = view.top;
+		if (bottom + unit > view.bottom && y1 <= view.bottom)
+			bottom = view.bottom - unit;
+
+		return {
+			x: left + unit / 2,
+			y: top + unit / 2,
+			w: right - left,
+			h: bottom - top,
+		};
+	}
+
+	// A section's rectangle in the page painters' coordinates (absolute
+	// view pixels: the callers translate the context by -myTopLeft first).
+	// Unbounded before the container has located the section. Static, and
+	// handed the section, because the mocha rigs run the painters on plain
+	// objects that carry only the prototype methods they name.
+	public static pageOutlineView(
+		section: { myTopLeft?: number[]; size?: number[] },
+	): { left: number; top: number; right: number; bottom: number } {
+		if (!section.myTopLeft || !section.size)
+			return { left: -Infinity, top: -Infinity, right: Infinity, bottom: Infinity };
+		return {
+			left: section.myTopLeft[0],
+			top: section.myTopLeft[1],
+			right: section.myTopLeft[0] + section.size[0],
+			bottom: section.myTopLeft[1] + section.size[1],
+		};
+	}
+
+	/*
+	 * Paint that plan: paper edge to edge, then the creases. Phone Writer only
+	 * -- desktop and tablet keep the floating card (shadow, fill, four-sided
+	 * outline) that drawWriterPageBackground gives them.
+	 *
+	 * The fill covers the WHOLE section, not just the plan's paper rectangle,
+	 * because the grey either side of the column and above the first page is
+	 * as much a "sheet" cue as the outline is. The tiles over-paint the page
+	 * interiors immediately after, so this costs one fillRect per frame and
+	 * the region outside the document simply stays paper.
+	 */
+	private drawPhoneWriterContinuousSurface(docBg: string): void {
+		const plan = TilesSection.continuousSurfacePlan(
+			app.file.writer.pageRectangleList);
+		if (!plan) return;
+
+		// The caller has translated the context by -myTopLeft, so the section
+		// occupies myTopLeft .. myTopLeft + size in these coordinates.
+		this.context.fillStyle = docBg;
+		this.context.fillRect(
+			this.myTopLeft[0], this.myTopLeft[1], this.size[0], this.size[1]);
+
+		if (plan.rules.length === 0) return;
+
+		// One dash setup for the whole set. 2-on/4-off at the device scale
+		// reads as dots rather than a broken line, and app.roundedDpiScale is
+		// DEVICE pixels (3 at DPR 3), never a third of a CSS pixel.
+		const unit = app.roundedDpiScale;
+		this.context.save();
+		this.context.strokeStyle = this.sectionProperties.pageOutlineColor;
+		this.context.lineWidth = unit;
+		this.context.setLineDash([2 * unit, 4 * unit]);
+		for (const rule of plan.rules) {
+			const line = new cool.SimpleRectangle(rule.x, rule.y, rule.w, 0);
+			const y = line.v1Y;
+			this.context.beginPath();
+			this.context.moveTo(line.v1X, y);
+			this.context.lineTo(line.v1X + line.pWidth, y);
+			this.context.stroke();
+		}
+		this.context.restore();
+	}
+
+	// Stroke the page outline, one device pixel wide, on the pixel column
+	// pageOutlineStrokeRect picks: outside the page where the canvas has
+	// room for it (so the tiles, which over-paint the page interior after
+	// the backgrounds are drawn, can never cover it), on the page's own edge
+	// pixel where the page sits on the canvas edge. Whole pixels throughout;
+	// the helper's comment has the why.
+	private strokePageOutline(x: number, y: number, w: number, h: number): void {
+		const lineWidth = app.roundedDpiScale;
+		const r = TilesSection.pageOutlineStrokeRect(
+			x, y, w, h, lineWidth, TilesSection.pageOutlineView(this));
+		this.context.save();
+		this.context.strokeStyle = this.sectionProperties.pageOutlineColor;
+		this.context.lineWidth = lineWidth;
+		this.context.strokeRect(r.x, r.y, r.w, r.h);
+		this.context.restore();
 	}
 
 	private makeCheckPattern() {
@@ -231,7 +507,11 @@ export class TilesSection extends CanvasSectionObject {
 
 	// eslint-disable-next-line @typescript-eslint/explicit-module-boundary-types
 	public paint (tile: any, ctx: any, async: boolean): void {
-		if (this.containerObject.isInZoomAnimation() || this.sectionProperties.tsManager.waitForTiles())
+		// A scroll during the tile wait has cleared the canvas: paint what
+		// has arrived (see onDraw).
+		if (this.containerObject.isInZoomAnimation() ||
+			(this.sectionProperties.tsManager.waitForTiles() &&
+				!this.containerObject.isScrollingBeforeZoomSettled()))
 			return;
 
 		if (!ctx)
@@ -287,9 +567,19 @@ export class TilesSection extends CanvasSectionObject {
 		ctx = ctx || this.sectionProperties.tsManager._paintContext();
 
 		var allTilesFetched = true;
-		this.forEachTileInView(zoom, part, mode, ctx, function (tile: any): boolean {
+		this.forEachTileInView(zoom, part, mode, ctx, function (tile: any, coords: TileCoordData): boolean {
 			// Ensure all tile are available.
 			if (!tile || tile.needsFetch()) {
+				// VULCAN: the view walk runs past the
+				// document (x < 0 beside a centred page, beyond fileSize below
+				// the fit). Those tiles are never requested (BitmapTileManager
+				// update skips !isValidTile) nor painted (onDrawTileCallback),
+				// so waiting for them held every zoom of a page narrower than
+				// the pane to zoomStepEnd's 500 ms deadline: input off, the old
+				// frame frozen, and the page blank if the reader scrolled. Wait
+				// only for the tiles that can arrive.
+				if (!RenderManager.isValidTile(coords))
+					return true;
 				allTilesFetched = false;
 				return false; // stop search.
 			}
@@ -302,6 +592,27 @@ export class TilesSection extends CanvasSectionObject {
 	private drawPageBackgroundWriter (ctx: any) {
 		const viewRectangleTwips = app.activeDocument.activeLayout.viewedRectangle.toArray();
 		const docBg = this.containerObject.getDocumentBackgroundColor();
+
+		// R6-15: on a phone this surface is one continuous sheet with dotted
+		// creases, not a stack of cards. The per-page walk below is what draws
+		// the cards, so it is replaced rather than decorated. Skeletons are
+		// dropped with it: they are a per-PAGE cue for a posture that no
+		// longer has separate pages, and the reflowed phone document is a
+		// single page tens of thousands of twips tall, so the skeleton was one
+		// enormous fake paragraph block either way.
+		if (this.sectionProperties.phoneChrome) {
+			this.drawPhoneWriterContinuousSurface(docBg);
+			return;
+		}
+
+		// Desktop: one sheet across every page and gap, decorated after the
+		// tiles (see drawDesktopWriterSheetDecoration for why after). The
+		// multi-page view lays pages out in a grid, so its cards stay cards.
+		if (this.sectionProperties.desktopChrome &&
+			app.activeDocument.activeLayout.type !== 'ViewLayoutMultiPage') {
+			this.drawDesktopWriterSheet(docBg);
+			return;
+		}
 
 		for (let i: number = 0; i < app.file.writer.pageRectangleList.length; i++) {
 			const simpleRectangle = new cool.SimpleRectangle(
@@ -318,18 +629,223 @@ export class TilesSection extends CanvasSectionObject {
 		}
 	}
 
+	/*
+	 * THE DESKTOP WRITER SHEET, PAINTED AROUND THE TILES.
+	 *
+	 * Two facts about the page geometry decide how this has to be drawn.
+	 *
+	 * 1. The page is not the document. Core lays every page out inside a
+	 *    DOCUMENTBORDER band -- 284 twips on all four sides; measured, a
+	 *    Letter page sits at (284, 284) in a document 12808 twips wide --
+	 *    and the 284-twip gap between pages is the same band. That band is
+	 *    INSIDE the tiled area, and core paints its own page border and
+	 *    shadow into it: a translucent line one pixel outside every page
+	 *    edge, an opaque #e9e9e9 one along each side of the gap. Anything
+	 *    drawn under the tiles is overpainted by exactly those pixels, so the
+	 *    stock outline (drawn under) read darker where core's line and ours
+	 *    added up and softer where the tile's edge anti-aliasing happened to
+	 *    cover ours. Sampled on the served build: left edge 0.44 alpha,
+	 *    right edge 0.20 -- same stroke, same colour. The decoration
+	 *    therefore goes on AFTER the tiles, once the band has been wiped.
+	 *
+	 * 2. The page edge lands on a fractional pixel (x = 13.26 at 150%). A
+	 *    one-pixel stroke centred there splits across two columns, and which
+	 *    column the tiles then cover differs per side. Every edge used here
+	 *    is rounded first, so all four sides get the same pixel.
+	 *
+	 * The pre-tile pass (drawDesktopWriterSheet) paints the sheet as paper
+	 * -- what shows through where a tile has not arrived -- plus the loading
+	 * skeleton, and records the geometry. The post-tile pass
+	 * (drawDesktopWriterSheetDecoration) wipes the band, puts the drop
+	 * shadow back BEHIND everything with destination-over (the paper is
+	 * opaque, so it only shows in the band), turns the gaps into paper with
+	 * one rule mid-gap, and strokes a single outline outside the sheet
+	 * wherever the canvas has a column for it (pageOutlineStrokeRect).
+	 *
+	 * What that buys: one continuous sheet with a grey line where each page
+	 * ends, the same soft edge on every side, and no shadow falling through
+	 * a gap onto the next page.
+	 */
+	private planDesktopWriterSheet(): TilesSection['writerSheet'] {
+		const list = app.file.writer.pageRectangleList;
+		const plan = TilesSection.continuousSurfacePlan(list);
+		if (!plan) return null;
+
+		const paper = new cool.SimpleRectangle(
+			plan.paper.x, plan.paper.y, plan.paper.w, plan.paper.h);
+		const fileSize = app.activeDocument.fileSize;
+		const doc = new cool.SimpleRectangle(0, 0, fileSize.x, fileSize.y);
+		const layout = app.activeDocument.activeLayout;
+		const viewY = (x: number, y: number) =>
+			Math.round(layout.documentToViewY(new cool.SimplePoint(x, y)));
+
+		const gaps: { y0: number; y1: number }[] = [];
+		for (let i = 0; i + 1 < list.length; i++) {
+			const a = list[i];
+			const b = list[i + 1];
+			if (!a || !b || a.length < 4 || b.length < 4) continue;
+			const y0 = viewY(a[0], a[1] + a[3]);
+			const y1 = viewY(b[0], b[1]);
+			if (y1 > y0) gaps.push({ y0: y0, y1: y1 });
+		}
+
+		return {
+			x0: Math.round(paper.v1X), y0: Math.round(paper.v1Y),
+			x1: Math.round(paper.v2X), y1: Math.round(paper.v3Y),
+			dx0: Math.round(doc.v1X), dy0: Math.round(doc.v1Y),
+			dx1: Math.round(doc.v2X), dy1: Math.round(doc.v3Y),
+			gaps: gaps,
+			rules: plan.rules.map((r) => viewY(r.x, r.y)),
+		};
+	}
+
+	// Pre-tile pass: paper under the tiles, skeleton over it, geometry kept.
+	private drawDesktopWriterSheet(docBg: string): void {
+		const sheet = this.planDesktopWriterSheet();
+		this.writerSheet = sheet;
+		if (!sheet) return;
+
+		this.context.fillStyle = docBg;
+		this.context.fillRect(
+			sheet.x0, sheet.y0, sheet.x1 - sheet.x0, sheet.y1 - sheet.y0);
+
+		if (!this.sectionProperties.skeletonNeeded) return;
+		for (const p of app.file.writer.pageRectangleList) {
+			const page = new cool.SimpleRectangle(p[0], p[1], p[2], p[3]);
+			this.drawWriterLoadingSkeleton(
+				Math.round(page.v1X), Math.round(page.v1Y), page.pWidth, page.pHeight);
+		}
+	}
+
+	// Post-tile pass. Absolute view coordinates: the caller has translated
+	// the context by -myTopLeft, as for drawPageBackgrounds.
+	private drawDesktopWriterSheetDecoration(): void {
+		const sheet = this.writerSheet;
+		if (!sheet) return;
+
+		const ctx = this.context;
+		const unit = app.roundedDpiScale;
+		const docBg = this.containerObject.getDocumentBackgroundColor();
+		const left = this.myTopLeft[0];
+		const top = this.myTopLeft[1];
+		const right = left + this.size[0];
+		const bottom = top + this.size[1];
+
+		// 1. Wipe the DOCUMENTBORDER band -- the strip between the document
+		//    extent and the sheet. Core's border and shadow live there, and
+		//    nothing else does. Clamped to the section: a clearRect outside
+		//    it is wasted work at best.
+		const wipe = (x0: number, y0: number, x1: number, y1: number) => {
+			const cx0 = Math.max(x0, left);
+			const cy0 = Math.max(y0, top);
+			const cx1 = Math.min(x1, right);
+			const cy1 = Math.min(y1, bottom);
+			if (cx1 > cx0 && cy1 > cy0)
+				ctx.clearRect(cx0, cy0, cx1 - cx0, cy1 - cy0);
+		};
+		wipe(sheet.dx0, sheet.dy0, sheet.dx1, sheet.y0);
+		wipe(sheet.dx0, sheet.y1, sheet.dx1, sheet.dy1);
+		wipe(sheet.dx0, sheet.y0, sheet.x0, sheet.y1);
+		wipe(sheet.x1, sheet.y0, sheet.dx1, sheet.y1);
+
+		// 2. The drop shadow, behind everything. The sheet is opaque paper,
+		//    so only the band just wiped shows it; a hole where a tile is
+		//    still missing gets paper, which is what the pre-tile pass gave
+		//    it. The fill is clamped to the section plus more than the
+		//    shadow's reach, so a forty-page sheet never asks the canvas to
+		//    blur forty pages: the clamped edges' shadows land off-canvas.
+		const reach = 64 * unit;
+		const fx0 = Math.max(sheet.x0, left - reach);
+		const fy0 = Math.max(sheet.y0, top - reach);
+		const fx1 = Math.min(sheet.x1, right + reach);
+		const fy1 = Math.min(sheet.y1, bottom + reach);
+		if (fx1 > fx0 && fy1 > fy0) {
+			ctx.save();
+			ctx.globalCompositeOperation = 'destination-over';
+			VulcanPageShadow.paint(
+				ctx, fx0, fy0, fx1 - fx0, fy1 - fy0, docBg,
+				this.sectionProperties.pageShadow ?? VulcanPageShadow.DEFAULTS, unit);
+			ctx.restore();
+		}
+
+		// 3. The gaps become paper, over core's lines, with one rule each.
+		ctx.save();
+		ctx.fillStyle = docBg;
+		for (const gap of sheet.gaps) {
+			if (gap.y1 <= top || gap.y0 >= bottom) continue;
+			ctx.fillRect(sheet.x0, gap.y0, sheet.x1 - sheet.x0, gap.y1 - gap.y0);
+		}
+		ctx.strokeStyle = this.sectionProperties.pageOutlineColor;
+		ctx.lineWidth = unit;
+		for (const ruleY of sheet.rules) {
+			const y = ruleY + unit / 2; // centred on a pixel row
+			if (y < top || y > bottom) continue;
+			ctx.beginPath();
+			ctx.moveTo(sheet.x0, y);
+			ctx.lineTo(sheet.x1, y);
+			ctx.stroke();
+		}
+
+		// 4. One outline, one device pixel, outside the sheet wherever the
+		//    canvas has a column for it. At the text fit the sheet's sides
+		//    sit on or past the section's sides, and a stroke outside them
+		//    is off canvas -- the owner's "top edge has a hairline, the
+		//    sides have none". pageOutlineStrokeRect keeps each side's
+		//    column on canvas (see its comment for the per-axis rule); this
+		//    pass runs after the tiles, so a column on the sheet's own edge
+		//    pixel survives.
+		const outline = TilesSection.pageOutlineStrokeRect(
+			sheet.x0, sheet.y0, sheet.x1 - sheet.x0, sheet.y1 - sheet.y0, unit,
+			{ left: left, top: top, right: right, bottom: bottom });
+		ctx.strokeRect(outline.x, outline.y, outline.w, outline.h);
+		ctx.restore();
+	}
+
 	// Fill a single Writer page with the document background colour and paint a
 	// loading skeleton over it. The rectangle's view-space getters place the
 	// page (honouring its tile mode), so this works for both the inline and the
 	// side-by-side compare-changes views.
 	private drawWriterPageBackground(rectangle: cool.SimpleRectangle, docBg: string): void {
-		this.context.fillStyle = docBg;
-		this.drawViewRectangle(rectangle, true);
+		// Soft drop shadow, attached to the page fill itself: the tiles later
+		// over-paint the page interior, but the shadow pixels land outside the
+		// page rect and survive, making the page read as a floating card over
+		// the transparent workspace. Desktop chrome only: canvas shadowBlur is
+		// real per-page paint cost and mobile keeps the stock flat pages.
+		if (this.sectionProperties.desktopChrome) {
+			// Same edges strokePageOutline uses below (rectangle's own far
+			// edges, not v1 + pWidth — see the note there).
+			VulcanPageShadow.paint(
+				this.context,
+				rectangle.v1X, rectangle.v1Y,
+				rectangle.v2X - rectangle.v1X, rectangle.v3Y - rectangle.v1Y,
+				docBg, this.sectionProperties.pageShadow ?? VulcanPageShadow.DEFAULTS, app.roundedDpiScale);
+		} else {
+			this.context.fillStyle = docBg;
+			this.drawViewRectangle(rectangle, true);
+		}
+
+		// Crisp page edge, stroked just outside the bounds so tiles can't
+		// cover it. Between the rectangle's own far edges, not v1 + pWidth:
+		// pWidth is rounded on its own, and at a fractional origin that put
+		// the right-hand line one pixel past where the fill above ends.
+		this.strokePageOutline(
+			rectangle.v1X, rectangle.v1Y,
+			rectangle.v2X - rectangle.v1X, rectangle.v3Y - rectangle.v1Y);
 
 		// Position from the view-space top-left; the page size is scale-only and
 		// independent of the column offset, so read it from the pixel getters.
-		this.drawWriterLoadingSkeleton(
-			rectangle.v1X, rectangle.v1Y, rectangle.pWidth, rectangle.pHeight);
+		//
+		// ONLY WHILE TILES ARE ACTUALLY MISSING. This used to run on every
+		// frame for every visible page, painting a 9-shape roundRect skeleton
+		// that the tiles over-painted microseconds later -- pure waste on the
+		// scroll path, which is the one path the phone cannot afford it on.
+		// It is also a correctness thing, not just cost: a skeleton drawn over
+		// real content is a flicker of fake paragraphs across text the reader
+		// is in the middle of.
+		if (this.sectionProperties.skeletonNeeded) {
+			this.drawWriterLoadingSkeleton(
+				rectangle.v1X, rectangle.v1Y, rectangle.pWidth, rectangle.pHeight);
+		}
 	}
 
 	// Paint a skeleton of a heading + a few paragraph lines on a Writer page
@@ -406,6 +922,7 @@ export class TilesSection extends CanvasSectionObject {
 
 		const viewRectTwips = app.activeDocument.activeLayout.viewedRectangle.toArray();
 		const innerMargin = this.sectionProperties.pageBackgroundInnerMargin;
+		const docBg = this.containerObject.getDocumentBackgroundColor();
 
 		for (let i = 0; i < layout.documentRectangles.length; i++) {
 			const docRect = layout.documentRectangles[i];
@@ -424,23 +941,133 @@ export class TilesSection extends CanvasSectionObject {
 			const w = (docRect.v2X - docRect.v1X) - 2 * innerMargin;
 			const h = (docRect.v3Y - docRect.v1Y) - 2 * innerMargin;
 
-			this.context.strokeRect(x, y, w, h);
+			// Same floating-card treatment as the Writer view: shadow attached
+			// to the page fill (only its outside pixels survive the tiles) and
+			// an outline stroked just outside the bounds. save()/restore()
+			// keeps fillStyle = pageBackgroundTextColor (set by the caller)
+			// intact for the page number below. Shadow is desktop-only (see
+			// drawWriterPageBackground).
+			this.context.save();
+			if (this.sectionProperties.desktopChrome) {
+				VulcanPageShadow.paint(
+					this.context, x, y, w, h, docBg,
+					this.sectionProperties.pageShadow ?? VulcanPageShadow.DEFAULTS, app.roundedDpiScale);
+			} else {
+				this.context.fillStyle = docBg;
+				this.context.fillRect(x, y, w, h);
+			}
+			this.context.restore();
 
-			this.context.fillText(
-				String(i + 1),
-				Math.round(x + w * 0.5),
-				Math.round(y + h * 0.5),
-				w * 0.4,
-			);
+			this.strokePageOutline(x, y, w, h);
+
+			// Google Slides never stamps a number across a slide, and on a
+			// phone this one is not a watermark, it is an obstruction: the
+			// font is 40 CSS px against a slide that now fits the viewport
+			// (846dce9), it paints in --vulcan-muted at 4.7:1 over the paper,
+			// and it is not even centred — textAlign is never set, so it falls
+			// back to `start` and hangs off the middle to the right.
+			//
+			// The information it carries is already in the phone chrome, done
+			// properly: the filmstrip renders a .preview-slide-number under
+			// every thumbnail and marks the current slide with the accent
+			// border (vulcan-theme.css §13i.3/§13i.4), and it is on screen
+			// during the read phase — UIManager show()s the wrapper for every
+			// presentation and read-only only adds a class. So this is not a
+			// capability being cut, it is the same fact drawn twice, once over
+			// the content. Drop the on-slide copy; keep the chrome one.
+			//
+			// Phone only: desktop and tablet read-only decks are a different
+			// surface (no phone filmstrip treatment, page-sized pages, cursor
+			// not finger) and keep the stock numeral.
+			if (!this.sectionProperties.phoneChrome) {
+				this.context.fillText(
+					String(i + 1),
+					Math.round(x + w * 0.5),
+					Math.round(y + h * 0.5),
+					w * 0.4,
+				);
+			}
 		}
 	}
 
-	private drawPageBackgrounds (ctx: any) {
-		if (!app.file.fileBasedView && this.map._docLayer._docType !== 'text')
+	// Decorate the single slide of a phone Impress EDIT session — the one page
+	// in this file that gets no decoration at all, because the guard in
+	// drawPageBackgrounds sends every presentation that is not in
+	// fileBasedView straight back out.
+	//
+	// On desktop that costs nothing: vulcan-theme.css §3 makes the workspace
+	// transparent there, so the paper already reads as a card over the
+	// host background behind the iframe. The phone deliberately keeps the
+	// stock OPAQUE canvas (the §2 --color-canvas override is scoped
+	// html.vulcan-desktop-chrome), which leaves white paper on #f0f0f0 —
+	// a 1.14:1 surface step, 1.02:1 in dark (#121212 on #141414) — and no
+	// line anywhere. The slide has no edge; it bleeds into the workspace.
+	//
+	// So paint the same page treatment every other page in this file already
+	// gets on mobile — flat fill plus the --vulcan-page-outline hairline —
+	// and nothing new. Light: rgba(15,23,42,0.28) over the #f0f0f0 workspace
+	// resolves to rgb(177,179,185), 2.09:1 against the white slide and 1.84:1
+	// against the workspace. Dark: rgba(255,255,255,0.22) over #141414
+	// resolves to #484848, 2.04:1 against the #121212 slide and 2.00:1
+	// against the workspace. Both sides of the line carry contrast, which is
+	// what makes it read as an edge rather than as one more surface step.
+	private drawPhoneImpressSlideBackground(): void {
+		const docLayer = this.sectionProperties.docLayer;
+		const widthTwips = docLayer._partWidthTwips;
+		const heightTwips = docLayer._partHeightTwips;
+		if (!(widthTwips > 0) || !(heightTwips > 0))
 			return;
 
+		// partBasedView lays the selected slide out from the document origin,
+		// so the slide IS the document extent. Read it from the layer's
+		// single-part dimensions rather than app.activeDocument.fileSize:
+		// fileSize is the stacked extent whenever fileBasedView is on and is
+		// only collapsed back on the view-mode flip, whereas these two always
+		// hold the current part. v1X/v1Y then route through the layout's
+		// documentToViewX/Y, the same mapping paintSimple uses to place the
+		// tiles that fill this rectangle, so the frame cannot drift from what
+		// it frames.
+		const slide = new cool.SimpleRectangle(0, 0, widthTwips, heightTwips);
+		const x = slide.v1X;
+		const y = slide.v1Y;
+		const w = slide.pWidth;
+		const h = slide.pHeight;
+
+		// Flat fill, exactly like drawWriterPageBackground's non-desktop
+		// branch: paper-coloured from the first frame instead of workspace
+		// grey until tiles land, and the tiles then over-paint the interior.
+		this.context.fillStyle = this.containerObject.getDocumentBackgroundColor();
+		this.context.fillRect(x, y, w, h);
+
+		// No drop shadow, and NOT only for the per-page cost reason the rest of
+		// this file gives — here it would make the dark edge worse. The outline
+		// is stroked entirely outside the paper, so its backdrop is the
+		// workspace; a shadow darkens exactly those pixels, and the dark token
+		// is a translucent WHITE line, which then has less to sit against.
+		// Measured against the slide: 2.04:1 outline-only versus 1.88:1 with
+		// the shadow under it. Dark is the mode that starts worst (a 1.02:1
+		// step, #121212 slide on #141414 canvas), so trading its edge away for
+		// light-mode depth is backwards.
+		//
+		// strokePageOutline's lineWidth is app.roundedDpiScale — DEVICE pixels,
+		// i.e. one CSS px at any integer DPR (3 device px at DPR 3), never the
+		// third-of-a-CSS-pixel line a literal 1 would give.
+		this.strokePageOutline(x, y, w, h);
+	}
+
+	private drawPageBackgrounds (ctx: any) {
 		if (!this.containerObject.getDocumentAnchorSection())
 			return;
+
+		if (!app.file.fileBasedView && this.map._docLayer._docType !== 'text') {
+			// Phone Impress in edit mode is the sole exception to this guard.
+			// isImpress() is presentation-only, so Draw never reaches it, and
+			// the phoneChrome test keeps desktop and tablet on the stock
+			// no-decoration path they have today.
+			if (this.sectionProperties.phoneChrome && this.map._docLayer.isImpress())
+				this.drawPhoneImpressSlideBackground();
+			return;
+		}
 
 		this.context.fillStyle = this.sectionProperties.pageBackgroundTextColor;
 		this.context.strokeStyle = this.sectionProperties.pageBackgroundBorderColor;
@@ -576,6 +1203,10 @@ export class TilesSection extends CanvasSectionObject {
 			return;
 		}
 
+		// A normal draw means any zoom animation is over; the next one
+		// re-picks its tile sources.
+		this.zoomSourceCache = null;
+
 		if (this.containerObject.testing) {
 			this.containerObject.createUpdateSingleDivElement(this);
 		}
@@ -602,12 +1233,32 @@ export class TilesSection extends CanvasSectionObject {
 		var part = this.sectionProperties.docLayer._selectedPart;
 		var mode = app.activeDocument.activeModes[0];
 
-		if (this.sectionProperties.tsManager.waitForTiles()) {
-			if (!this.haveAllTilesInView(zoom, part, mode, ctx))
+		// A frame that skips the backgrounds must not decorate last frame's.
+		this.writerSheet = null;
+
+		// Decide ONCE per draw whether the loading skeleton is wanted, and hand
+		// it to the page painters below rather than letting each page work it
+		// out. haveAllTilesInView is the same test the waitForTiles branch
+		// already runs, so on that path this costs nothing new.
+		this.sectionProperties.skeletonNeeded = !this.haveAllTilesInView(
+			zoom, part, mode, ctx);
+
+		// While a zoom waits for its tiles the canvas is not cleared, and the
+		// last frame stays up until they arrive. A scroll in that window makes
+		// the container clear every frame (ViewLayoutBase.scroll), so there is
+		// no last frame left to keep: paint the page, the tiles that have
+		// arrived and the skeleton for the rest, not an empty page until the
+		// zoom settles.
+		const waitForTiles = this.sectionProperties.tsManager.waitForTiles();
+		const repaintAfterScroll = waitForTiles &&
+			this.containerObject.isScrollingBeforeZoomSettled();
+
+		if (waitForTiles && !repaintAfterScroll) {
+			if (this.sectionProperties.skeletonNeeded)
 				return;
-		} else if (!this.containerObject.isZoomChanged()) {
+		} else if (!this.containerObject.isZoomChanged() || repaintAfterScroll) {
 			// Don't show page border and page numbers (drawn by drawPageBackgrounds) if zoom is changing
-			// after a zoom animation.
+			// after a zoom animation, unless a scroll has cleared the last frame.
 
 			// drawPageBackgroundWriter uses absolute view coordinates (v1X, v1Y etc.)
 			// but the context is already translated by myTopLeft (by the section container).
@@ -617,24 +1268,57 @@ export class TilesSection extends CanvasSectionObject {
 			this.context.translate(this.myTopLeft[0], this.myTopLeft[1]);
 		}
 
-		var doneTiles = new Set();
-		this.forEachTileInView(zoom, part, mode, ctx, function (tile: any, coords: TileCoordData): boolean {
+		// Coords can only repeat where split-pane tile ranges overlap (Calc);
+		// the single-pane path skips the dedup Set. The callback is a class
+		// field bound once, not a fresh closure per frame — onDraw runs every
+		// frame.
+		this.onDrawDoneTiles = ctx.paneBoundsActive === true ? new Set() : null;
+		this.onDrawPaintCtx = ctx;
+		this.forEachTileInView(zoom, part, mode, ctx, this.onDrawTileCallback);
+		this.onDrawPaintCtx = null;
+		this.onDrawDoneTiles = null;
 
-			if (doneTiles.has(coords.key()))
-				return true;
+		// The desktop Writer sheet's edge, shadow and seams go on over the
+		// tiles: core paints its own page border into the band around the
+		// page, and only a pass after the tiles can take it back.
+		if (this.writerSheet) {
+			this.context.translate(-this.myTopLeft[0], -this.myTopLeft[1]);
+			this.drawDesktopWriterSheetDecoration();
+			this.context.translate(this.myTopLeft[0], this.myTopLeft[1]);
+		}
+	}
 
-			// Ensure tile is within document bounds.
-			if (tile && RenderManager.isValidTile(coords)) {
-				if (!this.isJSDOM) { // perf-test code
-					if (tile.isReadyToDraw() || this.map._debug.tileOverlaysOn) { // Ensure tile is loaded
-						this.paint(tile, ctx, false /* async? */);
+	private onDrawDoneTiles: Set<string> | null = null;
+	private onDrawPaintCtx: any = null;
+
+	private onDrawTileCallback = (tile: any, coords: TileCoordData): boolean => {
+		const doneTiles = this.onDrawDoneTiles;
+		if (doneTiles && doneTiles.has(coords.key()))
+			return true;
+
+		// Ensure tile is within document bounds.
+		if (tile && RenderManager.isValidTile(coords)) {
+			if (!this.isJSDOM) { // perf-test code
+				if (tile.isReadyToDraw() || this.map._debug.tileOverlaysOn) { // Ensure tile is loaded
+					// Telemetry: 1-in-N sampled paint duration (histogram
+					// flushed once per session) + first-paint milestone.
+					// The unsampled path costs one boolean and a counter.
+					if (app.telemetry && app.telemetry.shouldSampleTilePaint()) {
+						const paintStart = performance.now();
+						this.paint(tile, this.onDrawPaintCtx, false /* async? */);
+						app.telemetry.sampleTilePaint(performance.now() - paintStart);
+					} else {
+						this.paint(tile, this.onDrawPaintCtx, false /* async? */);
 					}
+					if (app.telemetry && !app.telemetry.firstTilePainted)
+						app.telemetry.noteFirstTilePaint();
 				}
 			}
+		}
+		if (doneTiles)
 			doneTiles.add(coords.key());
-			return true; // continue with remaining tiles.
-		}.bind(this));
-	}
+		return true; // continue with remaining tiles.
+	};
 
 	public onClick(point: cool.SimplePoint, e: MouseEvent): void {
 		// Slides pane is not focusable, we are using a variable to follow its focused state.
@@ -705,16 +1389,14 @@ export class TilesSection extends CanvasSectionObject {
 	 * @param area specifies the document area in core-pixels at the current
 	 * zoom level.
 	 *
-	 * @returns the zoom-level with maximum tile content.
+	 * @returns the zoom-level with maximum tile content, or null when no
+	 * level holds a usable tile (a result the caller must not cache).
 	 */
 	private zoomLevelWithMaxContentInArea(area: any,
-		areaZoom: number, part: number, mode: number, ctx: any): number {
+		areaZoom: number, part: number, mode: number, ctx: any): number | null {
 
 		var frameScale = this.sectionProperties.tsManager._zoomFrameScale;
-		var docLayer = this.sectionProperties.docLayer;
 		var targetZoom = Math.round(this.map.getScaleZoom(frameScale, areaZoom));
-		var bestZoomLevel = targetZoom;
-		var availAreaScoreAtBestZL = -Infinity; // Higher the better.
 		var area = area.clone();
 		if (area.min.x < 0)
 			area.min.x = 0;
@@ -723,7 +1405,31 @@ export class TilesSection extends CanvasSectionObject {
 
 		var minZoom = <number> this.map.options.minZoom;
 		var maxZoom = <number> this.map.options.maxZoom;
-		for (var zoom = minZoom; zoom <= maxZoom; ++zoom) {
+
+		// Scanning every rung walked (and allocated coords + a key string
+		// for) each candidate tile per rung per pane per frame -- the
+		// measured Impress pinch-out jank. Sources far from the target are
+		// scaled past usefulness anyway, so scan a window around it; a cache
+		// holding only far rungs still resolves through the full-scan
+		// fallback.
+		var best = this.bestZoomInRange(area, areaZoom, part, mode, ctx, targetZoom,
+			Math.max(minZoom, targetZoom - 2), Math.min(maxZoom, targetZoom + 2));
+		if (best === null)
+			best = this.bestZoomInRange(area, areaZoom, part, mode, ctx, targetZoom,
+				minZoom, maxZoom);
+		return best;
+	}
+
+	// The previous full-scan body, over an inclusive zoom range. Returns null
+	// when no rung in the range holds a tile with content.
+	private bestZoomInRange(area: any, areaZoom: number, part: number, mode: number,
+		ctx: any, targetZoom: number, fromZoom: number, toZoom: number): number | null {
+
+		var maxZoom = <number> this.map.options.maxZoom;
+		var bestZoomLevel: number | null = null;
+		var availAreaScoreAtBestZL = -Infinity; // Higher the better.
+
+		for (var zoom = fromZoom; zoom <= toZoom; ++zoom) {
 			var availAreaScore = 0; // Higher the better.
 			var hasTiles = false;
 
@@ -733,7 +1439,6 @@ export class TilesSection extends CanvasSectionObject {
 
 			// Compute area for zoom-level 'zoom'.
 			var areaAtZoom = this.scaleBoundsForZoom(area, zoom, areaZoom);
-			//console.log('DEBUG:: areaAtZoom = ' + areaAtZoom);
 			var relScale = this.map.getZoomScale(zoom, areaZoom);
 
 			this.forEachTileInArea(areaAtZoom, zoom, part, mode, ctx, function(tile, coords, section) {
@@ -744,7 +1449,11 @@ export class TilesSection extends CanvasSectionObject {
 						var layout = app.activeDocument.activeLayout;
 						if (layout && layout.type === 'ViewLayoutFileBased') {
 							var ratio = RenderManager.tileSize * relScale / app.tile.size.y;
-							var rect = (layout as ViewLayoutFileBased).getViewPartRectAtRatio(coords.part, ratio);
+							// DOC-space rect (X=0 baseline), matching the
+							// space `area` is in -- see drawZoomFrame's
+							// R6-11 comment for the frame-mixing bug the
+							// VIEW rect caused here.
+							var rect = (layout as ViewLayoutFileBased).getDocumentPartRectAtRatio(coords.part, ratio);
 							if (rect) {
 								tilePos.x = rect.x + tilePos.x;
 								tilePos.y = rect.y + tilePos.y;
@@ -764,15 +1473,19 @@ export class TilesSection extends CanvasSectionObject {
 				return true;
 			});
 
+			if (!hasTiles)
+				continue;
+
 			// Scale up with a correction factor to make area scores comparable b/w zoom levels.
-			availAreaScore = hasTiles ? Math.round(availAreaScore
+			availAreaScore = Math.round(availAreaScore
 				* dimensionCorrection /* width */
 				* dimensionCorrection /* height */
-				/ 10 /* resolution control */) : -Infinity;
+				/ 10 /* resolution control */);
 
 			// Accept this zoom if it has a lower missing-area score
 			// In case of a tie we prefer tiles from a zoom level closer to targetZoom.
-			if (availAreaScore > availAreaScoreAtBestZL ||
+			if (bestZoomLevel === null ||
+				availAreaScore > availAreaScoreAtBestZL ||
 				(availAreaScore == availAreaScoreAtBestZL && Math.abs(targetZoom - bestZoomLevel) > Math.abs(targetZoom - zoom))) {
 				availAreaScoreAtBestZL = availAreaScore;
 				bestZoomLevel = zoom;
@@ -780,6 +1493,38 @@ export class TilesSection extends CanvasSectionObject {
 		}
 
 		return bestZoomLevel;
+	}
+
+	// One zoom animation reuses its chosen tile source per pane: the rung
+	// scan's answer only moves when the frame nears a different rung, so
+	// rescan when the scale drifts more than half a rung from where the
+	// cache was computed (or the rung/part/mode changes); any normal draw
+	// in onDraw marks the animation over and drops the cache. An empty scan
+	// is never cached, so tiles arriving mid-animation are picked up.
+	private zoomSourceCache: { fracZoom: number, zoom: number, part: number,
+		mode: number, byPane: number[] } | null = null;
+
+	private zoomSourceForFrame(docRange: any, zoom: number, part: number,
+		mode: number, ctx: any, paneIndex: number): number {
+
+		var frameScale = this.sectionProperties.tsManager._zoomFrameScale;
+		var fracZoom = this.map.getScaleZoom(frameScale, zoom);
+		var cache = this.zoomSourceCache;
+
+		if (cache && (cache.zoom !== zoom || cache.part !== part || cache.mode !== mode ||
+			Math.abs(cache.fracZoom - fracZoom) > 0.5))
+			cache = null;
+		if (!cache)
+			cache = this.zoomSourceCache = { fracZoom: fracZoom, zoom: zoom, part: part, mode: mode, byPane: [] };
+
+		var src = cache.byPane[paneIndex];
+		if (src === undefined) {
+			var found = this.zoomLevelWithMaxContentInArea(docRange, zoom, part, mode, ctx);
+			if (found === null) // nothing usable yet: same answer the old empty scan gave, rescanned next frame.
+				return Math.round(fracZoom);
+			cache.byPane[paneIndex] = src = found;
+		}
+		return src;
 	}
 
 	// eslint-disable-next-line @typescript-eslint/explicit-module-boundary-types
@@ -937,9 +1682,32 @@ export class TilesSection extends CanvasSectionObject {
 
 		this.containerObject.setPenPosition(this);
 		var viewSize = ctx.viewBounds.getSize();
-		// clear the document area first.
-		this.context.fillStyle = this.containerObject.getClearColor();
-		this.context.fillRect(0, 0, viewSize.x, viewSize.y);
+		// Clear the document area before the first tile lands. The container
+		// skips its own clear during a zoom animation, so on the file-based
+		// path the clear is deferred until a tile is actually about to draw: a
+		// walk that paints nothing (evicted tiles, frame mismatch) then keeps
+		// the previous frame instead of a cleared-blank one. The non-file
+		// paths keep the eager clear -- Calc RTL mirrors the context inside
+		// beforeDraw, where a full-canvas fill must not run.
+		var frameCleared = false;
+		var clearZoomFrame = (): void => {
+			if (frameCleared)
+				return;
+			frameCleared = true;
+			// R6-15: phone Writer's ground is paper, not workspace. The page
+			// backgrounds are not drawn at all during a zoom animation
+			// (onDraw returns into drawZoomFrame), so without this the
+			// continuous white surface flashes grey for the whole gesture --
+			// and the gesture is the half of it the reader is looking at.
+			this.context.fillStyle =
+				this.sectionProperties.phoneChrome &&
+				this.map._docLayer._docType === 'text'
+					? this.containerObject.getDocumentBackgroundColor()
+					: this.containerObject.getClearColor();
+			this.context.fillRect(0, 0, viewSize.x, viewSize.y);
+		};
+		if (!app.file.fileBasedView)
+			clearZoomFrame();
 
 		var paneBoundsList = ctx.paneBoundsList;
 
@@ -1018,9 +1786,21 @@ export class TilesSection extends CanvasSectionObject {
 			var bestZoomSrc = zoom;
 			var sheetGeometry = docLayer.sheetGeometry;
 			var useSheetGeometry = false;
-			if (scale < 1.0) {
-				useSheetGeometry = !!sheetGeometry;
-				bestZoomSrc = this.zoomLevelWithMaxContentInArea(docRange, zoom, part, mode, ctx);
+			// R6-7 lever L4a: hunt a better source rung in BOTH directions,
+			// not just zoom-out. Zoom-in hard-coded the start rung -- a pure
+			// upscale -- even when the target rung's tiles are in cache,
+			// which the speculative settle prefetch makes the common case
+			// mid-gesture. The hunt's tie-break prefers the rung nearest the
+			// frame target and an incomplete rung loses to a complete one,
+			// so nothing changes until the sharper tiles have actually
+			// landed. Calc keeps the zoom-out-only gate: its sheet-geometry
+			// scaling path is tuned for that direction. typeof-guarded so
+			// the minimal mocha docLayer stubs read as "zoom-out only", the
+			// shipped gate.
+			if (scale < 1.0 ||
+				(typeof docLayer.isCalc === 'function' && !docLayer.isCalc())) {
+				useSheetGeometry = scale < 1.0 && !!sheetGeometry;
+				bestZoomSrc = this.zoomSourceForFrame(docRange, zoom, part, mode, ctx, k);
 			}
 
 			var docRangeScaled = (bestZoomSrc == zoom) ? docRange : this.scaleBoundsForZoom(docRange, bestZoomSrc, zoom);
@@ -1037,7 +1817,22 @@ export class TilesSection extends CanvasSectionObject {
 					var layout = app.activeDocument.activeLayout;
 					if (layout && layout.type === 'ViewLayoutFileBased') {
 						var ratio = RenderManager.tileSize * relScale / app.tile.size.y;
-						var rect = (layout as ViewLayoutFileBased).getViewPartRectAtRatio(tile.coords.part, ratio);
+						// VULCAN (R6-11 entry/exit jolt): DOC-space rect, not
+						// VIEW-space. The zoom window (docRange) is DOC-space
+						// -- X=0 baseline, built from the pinch anchor through
+						// canvasToDocumentPoint -- and the tile-selection walk
+						// (updateFileBasedView) reads getDocumentPartRectAtRatio
+						// in the same space. Offsetting the PAINT by the VIEW
+						// rect, which already contains the letterbox centering,
+						// counted the margin twice: every zoom-anim frame
+						// painted shifted by ~the margin, read as a uniform
+						// +44 core-px canvas jump on the first frame and -37
+						// back at the settle repaint (r6-4 s1 ledger, 5/5 scan
+						// rows; z2-entry-jolt counterfactual removes both).
+						// Mixed-width decks: parts keep their own widths in
+						// both spaces; only the centering X differs, and the
+						// window/anchor math never contained it.
+						var rect = (layout as ViewLayoutFileBased).getDocumentPartRectAtRatio(tile.coords.part, ratio);
 						if (rect) {
 							tileCoords.x = rect.x + tileCoords.x;
 							tileCoords.y = rect.y + tileCoords.y;
@@ -1058,6 +1853,7 @@ export class TilesSection extends CanvasSectionObject {
 				var tileOffset = crop.min.subtract(tileBounds.min);
 				var paneOffset = crop.min.subtract(docRangeScaled.min.subtract(destPosScaled));
 				if (cropWidth && cropHeight) {
+						clearZoomFrame();
 						section.drawTileToCanvasCrop(
 								tile, canvasContext,
 								tileOffset.x, tileOffset.y, // source x, y

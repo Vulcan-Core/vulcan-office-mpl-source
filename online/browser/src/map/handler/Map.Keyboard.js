@@ -7,7 +7,7 @@
  * at TextInput.
  */
 
-/* global app UNOKey RenderManager */
+/* global app UNOKey RenderManager GraphicSelection VulcanLiveCanvas */
 
 window.L.Map.mergeOptions({
 	keyboard: true,
@@ -499,10 +499,12 @@ window.L.Map.Keyboard = window.L.Handler.extend({
 			else if (this._isCtrlKey(ev) && !ev.altKey
 				&& (ev.keyCode === this.keyCodes.Y || (ev.shiftKey && ev.keyCode === this.keyCodes.Z))) {
 				app.socket.sendMessage('uno .uno:Redo');
+				RenderManager.noteHistoryCommandSent();
 				ev.preventDefault();
 			}
 			else if (this._isCtrlKey(ev) && !ev.altKey && ev.keyCode === this.keyCodes.Z) {
 				app.socket.sendMessage('uno .uno:Undo');
+				RenderManager.noteHistoryCommandSent();
 				ev.preventDefault();
 			}
 			else if (!ev.ctrlKey && !ev.shiftKey) {
@@ -536,6 +538,167 @@ window.L.Map.Keyboard = window.L.Handler.extend({
 	// _handleKeyEvent - checks if the given keyboard event shall trigger
 	// a message to coolwsd, and calls the given keyEventFn(type, charcode, keycode)
 	// callback if so.
+	// PowerPoint-style keyboard grammar for a selected object in Impress:
+	// Arrow = nudge 6pt, Ctrl+Arrow = nudge 1 screen pixel, Shift+Arrow =
+	// resize, Alt+Left/Right = rotate 15° (1° with Shift). Returns true when
+	// the event was consumed.
+	_handleImpressObjectKeys: function (ev) {
+		// A keyup for an arrow whose keydown was consumed here must not leak
+		// to core as a stray, uncounted key event.
+		if (ev.type === 'keyup' && this._impressConsumedArrows &&
+			(this._impressConsumedArrows[ev.key] || (ev.code && this._impressConsumedArrows[ev.code]))) {
+			delete this._impressConsumedArrows[ev.key];
+			if (ev.code)
+				delete this._impressConsumedArrows[ev.code];
+			return true;
+		}
+		if (ev.type !== 'keydown')
+			return false;
+		if (!VulcanLiveCanvas.isCanvasDocType(this._map.getDocType()) || !this._map.isEditMode())
+			return false;
+		if (typeof GraphicSelection === 'undefined' || !GraphicSelection.hasActiveSelection())
+			return false;
+		if (app.file.textCursor.visible)
+			return false;
+
+		// Ctrl-family bindings on a selection; Cmd counts as Ctrl on macOS.
+		// The whole arrange set rides this one modifier family (per design review:
+		// no mixed Alt/Ctrl bindings) - Alt only ever joins as a secondary
+		// modifier for the distribute pair. Matched on ev.code: with
+		// Option held, macOS composes ev.key into special characters.
+		// Consumed here so the browser's own Cmd+G (find again) and Cmd+[/]
+		// (history navigation) never fire while an object is selected, and
+		// the keyup is swallowed like the others.
+		if (ev.ctrlKey || ev.metaKey) {
+			const ctrlCommand = this._impressCtrlCommand(ev);
+			if (ctrlCommand) {
+				app.map.sendUnoCommand(ctrlCommand);
+				RenderManager.noteMutatingInputSent();
+				return this._noteImpressArrowConsumed(ev);
+			}
+		}
+
+		if (!['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown'].includes(ev.key))
+			return false;
+
+		const rectangle = GraphicSelection.rectangle;
+
+		if (ev.altKey && !ev.ctrlKey && !ev.metaKey) {
+			if (ev.key !== 'ArrowLeft' && ev.key !== 'ArrowRight')
+				return false;
+
+			// Positive core angles are counterclockwise.
+			const step = ev.shiftKey ? 100 : 1500; // 1° or 15°, in 1/100 degree.
+			const center = rectangle.center;
+
+			app.map.sendUnoCommand('.uno:TransformDialog', {
+				TransformRotationDeltaAngle: { type: 'long', value: ev.key === 'ArrowLeft' ? step : -step },
+				TransformRotationX: { type: 'long', value: center[0] },
+				TransformRotationY: { type: 'long', value: center[1] }
+			});
+			RenderManager.noteMutatingInputSent();
+			return this._noteImpressArrowConsumed(ev);
+		}
+
+		if (ev.altKey)
+			return false;
+
+		const coarse = 120; // PowerPoint's default nudge: 1/12 inch = 6 pt, in twips.
+
+		if (ev.shiftKey && !ev.ctrlKey && !ev.metaKey) {
+			// Shift+Arrow resizes: Right/Down grow, Left/Up shrink.
+			const minSize = coarse;
+			let width = rectangle.width;
+			let height = rectangle.height;
+
+			if (ev.key === 'ArrowRight') width += coarse;
+			else if (ev.key === 'ArrowLeft') width = Math.max(minSize, width - coarse);
+			else if (ev.key === 'ArrowDown') height += coarse;
+			else height = Math.max(minSize, height - coarse);
+
+			app.map.sendUnoCommand('.uno:TransformDialog', {
+				TransformWidth: { type: 'long', value: Math.round(width) },
+				TransformHeight: { type: 'long', value: Math.round(height) }
+			});
+			RenderManager.noteMutatingInputSent();
+			return this._noteImpressArrowConsumed(ev);
+		}
+
+		const fine = Math.max(1, Math.round(app.pixelsToTwips)); // 1 screen pixel at the current zoom.
+		const step = (ev.ctrlKey || ev.metaKey) ? fine : coarse;
+
+		let dx = 0;
+		let dy = 0;
+
+		if (ev.key === 'ArrowLeft') dx = -step;
+		else if (ev.key === 'ArrowRight') dx = step;
+		else if (ev.key === 'ArrowUp') dy = -step;
+		else dy = step;
+
+		// The controller owns the send: it keeps the gesture's absolute
+		// intent, so key-repeat cannot resend one stale target and
+		// alternating axes cannot revert each other.
+		if (app.definitions && app.definitions.vulcanImpressNudge &&
+			app.definitions.vulcanImpressNudge.nudgeBy(dx, dy))
+			return this._noteImpressArrowConsumed(ev);
+
+		return false;
+	},
+
+	_impressCtrlCommand: function (ev) {
+		// Group / ungroup (reference deck and vector editors).
+		if (ev.code === 'KeyG')
+			return ev.shiftKey ? '.uno:FormatUngroup' : '.uno:FormatGroup';
+		// Ctrl/Cmd+Shift+Arrow aligns the selection to the slide edge in
+		// that direction (the designer's binding; the combo was an unassigned
+		// shadow of the fine nudge before this).
+		// Alt joins only for the distribute pair
+		// (Ctrl/Cmd+Alt+Shift+H/V); every other Ctrl+Alt combo stays
+		// unconsumed.
+		if (ev.altKey) {
+			if (!ev.shiftKey) return null;
+			if (ev.code === 'KeyH') return '.uno:DistributeHorzDistance';
+			// M, not V: the whole V chord family belongs to PasteSpecial
+			// (Map.KeyboardShortcuts descriptors on complementary platform
+			// sets) — binding V here suppressed native paste in the browser
+			// and inverted on the CODA shells (adversarial review P1-7).
+			if (ev.code === 'KeyM') return '.uno:DistributeVertDistance';
+			return null;
+		}
+		if (ev.shiftKey) {
+			// Fit the selection's text frames to their text (W1: nothing
+			// built on wrong boxes can align).
+			if (ev.code === 'KeyF') return '.uno:FitFrameToText';
+			// Centerings sit beside the edge aligns: H centers on the
+			// horizontal axis, M on the vertical Middle (V = paste family,
+			// see the distribute comment above).
+			if (ev.code === 'KeyH') return '.uno:AlignCenter';
+			if (ev.code === 'KeyM') return '.uno:AlignMiddle';
+			if (ev.code === 'ArrowLeft') return '.uno:ObjectAlignLeft';
+			if (ev.code === 'ArrowRight') return '.uno:ObjectAlignRight';
+			if (ev.code === 'ArrowUp') return '.uno:AlignUp';
+			if (ev.code === 'ArrowDown') return '.uno:AlignDown';
+		}
+		// Z-order (PowerPoint's Arrange verbs on the bracket family):
+		// Ctrl+] / Ctrl+[ step one, Shift goes to the extreme.
+		if (ev.code === 'BracketRight')
+			return ev.shiftKey ? '.uno:BringToFront' : '.uno:ObjectForwardOne';
+		if (ev.code === 'BracketLeft')
+			return ev.shiftKey ? '.uno:SendToBack' : '.uno:ObjectBackOne';
+		return null;
+	},
+
+	_noteImpressArrowConsumed: function (ev) {
+		if (!this._impressConsumedArrows)
+			this._impressConsumedArrows = {};
+		// Keyed by BOTH key and code: alignment hotkeys match on ev.code
+		// (macOS composes Option+letter ev.key values), arrows on ev.key.
+		this._impressConsumedArrows[ev.key] = true;
+		if (ev.code)
+			this._impressConsumedArrows[ev.code] = true;
+		return true;
+	},
+
 	// Called from _onKeyDown
 	_handleKeyEvent: function (ev, keyEventFn) {
 		if (this._map.uiManager.isUIBlocked())
@@ -559,6 +722,12 @@ window.L.Map.Keyboard = window.L.Handler.extend({
 			ev.shortCutActivated = true;
 			return;
 		}
+
+		if (this._handleImpressObjectKeys(ev)) {
+			ev.preventDefault();
+			return;
+		}
+
 		if (!keyEventFn && docLayer && docLayer.postKeyboardEvent) {
 			// default is to post keyboard events on the document
 			keyEventFn = window.L.bind(docLayer.postKeyboardEvent, docLayer);
@@ -825,6 +994,29 @@ window.L.Map.Keyboard = window.L.Handler.extend({
 			return true;
 		}
 
+		/*
+		 * VULCAN: Ctrl+F opens the Navigation panel on its search face.
+		 *
+		 * Util.Shortcuts already ADVERTISES Ctrl+F as `find` -- and says why it
+		 * is hard-coded rather than read from Accelerators.xcu -- but nothing
+		 * bound the keystroke. MEASURED before this change: Ctrl+F in a Writer
+		 * document left `navigation-sidebar` hidden at width 0 and focus parked
+		 * on `clipboard-area`. A shortcut the UI promises and the app ignores.
+		 *
+		 * `uiManager.focusSearch()` is the behaviour Word gives Ctrl+F -- open
+		 * the Navigation pane, focus the search field -- and it already handles
+		 * the doc types (text opens the panel, Calc and Impress keep
+		 * .uno:SearchDialog). It only ever lacked a way in.
+		 *
+		 * Shift and Alt are excluded so Ctrl+Shift+F stays FitFrameToText.
+		 */
+		if (this._isCtrlKey(e) && !e.shiftKey && !e.altKey &&
+			e.keyCode === this.keyCodes.F) {
+			this._map.uiManager.focusSearch();
+			e.preventDefault();
+			return true;
+		}
+
 		// Handles unformatted paste
 		if (this._isCtrlKey(e) && e.shiftKey && this.keyCodes.V.includes(e.keyCode)) {
 			return true;
@@ -852,12 +1044,14 @@ window.L.Map.Keyboard = window.L.Handler.extend({
 			(this._isCtrlKey(e) && e.shiftKey && e.keyCode === this.keyCodes.Z)
 		) {
 			app.socket.sendMessage('uno .uno:Redo');
+				RenderManager.noteHistoryCommandSent();
 			e.preventDefault();
 			return true;
 		}
 
 		if (this._isCtrlKey(e) && e.keyCode === this.keyCodes.Z) {
 			app.socket.sendMessage('uno .uno:Undo');
+				RenderManager.noteHistoryCommandSent();
 			e.preventDefault();
 			return true;
 		}

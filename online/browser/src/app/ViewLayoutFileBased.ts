@@ -15,10 +15,35 @@
 // docLayer._partDimensions; falls back to uniform (_partWidthTwips,
 // _partHeightTwips) when the per-part array is empty.
 
+// The scroll position expressed in a form that a zoom change cannot invalidate:
+// which part the top edge of the viewport is in, and how far into that part it
+// sits as a 0..1 fraction of the part's height. `xTwips` is the horizontal
+// offset in twips -- the stacked column has no part structure across X, so it
+// only needs the unit change, not the anchoring.
+interface FileBasedScrollAnchor {
+	part: number;
+	fraction: number;
+	xTwips: number;
+}
+
 class ViewLayoutFileBased extends ViewLayoutNewBase {
 	public readonly type: string = 'ViewLayoutFileBased';
 	public documentRectangles = Array<cool.SimpleRectangle>();
 	public viewRectangles = Array<cool.SimpleRectangle>();
+
+	// The app.twipsToPixels that the CURRENT rectangles and the CURRENT
+	// scrollProperties.viewX/viewY are expressed in.
+	//
+	// Everything else in this layout is immune to a zoom change by
+	// construction. documentRectangles/viewRectangles and _viewSize are
+	// cool.SimpleRectangle / cool.SimplePoint, which store twips and convert on
+	// every pixel read (core/geometry.ts:193-209), so they re-derive themselves
+	// at whatever scale is current. scrollProperties.viewX/viewY are plain
+	// numbers holding core pixels -- ViewLayout.ts:25,40 -- and no writer of
+	// either is zoom-aware. So a zoom step moves the layout and leaves the
+	// scroll offset behind, and this field is what lets reset() tell by how
+	// much.
+	private layoutTwipsToPixels: number = 0;
 
 	constructor() {
 		super();
@@ -60,6 +85,11 @@ class ViewLayoutFileBased extends ViewLayoutNewBase {
 	private resetViewLayout(): void {
 		this.documentRectangles.length = 0;
 		this.viewRectangles.length = 0;
+
+		// Record the scale this rebuild is happening at, BEFORE the early
+		// return, so the invariant "layoutTwipsToPixels describes the scale
+		// viewX/viewY are in" holds even for a layout with no parts yet.
+		this.layoutTwipsToPixels = app.twipsToPixels;
 
 		const partCount = this.getPartCount();
 		if (partCount === 0) return;
@@ -103,12 +133,259 @@ class ViewLayoutFileBased extends ViewLayoutNewBase {
 			Math.round(cumulativeY * app.twipsToPixels),
 			canvasSize[1],
 		);
+
+		this.sampleCentringInput(
+			layoutWidthTwips,
+			maxWidth,
+			canvasSize[0],
+			this.getPartSizeTwips(0).w,
+		);
+	}
+
+	/*
+	 * ── phone centring probe — INSTRUMENTATION ONLY, no behavioural effect ──
+	 *
+	 * resetViewLayout bakes every part's X against ONE read of
+	 * app.sectionContainer.getViewSize(), which returns the container's
+	 * declared `this.width` — a value resizeCanvas() only later copies onto
+	 * the canvas element (CanvasSectionContainer.ts:362-364, :762-768). When
+	 * the two disagree the deck is centred against a width the user is not
+	 * looking at, which is the shape of the designer's phone report: slack canvas on
+	 * one side, slide displaced to the other.
+	 *
+	 * This SAMPLES that disagreement and does not correct it. The one Impress
+	 * instance measured on prod was a stale Leaflet centre at the read->edit
+	 * flip and is already fixed there (ImpressTileLayer.js:394-455); the
+	 * remaining report is intermittent and unattributed, so a second
+	 * speculative centring fix would as likely mask the cause as remove it.
+	 */
+	private static readonly CENTRING_DIVERGENCE_CSS = 2;
+	private static readonly CENTRING_EMIT_FLOOR_MS = 10000;
+	private centringDivergenceOpen: boolean = false;
+	private centringLastEmitMs: number = 0;
+
+	// This layout is Draw/PDF and read-posture Impress by construction, so the
+	// doctype half of the phone predicate is not needed here: small-screen
+	// device AND the pre-paint html.vulcan-mobile-chrome marker js/global.js
+	// stamps iff !desktopChrome && isSmallScreenDevice(). Desktop and tablet
+	// never reach the emit, and nothing in this method writes.
+	private isVulcanPhone(): boolean {
+		return (
+			(<any>window).mode.isSmallScreenDevice() &&
+			document.documentElement.classList.contains('vulcan-mobile-chrome')
+		);
+	}
+
+	private sampleCentringInput(
+		layoutWidthTwips: number,
+		maxWidthTwips: number,
+		inputWidthPx: number,
+		firstPartWidthTwips: number,
+	): void {
+		if (!app.telemetry) return;
+		try {
+			if (!this.isVulcanPhone()) return;
+
+			const liveCss =
+				app.sectionContainer.getCanvasBoundingClientRect().width;
+			// A detached or display:none canvas measures 0 — no live width to
+			// disagree with, and reporting it would read as a total collapse.
+			if (!liveCss) return;
+
+			const dpiScale = app.dpiScale || 1;
+			const inputCss = inputWidthPx / dpiScale;
+			const deltaCss = inputCss - liveCss;
+
+			// One sample per divergence EPISODE. The latch clears on the first
+			// agreeing reset; the floor covers a reset storm oscillating across
+			// the threshold, because reset() is bound to 'resize' as well as
+			// 'zoomend' and a phone fires resize continuously (keyboard,
+			// rotation, retracting browser chrome).
+			if (
+				Math.abs(deltaCss) <= ViewLayoutFileBased.CENTRING_DIVERGENCE_CSS
+			) {
+				this.centringDivergenceOpen = false;
+				return;
+			}
+			if (this.centringDivergenceOpen) return;
+			const now = Date.now();
+			if (
+				now - this.centringLastEmitMs <
+				ViewLayoutFileBased.CENTRING_EMIT_FLOOR_MS
+			)
+				return;
+			this.centringDivergenceOpen = true;
+			this.centringLastEmitMs = now;
+
+			// Origins are part 0's: every slide in a deck is the same width, so
+			// one part answers for the whole stack. `fresh` is the origin the
+			// same arithmetic would have produced against the live width.
+			const liveWidthTwips = Math.round(
+				liveCss * dpiScale * app.pixelsToTwips,
+			);
+			const freshLayoutWidthTwips = Math.max(maxWidthTwips, liveWidthTwips);
+
+			const map = app.map as any;
+			const domUtil = (window as any).L && (window as any).L.DomUtil;
+
+			app.telemetry.record('filebased_centring_divergence', {
+				layout_width_twips: layoutWidthTwips,
+				input_css_width: Math.round(inputCss),
+				canvas_css_width: Math.round(liveCss),
+				delta_css: Math.round(deltaCss),
+				origin_stale_twips: Math.round(
+					(layoutWidthTwips - firstPartWidthTwips) * 0.5,
+				),
+				origin_fresh_twips: Math.round(
+					(freshLayoutWidthTwips - firstPartWidthTwips) * 0.5,
+				),
+				zoom_percent:
+					map && typeof map.getZoomPercent === 'function'
+						? Math.round(map.getZoomPercent())
+						: -1,
+				orientation:
+					domUtil && typeof domUtil.isPortrait === 'function'
+						? domUtil.isPortrait()
+							? 'portrait'
+							: 'landscape'
+						: 'unknown',
+			});
+		} catch (e) {
+			/* a probe must never break a layout pass */
+		}
+	}
+
+	/*
+	 * Where the top edge of the viewport is, in a form a zoom change cannot
+	 * invalidate.
+	 *
+	 * Must be called BEFORE resetViewLayout(), and it deliberately reads the
+	 * rectangles' TWIP accessors (y1 / height), never the pixel ones. By the
+	 * time reset() runs on 'zoomend' the scale has already moved: _resetView
+	 * fires 'viewreset' -> CanvasTileLayer._reset -> _updateTileTwips, which
+	 * rewrites app.twipsToPixels, and only then fires 'zoomend'
+	 * (Map.js:1374-1403). So `rect.pY1` inside here already answers at the NEW
+	 * scale while scrollProperties.viewY is still a number written at the OLD
+	 * one -- mixing the two is the bug, not the fix. Twips are the same at both
+	 * scales, which is why the anchor is computed there.
+	 */
+	private captureScrollAnchor(): FileBasedScrollAnchor | null {
+		const scale = this.layoutTwipsToPixels || app.twipsToPixels;
+		if (!scale || this.documentRectangles.length === 0) return null;
+
+		const anchorTwips = this.scrollProperties.viewY / scale;
+
+		// First part whose bottom edge is still below the anchor. Past the end
+		// of the stack this leaves `part` at the last one, which is what the
+		// clamp in restoreScrollAnchor then pins to the bottom -- the case that
+		// used to intersect nothing and snap the deck back to slide 1.
+		let part = this.documentRectangles.length - 1;
+		for (let i = 0; i < this.documentRectangles.length; i++) {
+			if (anchorTwips < this.documentRectangles[i].y2) {
+				part = i;
+				break;
+			}
+		}
+
+		const rect = this.documentRectangles[part];
+		const fraction =
+			rect.height > 0
+				? Math.max(0, Math.min(1, (anchorTwips - rect.y1) / rect.height))
+				: 0;
+
+		return {
+			part: part,
+			fraction: fraction,
+			xTwips: this.scrollProperties.viewX / scale,
+		};
+	}
+
+	/*
+	 * Put the viewport back on the same part, at the same fraction into it,
+	 * against the rectangles that resetViewLayout() has just rebuilt.
+	 *
+	 * Google Slides is the reference and it is unambiguous here: changing the
+	 * zoom on a phone keeps you on the slide you were reading. It does not move
+	 * you to a different slide, and it does not throw you back to slide 1.
+	 *
+	 * The equality guard is load-bearing, not decorative. reset() is bound to
+	 * 'resize' as well as 'zoomend' (see the constructor), so this handler
+	 * writes two values it also reads, on an event that a phone fires
+	 * constantly -- keyboard, bottom sheet, rotation, retracting browser
+	 * chrome. On a resize with no zoom change the scale is unchanged, the
+	 * reconstruction is exact, and the guard makes the whole call a no-op: no
+	 * write to viewX/viewY, no recomputed scrollbar position, so nothing
+	 * downstream of scrollProperties can be woken by a resize that did not
+	 * actually move anything.
+	 */
+	private restoreScrollAnchor(anchor: FileBasedScrollAnchor | null): void {
+		if (!anchor || this.documentRectangles.length === 0) return;
+
+		const documentAnchor = this.getDocumentAnchorSection();
+		if (!documentAnchor) return;
+
+		const rect =
+			this.documentRectangles[
+				Math.min(anchor.part, this.documentRectangles.length - 1)
+			];
+
+		// Same clamp the scroll() path uses (see below), so an anchored restore
+		// and a user scroll can never disagree about where the end is.
+		const maxY = Math.max(0, this._viewSize.pY - documentAnchor.size[1]);
+		const maxX = Math.max(0, this._viewSize.pX - documentAnchor.size[0]);
+
+		const newViewY = Math.max(
+			0,
+			Math.min(
+				maxY,
+				Math.round(
+					(rect.y1 + anchor.fraction * rect.height) * app.twipsToPixels,
+				),
+			),
+		);
+		const newViewX = Math.max(
+			0,
+			Math.min(maxX, Math.round(anchor.xTwips * app.twipsToPixels)),
+		);
+
+		if (
+			newViewY === this.scrollProperties.viewY &&
+			newViewX === this.scrollProperties.viewX
+		)
+			return;
+
+		this.refreshScrollProperties();
+
+		if (newViewY !== this.scrollProperties.viewY) {
+			this.scrollProperties.viewY = newViewY;
+			this.scrollProperties.startY =
+				this._viewSize.pY > 0
+					? Math.round(
+							(newViewY / this._viewSize.pY) *
+								this.scrollProperties.verticalScrollLength,
+						)
+					: 0;
+		}
+
+		if (newViewX !== this.scrollProperties.viewX) {
+			this.scrollProperties.viewX = newViewX;
+			this.scrollProperties.startX =
+				this._viewSize.pX > 0
+					? Math.round(
+							(newViewX / this._viewSize.pX) *
+								this.scrollProperties.horizontalScrollLength,
+						)
+					: 0;
+		}
 	}
 
 	public reset(): void {
 		if (!app.map._docLayer || !app.map._docLayer._parts) return;
 
+		const anchor = this.captureScrollAnchor();
 		this.resetViewLayout();
+		this.restoreScrollAnchor(anchor);
+
 		app.layoutingService.appendLayoutingTask(() => this.updateViewData());
 	}
 
@@ -245,6 +522,23 @@ class ViewLayoutFileBased extends ViewLayoutNewBase {
 
 	protected updateViewData(): void {
 		this.commitVisibleAreaAndRequestTiles();
+	}
+
+	/*
+		scrollTo() below assigns scrollProperties.viewX/viewY outright, so that
+		pair -- not the viewed rectangle -- is the space its arguments live in.
+
+		The two are NOT interchangeable on this layout, and the gap is not
+		small. refreshVisibleAreaRectangleImpl builds _viewedRectangle as the
+		bounding box of every part the viewport intersects, so pY1 is the TOP
+		OF THE TOPMOST VISIBLE SLIDE: it is piecewise constant, it only moves
+		when a slide leaves the viewport, and viewY - pY1 runs from 0 up to a
+		whole slide pitch as you scroll through one slide. It is never
+		negative, so a pan that mistakes one for the other always lands SHORT,
+		i.e. scrolled back up the deck.
+	*/
+	public override getScrollOrigin(): number[] {
+		return [this.scrollProperties.viewX, this.scrollProperties.viewY];
 	}
 
 	public override scroll(pX: number, pY: number): boolean {

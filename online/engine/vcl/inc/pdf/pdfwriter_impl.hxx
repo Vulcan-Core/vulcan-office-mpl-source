@@ -1112,6 +1112,10 @@ private:
 
     /* true if PDF/A-1a or PDF/A-1b is output */
     bool m_bIsPDF_A1 = false;
+    /// Inside a VULCAN_INVISIBLE_TEXT_BEGIN/END metafile bracket (a
+    /// hidden-ink OCR line, PDFExtOutDevData::GetIsExportInvisibleText): text
+    /// is written in render mode 3 (invisible) and nothing else is drawn.
+    sal_Int32 m_nInvisibleTextDepth = 0;
     /* true if PDF/A-2a is output */
     bool m_bIsPDF_A2 = false;
     /* true if PDF/A-3 is output */

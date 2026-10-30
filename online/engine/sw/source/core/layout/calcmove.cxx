@@ -41,6 +41,7 @@
 #include <sectfrm.hxx>
 #include <dbg_lay.hxx>
 
+#include <comphelper/kit.hxx>
 #include <sortedobjs.hxx>
 #include <layouter.hxx>
 #include <flyfrms.hxx>
@@ -865,7 +866,12 @@ void SwPageFrame::MakeAll(vcl::RenderContext* pRenderContext)
                 if (pSh && pSh->GetViewOptions()->getBrowseMode())
                 {
                     // In BrowseView, we use fixed settings
-                    const Size aBorder = pRenderContext->PixelToLogic( pSh->GetBrowseBorder() );
+                    // VULCAN (R6-15): the border follows the FORMATTING
+                    // reference device, not pRenderContext -- under COKit a
+                    // CalcLayout/idle pass can run while mpOut is a tile
+                    // VirtualDevice, and a page width must not depend on a
+                    // tile's rasterisation scale (GetBrowseBorderTwips).
+                    const Size aBorder = pSh->GetBrowseBorderTwips();
                     const tools::Long nTop    = pAttrs->CalcTopLine()   + aBorder.Height();
                     const tools::Long nBottom = pAttrs->CalcBottomLine()+ aBorder.Height();
 
@@ -896,7 +902,9 @@ void SwPageFrame::MakeAll(vcl::RenderContext* pRenderContext)
                             // #i35143# - If second page frame
                             // exists, the first page doesn't have to fulfill the
                             // visible area.
-                            if ( !GetPrev() && !GetNext() )
+                            // Vulcan fork: nor under COKit, where VisArea() is the whole layout — a single page could
+                            // never shrink below the document's previous height (see SwFrame::AdjustNeighbourhood).
+                            if ( !GetPrev() && !GetNext() && !comphelper::COKit::isActive() )
                             {
                                 nBot = std::max( nBot, pSh->VisArea().Height() );
                             }
@@ -1224,7 +1232,12 @@ void SwContentFrame::MakePrtArea( const SwBorderAttrs &rAttrs )
                 }
             }
 
-            const Size aBorder = pSh->GetOut()->PixelToLogic( pSh->GetBrowseBorder() );
+            // VULCAN (R6-15): NOT GetOut() -- during PaintTile mpOut is the
+            // tile VirtualDevice (ungated), so a border converted through it
+            // scales with the tile's rasterisation and this clamp would
+            // narrow the paragraph budget on nothing but which tile happened
+            // to be painting when formatting ran (GetBrowseBorderTwips).
+            const Size aBorder = pSh->GetBrowseBorderTwips();
             tools::Long nWidth = nWidthArea - 2 * ( IsVertical() ? aBorder.Height() : aBorder.Width() );
             nWidth -= aRectFnSet.GetLeft(getFramePrintArea());
             nWidth -= rAttrs.CalcRightLine();

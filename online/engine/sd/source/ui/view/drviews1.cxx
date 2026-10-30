@@ -27,6 +27,11 @@
 #include <rtl/ref.hxx>
 
 #include <svx/svxids.hrc>
+#include <svx/sdr/contact/viewcontact.hxx>
+#include <svx/sdr/contact/viewobjectcontact.hxx>
+#include <svx/sdrpagewindow.hxx>
+#include <svx/svditer.hxx>
+#include <svx/svdobj.hxx>
 #include <svx/svdpagv.hxx>
 #include <sfx2/viewfrm.hxx>
 #include <sfx2/bindings.hxx>
@@ -791,17 +796,21 @@ bool DrawViewShell::SelectPage(sal_uInt16 nPage, sal_uInt16 nSelect)
     sd::slidesorter::SlideSorterViewShell* pSlideSorterVS
         = sd::slidesorter::SlideSorterViewShell::GetSlideSorter(GetViewShellBase());
 
+    // This is the COKit selectPart() path. Selection is additive; setPart()
+    // is the separate API for changing the current slide.
     if (nSelect == 1 || (/*Toggle*/ nSelect > 1 && !pPage->IsSelected()))
     {
         GetDoc()->SetSelected(pPage, true); // Select.
         if (pSlideSorterVS)
-            pSlideSorterVS->GetSlideSorter().GetController().GetPageSelector().SelectPage(nPage);
+            pSlideSorterVS->GetSlideSorter().GetController().GetPageSelector().SelectPage(
+                nPage, false);
     }
     else
     {
         GetDoc()->SetSelected(pPage, false); // Deselect.
         if (pSlideSorterVS)
-            pSlideSorterVS->GetSlideSorter().GetController().GetPageSelector().DeselectPage(nPage);
+            pSlideSorterVS->GetSlideSorter().GetController().GetPageSelector().DeselectPage(
+                nPage, false);
     }
 
     return true;
@@ -841,6 +850,31 @@ void notifyLinkAnnotations(const SfxViewShell* pViewShell, const SdPage* pPage)
     }
     OString aPayload = jsonWriter.finishAndGetAsOString();
     pViewShell->viewCallback(KIT_CALLBACK_STATE_CHANGED, aPayload);
+}
+
+/// Gives every object on the page view's page a view-object contact, with its range, in each
+/// window of the page view, as painting the page does. A change to an object invalidates the
+/// view only through these contacts.
+void createViewObjectContacts(SdrPageView* pPageView)
+{
+    const SdrPage* pPage = pPageView ? pPageView->GetPage() : nullptr;
+    if (!pPage)
+        return;
+
+    for (sal_uInt32 nWindow = 0; nWindow < pPageView->PageWindowCount(); ++nWindow)
+    {
+        SdrPageWindow* pPageWindow = pPageView->GetPageWindow(nWindow);
+        if (!pPageWindow)
+            continue;
+
+        sdr::contact::ObjectContact& rObjectContact = pPageWindow->GetObjectContact();
+        SdrObjListIter aIter(pPage, SdrIterMode::DeepWithGroups);
+        while (aIter.IsMore())
+        {
+            if (SdrObject* pObj = aIter.Next())
+                pObj->GetViewContact().GetViewObjectContact(rObjectContact).getObjectRange();
+        }
+    }
 }
 }
 
@@ -1133,6 +1167,13 @@ bool DrawViewShell::SwitchPage(sal_uInt16 nSelectedPage, bool bAllowChangeFocus,
             mpDrawView->HideSdrPage();
             maTabControl->SetCurPageId(maTabControl->GetPageId(nSelectedPage));
             mpDrawView->ShowSdrPage(mpActualPage);
+            // The page view ShowSdrPage made has no view-object contacts until the page is
+            // painted. The kit's client keeps the tiles it has of a slide it comes back to, so a
+            // change to one of the slide's objects, such as an Undo, would invalidate nothing and
+            // the client would keep showing the old content. Make the contacts the
+            // page's last paint had made.
+            if (comphelper::COKit::isActive())
+                createViewObjectContacts(mpDrawView->GetSdrPageView());
             if (bAllowChangeFocus)
                 GetViewShellBase().GetDrawController()->FireSwitchCurrentPage(mpActualPage);
 
@@ -1249,6 +1290,9 @@ bool DrawViewShell::SwitchPage(sal_uInt16 nSelectedPage, bool bAllowChangeFocus,
 
             sal_uInt16 nNum = pMaster->GetPageNum();
             mpDrawView->ShowSdrPage(mpDrawView->GetModel().GetMasterPage(nNum));
+            // As for a slide above.
+            if (comphelper::COKit::isActive())
+                createViewObjectContacts(mpDrawView->GetSdrPageView());
 
             if (bAllowChangeFocus)
                 GetViewShellBase().GetDrawController()->FireSwitchCurrentPage(pMaster);

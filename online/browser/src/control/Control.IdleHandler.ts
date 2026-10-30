@@ -65,7 +65,11 @@ class IdleHandler {
 		app.socket.sendMessage('commandvalues command=.uno:ViewAnnotations');
 	}
 
-	_activate() {
+	// Vulcan Office: @allowFocusGrab false reactivates without taking
+	// the caret, for the load path of a host that asked us not to
+	// (Vulcan_FocusPolicy). It defaults to the upstream grab, so the idle-resume
+	// and reconnect callers are unchanged.
+	_activate(allowFocusGrab: boolean = true) {
 		window.app.console.debug('IdleHandler: _activate()');
 
 		if (this._serverRecycling || this._documentIdle) {
@@ -80,6 +84,7 @@ class IdleHandler {
 			if (app.socket.connected()) {
 				app.socket.sendMessage('useractive');
 				this._active = true;
+				if (app.telemetry) app.telemetry.record('doc_active', {});
 
 				/*
 				  If we have the docLayer then refresh annotations now. If not then
@@ -91,6 +96,16 @@ class IdleHandler {
 				if (this.map._docLayer) {
 					this.map._docLayer.allowDrawing();
 					this.refreshAnnotations();
+
+					// Re-ask for the tiles we are looking at. Reactivation restores
+					// DRAWING but nothing re-requests CONTENT: _dim() tears down the
+					// prefetch timers and this path issues no tilecombine, so a
+					// document that idles out comes back with correct furniture --
+					// headers, gridlines, selection all repaint -- and permanently
+					// empty cells. Measured on a phone: 288 tiles in the store, 157
+					// holding content, ZERO holding a decoded bitmap, and tapping the
+					// "Idle document" overlay did not change that.
+					this.map._docLayer._requestNewTiles();
 				}
 				else {
 					this.map.once('doclayerinit', this.refreshAnnotations, this);
@@ -102,12 +117,19 @@ class IdleHandler {
 				}
 			} else {
 				this.map.loadDocument();
+				// Vulcan Office (R7): a view not connected yet has
+				// nothing to type into, and every mousemove and wheel over the
+				// document lands here while it reconnects, so on desktop Calc
+				// each one took the host's caret. The socket's open reactivates
+				// it (Socket._onSocketOpen) and makes the upstream grab there.
+				return false;
 			}
 		}
 
 		// Ideally instead of separate isAnyEdit check here, we could check isAnyEdit inside isAnyDialogOpen,
 		// but unfortunately that causes problem in _deactivate and unnecessary 'userinactive' message is sent
-		if (window.mode.isDesktop()
+		if (allowFocusGrab
+		&& window.mode.isDesktop()
 		&& !this.map.uiManager.isAnyDialogOpen()
 		&& !cool.Comment.isAnyEdit()
 		&& (this.map.formulabar && !this.map.formulabar.hasFocus())
@@ -167,7 +189,28 @@ class IdleHandler {
 			return;
 
 		this._active = false;
+		if (app.telemetry) app.telemetry.record('doc_idle', {});
 		var map = this.map;
+
+		// VULCAN (code review): waking a dimmed view is no
+		// gesture in this frame. The mouse only crossed the dim's overlay, yet
+		// two steps of the wake gave the keyboard to the document: the
+		// overlay's closeModal, whose close hands focus back to what had it
+		// when the dim opened (nothing in this frame, so the document), and
+		// the second restartConnectionFn below, run when the dim leaves the
+		// DOM with _active already true, which went on to the desktop Calc
+		// grab. On the vbox rig (#10704's image) a sheet the out-of-focus timer
+		// had dimmed took the keyboard from the agent composer that way, and
+		// what the person typed next went into a cell and was saved as their
+		// own edit. While the host owns the keyboard (Vulcan_FocusPolicy, or
+		// the embedded default Map.initialize sets) and this frame does not
+		// hold it, both leave focus where it is: the caret path's test
+		// (CanvasTileLayer._updateCursorAndOverlay). A click into the sheet
+		// still takes the keyboard; a top-level editor, or a frame that holds
+		// the keyboard, keeps the upstream grabs. The policy test comes first
+		// for the rigs that run this over a stub map.
+		const vulcanHostKeepsKeyboard = () =>
+			map._vulcanAutoFocusOnLoad === false && !document.hasFocus();
 
 		var restartConnectionFn = () => {
 			if (app.idleHandler._documentIdle)
@@ -177,7 +220,8 @@ class IdleHandler {
 				app.idleHandler._documentIdle = false;
 				app.setCursorVisibility(true);
 			}
-			return app.idleHandler._activate();
+			const allowFocusGrab = !vulcanHostKeepsKeyboard();
+			return app.idleHandler._activate(allowFocusGrab);
 		};
 
 		this.map._textInput.hideCursor();
@@ -202,7 +246,10 @@ class IdleHandler {
 			} else {
 				const overlayId = dialogId + '-overlay';
 				const overlay = document.getElementById(overlayId);
-				if (overlay) overlay.onmouseover = () => { restartConnection(); uiManager.closeModal(dialogId); };
+				if (overlay) overlay.onmouseover = () => {
+					restartConnection();
+					uiManager.closeModal(dialogId, vulcanHostKeepsKeyboard());
+				};
 				app.LOUtil.onRemoveHTMLElement(overlay, restartConnection);
 			}
 		});

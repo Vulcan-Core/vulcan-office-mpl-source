@@ -989,6 +989,17 @@ bool Dialog::ImplStartExecute(bool async)
             return false;
 
         case DialogCancelMode::KitSilent:
+#ifdef IOS
+            // Vulcan (B-0147): the in-process iOS engine loads every document with Batch (a silent load, CSV import
+            // options auto-accepted), and that sets this mode for the life of the process, which hosts every document.
+            // Its host answers an ASYNC modal dialog raised by a document view (a messagebox becomes a native alert,
+            // anything else gets the close verb), but it can never answer a synchronous Execute(): its nested poll
+            // runs no jobs. So keep cancelling those, and anything notified through the Application (there is no view
+            // to show it in), and let a view's async dialog run, as it does in the web client's session, which never
+            // loads with Batch.
+            if (async && GetKitNotifier() != static_cast<const vcl::ICOKitNotifier*>(GetpApp()))
+                break;
+#endif
             return false;
 
         default: // default cannot happen

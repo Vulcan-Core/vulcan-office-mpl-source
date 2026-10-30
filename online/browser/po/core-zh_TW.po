@@ -41,7 +41,7 @@ msgid ""
 "Technology, provided by Collabora Productivity. See "
 "https://collaboraoffice.com"
 msgstr ""
-"Collabora Office 是一套以 LibreOffice 技術為基礎開發的辦公室生產力套裝軟體，由 Collabora "
+"Vulcan Office 是一套以 Vulcan Office 技術為基礎開發的辦公室生產力套裝軟體，由 Vulcan Office "
 "Productivity 提供。請見 https://collaboraoffice.com"
 
 #. 4rBwc
@@ -165,7 +165,7 @@ msgid ""
 "href=\"https://collaboraoffice.com\">https://CollaboraOffice.com/</a>."
 msgstr ""
 "要取得更多資訊，請造訪 ${PRODUCTNAME} 首頁：<a "
-"href=\"https://collaboraoffice.com\">https://CollaboraOffice.com/</a>."
+"href=\"https://collaboraoffice.com\">https://Vulcan OfficeOffice.com/</a>."
 
 #. SbQew
 #: chart2/inc/strings.hrc:51

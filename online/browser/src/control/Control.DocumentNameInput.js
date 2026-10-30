@@ -12,7 +12,7 @@
  * window.L.Control.DocumentNameInput
  */
 
-/* global $ _ */
+/* global app $ _ */
 window.L.Control.DocumentNameInput = window.L.Control.extend({
 
 	onAdd: function (map) {
@@ -27,7 +27,10 @@ window.L.Control.DocumentNameInput = window.L.Control.extend({
 			label.textContent = _('Document name');
 
 		map.on('doclayerinit', this.onDocLayerInit, this);
-		map.on('wopiprops', this.onWopiProps, this);
+		// app.onWopiProps replays CheckFileInfo props that arrived before
+		// this control was added and fires on arrival/refresh otherwise
+		// (added once, never removed, so no off() is needed).
+		app.onWopiProps(this.onWopiProps.bind(this));
 	},
 
 	documentNameConfirm: function(value) {

@@ -157,7 +157,8 @@ void SelectionManager::DeleteSelectedNormalPages (const ::std::vector<SdPage*>& 
         rtl::Reference<SdXImpressDocument> xDrawPagesSupplier( mrSlideSorter.GetModel().GetDocument()->getUnoModel() );
         if (!xDrawPagesSupplier)
             return;
-        Reference<drawing::XDrawPages> xPages( xDrawPagesSupplier->getDrawPages(), UNO_SET_THROW );
+        rtl::Reference<SdDrawPagesAccess> xPages(xDrawPagesSupplier->getSdDrawPages());
+        std::vector<Reference<drawing::XDrawPage>> aPagesToDelete;
 
         // Iterate over all pages that were selected when this method was called
         // and delete the draw page the notes page. The iteration is done in
@@ -166,15 +167,12 @@ void SelectionManager::DeleteSelectedNormalPages (const ::std::vector<SdPage*>& 
         ::std::vector<SdPage*>::const_reverse_iterator aI;
         for (aI=rSelectedPages.rbegin(); aI!=rSelectedPages.rend(); ++aI)
         {
-            // Do not delete the last slide in the document.
-            if (xPages->getCount() <= 1)
-                break;
-
             const sal_uInt16 nPage (model::FromCoreIndex((*aI)->GetPageNum()));
 
             Reference< XDrawPage > xPage( xPages->getByIndex( nPage ), UNO_QUERY_THROW );
-            xPages->remove(xPage);
+            aPagesToDelete.push_back(xPage);
         }
+        xPages->removePages(aPagesToDelete);
     }
     catch( Exception& )
     {

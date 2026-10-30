@@ -930,7 +930,7 @@ class LOUtil {
 					// Enable both SVG and HTML profiles to support HTML content inside foreignObject
 					USE_PROFILES: { svg: true, svgFilters: true, html: true },
 					ADD_TAGS: ['foreignObject'],
-					// Allow ODF namespaced attributes used by LibreOffice SVG export.
+					// Allow ODF namespaced attributes used by the engine's SVG export.
 					// See: core/filter/source/svg/svgexport.cxx for the full list.
 					ADD_ATTR: [
 						'ooo:background-visibility',
@@ -969,7 +969,7 @@ class LOUtil {
 
 	// Mirror data-cooltip onto aria-label so the accessible name
 	// matches the visible tooltip, even when branding overrides
-	// data-cooltip after load (e.g. to "Collabora Online"). When
+	// data-cooltip after load (e.g. to a full product name). When
 	// branding also sets an href, target="_blank" takes effect and
 	// the link opens a new tab, so announce that to screen readers.
 	public static syncDocumentLogoAriaLabel(docLogo: HTMLElement): void {

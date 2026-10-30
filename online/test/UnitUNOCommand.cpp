@@ -15,6 +15,8 @@
 
 #include <config.h>
 
+#include <algorithm>
+#include <map>
 #include <memory>
 #include <ostream>
 #include <set>
@@ -27,14 +29,31 @@
 
 #include <Unit.hpp>
 #include <helpers.hpp>
+#include <wsd/COOLWSD.hpp>
 
 namespace
 {
-void testStateChanged(const std::string& filename, std::set<std::string>& commands)
+void testStateChanged(const std::string& filename, std::set<std::string>& commands,
+                      const std::map<std::string, std::string>& exactPayloads = {})
 {
     const auto testname = "stateChanged_" + filename + ' ';
 
     std::regex reUno("\\.[a-zA-Z]*\\:[a-zA-Z]*\\=");
+    std::set<std::string> exactPayloadCommandsSeen;
+    std::set<std::string> exactPayloadsMatched;
+
+    const auto recordState = [&](const std::string& commandName, const std::string& state)
+    {
+        commands.erase(commandName + "=");
+
+        const auto exactPayload = exactPayloads.find(commandName);
+        if (exactPayload != exactPayloads.end())
+        {
+            exactPayloadCommandsSeen.insert(commandName);
+            if (state == exactPayload->second)
+                exactPayloadsMatched.insert(commandName);
+        }
+    };
 
     std::shared_ptr<SocketPoll> socketPoll = std::make_shared<SocketPoll>("UnitEachView");
     socketPoll->startThread();
@@ -52,7 +71,9 @@ void testStateChanged(const std::string& filename, std::set<std::string>& comman
                 const Poco::Dynamic::Var var = parser.parse(json);
                 const auto& root = var.extract<Poco::JSON::Object::Ptr>();
                 std::string commandName = root->get("commandName").toString();
-                commands.erase(commandName + "=");
+                const std::string state =
+                    root->has("state") ? root->get("state").toString() : std::string();
+                recordState(commandName, state);
             }
             else
             {
@@ -60,20 +81,42 @@ void testStateChanged(const std::string& filename, std::set<std::string>& comman
                 if (std::regex_search(msg, matches, reUno))
                 {
                     // Payload is a commandName=...status... plain text format.
-                    commands.erase(matches[0].str());
+                    const std::string commandPrefix = matches[0].str();
+                    const std::string commandName =
+                        commandPrefix.substr(0, commandPrefix.size() - 1);
+                    const std::string state = msg.substr(matches.position() + matches.length());
+                    recordState(commandName, state);
                 }
             }
 
-            return !commands.empty();
+            return !commands.empty() || exactPayloadsMatched.size() != exactPayloads.size();
         });
 
-    if (!commands.empty())
+    const bool hasWrongExactPayload =
+        std::any_of(exactPayloads.begin(), exactPayloads.end(), [&](const auto& exactPayload)
+        {
+            return exactPayloadCommandsSeen.contains(exactPayload.first) &&
+                   !exactPayloadsMatched.contains(exactPayload.first);
+        });
+
+    if (!commands.empty() || hasWrongExactPayload)
     {
         std::ostringstream ostr;
-        ostr << filename << " : Missing Uno Commands: " << std::endl;
-        for (auto & itUno : commands)
+        if (!commands.empty())
         {
-            ostr << itUno << std::endl;
+            ostr << filename << " : Missing Uno Commands: " << std::endl;
+            for (const auto& itUno : commands)
+                ostr << itUno << std::endl;
+        }
+
+        for (const auto& [commandName, expectedPayload] : exactPayloads)
+        {
+            if (exactPayloadCommandsSeen.contains(commandName) &&
+                !exactPayloadsMatched.contains(commandName))
+            {
+                ostr << filename << " : Wrong Uno Command payload: " << commandName
+                     << " expected " << expectedPayload << std::endl;
+            }
         }
 
         LOK_ASSERT_FAIL(ostr.str());
@@ -92,6 +135,15 @@ public:
     UnitUNOCommand()
         : UnitWSD("UnitUNOCommand")
     {
+    }
+
+    void configure(Poco::Util::LayeredConfiguration& config) override
+    {
+        UnitWSD::configure(config);
+        // The notebookbar binds NumberFormatType by itself, masking whether
+        // doc_iniUnoCommands registered it for a headless/classic client.
+        config.setString("user_interface.mode", "classic");
+        COOLWSD::UserInterface = "classic";
     }
 
     void invokeWSDTest() override;
@@ -167,6 +219,12 @@ UnitBase::TestResult UnitUNOCommand::testStateUnoCommandCalc()
 {
     std::set<std::string> calcCommands
     {
+        ".uno:AlignLeft=",
+        ".uno:AlignHorizontalCenter=",
+        ".uno:AlignRight=",
+        ".uno:AlignTop=",
+        ".uno:AlignVCenter=",
+        ".uno:AlignBottom=",
         ".uno:BackgroundColor=",
         ".uno:Bold=",
         ".uno:CenterPara=",
@@ -210,12 +268,22 @@ UnitBase::TestResult UnitUNOCommand::testStateUnoCommandCalc()
         ".uno:ToggleMergeCells=",
         ".uno:NumberFormatCurrency=",
         ".uno:NumberFormatPercent=",
-        ".uno:NumberFormatDate="
+        ".uno:NumberFormatDate=",
+        ".uno:NumberFormatType="
     };
 
     try
     {
-        testStateChanged("empty.ods", calcCommands);
+        const std::map<std::string, std::string> calcAlignmentPayloads
+        {
+            { ".uno:AlignLeft", "false" },
+            { ".uno:AlignHorizontalCenter", "false" },
+            { ".uno:AlignRight", "false" },
+            { ".uno:AlignTop", "false" },
+            { ".uno:AlignVCenter", "false" },
+            { ".uno:AlignBottom", "false" },
+        };
+        testStateChanged("empty.ods", calcCommands, calcAlignmentPayloads);
     }
     catch (const Poco::Exception& exc)
     {

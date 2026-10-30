@@ -7945,6 +7945,10 @@ void SwFrame::Retouch( const SwPageFrame * pPage, const SwRect &rRect ) const
  * consider the TextBox of this fly frame (if there is any) when determining
  * the background color, useful for automatic font color.
  *
+ * @param ppBrushFrame
+ * optional output parameter - the frame the background brush was found at;
+ * set only when one is found.
+ *
  * @return true, if a background brush for the frame is found
  */
 bool SwFrame::GetBackgroundBrush(
@@ -7953,7 +7957,8 @@ bool SwFrame::GetBackgroundBrush(
     std::optional<Color>& rxCol,
     SwRect &rOrigRect,
     bool bLowerMode,
-    bool bConsiderTextBox ) const
+    bool bConsiderTextBox,
+    const SwFrame** ppBrushFrame ) const
 {
     const SwFrame *pFrame = this;
     SwViewShell *pSh = getRootFrame()->GetCurrShell();
@@ -8095,6 +8100,8 @@ bool SwFrame::GetBackgroundBrush(
                 }
             }
 
+            if (ppBrushFrame)
+                *ppBrushFrame = pFrame;
             return true;
         }
 

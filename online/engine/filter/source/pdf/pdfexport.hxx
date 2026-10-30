@@ -44,6 +44,7 @@ private:
 
     bool                mbUseLosslessCompression;
     bool                mbReduceImageResolution;
+    bool                mbExportInvisibleText;
     bool                mbSkipEmptyPages;
     sal_Int32           mnMaxImageResolution;
     sal_Int32           mnQuality;

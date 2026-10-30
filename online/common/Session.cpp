@@ -54,6 +54,7 @@ Session::Session(const std::shared_ptr<ProtocolHandlerInterface>& protocol, cons
     , _haveDocPassword(false)
     , _isDocPasswordProtected(false)
     , _accessibilityState(false)
+    , _vulcanPhoneChrome(false)
     , _disableVerifyHost(false)
 {
 }
@@ -90,6 +91,9 @@ bool Session::sendBinaryFrame(const char *buffer, int length)
 
 void Session::parseDocOptions(const StringVector& tokens, int& part, std::string& timestamp)
 {
+    // Fail closed when an older/reused client omits the fork-specific marker.
+    _vulcanPhoneChrome = false;
+
     // First token is the "load" command itself.
     std::size_t offset = 1;
     if (tokens.size() > 2 && tokens[1].find("part=") == 0)
@@ -298,6 +302,11 @@ void Session::parseDocOptions(const StringVector& tokens, int& part, std::string
         else if (name == "accessibilityState")
         {
             _accessibilityState = value == "true";
+            ++offset;
+        }
+        else if (name == "vulcanPhoneChrome")
+        {
+            _vulcanPhoneChrome = value == "true";
             ++offset;
         }
         else if (name == "isAllowChangeComments")

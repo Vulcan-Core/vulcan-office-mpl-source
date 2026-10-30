@@ -292,10 +292,18 @@ namespace COOLProtocol
         // These keywords are chosen to cover the largest set of
         // commands that may potentially modify the document.
         // We need to assume modification rather than not.
+        // VULCAN: removetextcontext is how the client sends
+        // Backspace and Delete (TextInput, from the browser's input event,
+        // never as a 'key' frame), and Core runs it as those keys, so it
+        // deletes a whole selection. Left out, a deletion-only edit never set
+        // the sticky human-edit bit: its saves went up as
+        // IsModifiedByUser=false and were declined, and the deletion surfaced
+        // later inside whatever unrelated save first set the bit.
         if (tokens.equals(0, "key") || tokens.equals(0, "outlinestate") ||
             tokens.equals(0, "paste") || tokens.equals(0, "insertfile") ||
             tokens.equals(0, "textinput") || tokens.equals(0, "windowkey") ||
-            tokens.equals(0, "windowmouse") || tokens.equals(0, "windowgesture"))
+            tokens.equals(0, "windowmouse") || tokens.equals(0, "windowgesture") ||
+            tokens.equals(0, "removetextcontext"))
         {
             return true;
         }
@@ -310,7 +318,59 @@ namespace COOLProtocol
                    !tokens.equals(1, ".uno:ChangeTheme") &&
                    !tokens.equals(1, ".uno:ShowRuler") &&
                    !tokens.equals(1, ".uno:QuickFind") &&
+                   // VULCAN (Lane W): the browse-mode reflow width. A pure
+                   // layout hint in twips -- it writes no document content and
+                   // no document setting; SwView::Execute stores it on the
+                   // view shells and invalidates the layout, nothing else.
+                   //
+                   // It has to be here because of how OFTEN it arrives. The
+                   // client re-states the width on every zoom and every
+                   // resize, and on a phone a resize is the browser chrome
+                   // retracting as you scroll. Left in the default
+                   // "everything modifies" bucket, a reader who only scrolls
+                   // and pinches keeps calling
+                   // updateLastModifyingActivityTime(), i.e. a READING gesture
+                   // presents as editing activity and holds the document out
+                   // of idle unload.
+                   !tokens.startsWith(1, ".uno:BrowseWidth") &&
                    !tokens.equals(1, ".uno:CopySlide");
+        }
+
+        return false;
+    }
+
+    /// VULCAN: whether the input can delete text the person sees: a
+    /// Backspace or Delete (as removetextcontext or a key frame), typing or a
+    /// paste over a selection, a cut, an undo or redo, or a delete command.
+    /// Navigation, selection, zoom and formatting cannot. The WOPI host parks a
+    /// Word save that empties table rows and writes nothing new, the shape of
+    /// the engine's damage at load, unless such input came first.
+    inline bool tokenIndicatesDeletingInput(const StringVector& tokens)
+    {
+        if (tokens.equals(0, "removetextcontext") || tokens.equals(0, "textinput") ||
+            tokens.equals(0, "paste"))
+        {
+            return true;
+        }
+
+        if (tokens.equals(0, "key"))
+        {
+            // css::awt::Key codes, under the KEY_MOD1 (0x2000) modifier bit.
+            int key = 0;
+            if (!tokens.equals(1, "type=input") || !getTokenInteger(tokens, "key", key))
+                return false;
+            const int code = key & 0x0FFF;
+            const bool mod1 = (key & 0x2000) != 0;
+            return code == 1283 /* BACKSPACE */ || code == 1286 /* DELETE */ ||
+                   (mod1 && (code == 535 /* X */ || code == 533 /* V */ ||
+                             code == 537 /* Z */ || code == 536 /* Y */));
+        }
+
+        if (tokens.size() > 1 && tokens.equals(0, "uno"))
+        {
+            return tokens.startsWith(1, ".uno:Del") || tokens.startsWith(1, ".uno:Paste") ||
+                   tokens.equals(1, ".uno:Cut") || tokens.equals(1, ".uno:SwBackspace") ||
+                   tokens.equals(1, ".uno:Undo") || tokens.equals(1, ".uno:Redo");
         }
 
         return false;

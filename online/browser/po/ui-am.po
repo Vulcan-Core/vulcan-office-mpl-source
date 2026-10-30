@@ -7087,7 +7087,7 @@ msgstr ""
 
 #, fuzzy
 #~ msgid "Oops, there is a problem connecting to Collabora Online : "
-#~ msgstr "ውይ! ችግር ተፈጥሯል በ መገናኘት ላይ እንዳለ ከ LibreOffice በ መስመር ላይ : "
+#~ msgstr "ውይ! ችግር ተፈጥሯል በ መገናኘት ላይ እንዳለ ከ Vulcan Office በ መስመር ላይ : "
 
 #~ msgid "Number of views"
 #~ msgstr "የ መመልከቻ ቁጥር"

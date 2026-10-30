@@ -4,7 +4,7 @@
 	 class="icn icn--highlight-color-line"
      d="m 2.5,11.5 h 19"
      fill="none"
-     stroke="#1e8bcd" 
+     stroke="currentColor" 
 	 stroke-linecap="round" 
 	 stroke-linejoin="round"
      />

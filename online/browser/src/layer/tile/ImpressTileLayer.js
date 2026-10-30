@@ -12,7 +12,7 @@
  * Impress tile layer is used to display a presentation document
  */
 
-/* global app $ cool RenderManager ViewLayoutBase ViewLayoutFileBased */
+/* global app $ _ cool RenderManager ViewLayoutBase ViewLayoutFileBased VulcanImpressAccessibility VulcanPdfCanvas */
 
 // Single source of truth for Impress view modes. Keyed by the core
 // 'contextchange' context. 'mode' is the persisted string, 'uno' enters the
@@ -50,9 +50,10 @@ window.L.ImpressTileLayer = window.L.CanvasTileLayer.extend({
 		// Before this instance is created, app.file.readOnly and app.file.editComments variables are set.
 		// If document is on read only mode, we will draw all parts at once.
 		// Let's call default view the "part based view" and new view the "file based view".
-		// On small-screen devices and tablets, Permission.js sets the UI in read-only mode
-		// until the user taps #mobile-edit-button. Start in fileBasedView so the user gets
-		// endless slide scrolling while viewing.
+		// On small-screen devices and tablets, initialize in the safe stacked
+		// layout. A writable tablet's initial edit permission synchronously flips
+		// it to partBasedView through onUpdatePermission; an explicit startreadonly
+		// decision can therefore stay stacked without computing pre-status bounds.
 		var mobileViewing =
 			window.mode.isSmallScreenDevice() || window.mode.isTablet();
 		if (app.file.readOnly || mobileViewing) app.file.fileBasedView = true;
@@ -221,6 +222,17 @@ window.L.ImpressTileLayer = window.L.CanvasTileLayer.extend({
 		map.addControl(this._preview);
 		map.on('updateparts', this.onUpdateParts, this);
 		map.on('commandstatechanged', this._onSlideSectionsCommandState, this);
+		// Both events, because they cover disjoint halves of "the slide
+		// changed": 'updateparts' is the explicit route (Parts.js:115 on
+		// setPart, _onStatusMsg:532 at load and on any reshape) and 'setpart'
+		// is the free-scroll route (CanvasTileLayer._checkSelectedPart:4550,
+		// which is the ONLY thing that moves the current slide while you thumb
+		// through the read posture, and it does not fire 'updateparts').
+		// Registered unconditionally and gated inside the handler, the same
+		// shape as onUpdatePermission above.
+		map.on('updateparts setpart', this._updateSlideAccessibleName, this);
+		this._vulcanSlideAccessibility = new VulcanImpressAccessibility(map, this);
+		this._vulcanSlideAccessibility.attach();
 		app.events.on('updatepermission', this.onUpdatePermission.bind(this));
 
 		if (!map._docPreviews)
@@ -281,6 +293,21 @@ window.L.ImpressTileLayer = window.L.CanvasTileLayer.extend({
 	onRemove: function () {
 		clearTimeout(this._previewInvalidator);
 		this._map.off('commandstatechanged', this._onSlideSectionsCommandState, this);
+		this._map.off('updateparts setpart', this._updateSlideAccessibleName, this);
+		if (this._vulcanSlideAccessibility) {
+			this._vulcanSlideAccessibility.detach();
+			this._vulcanSlideAccessibility = null;
+		}
+	},
+
+	_onInvalidateTilesMsg: function (textMsg) {
+		var command = window.L.CanvasTileLayer.prototype._onInvalidateTilesMsg.call(
+			this,
+			textMsg,
+		);
+		if (this._vulcanSlideAccessibility)
+			this._vulcanSlideAccessibility.onPartInvalidated(command && command.part);
+		return command;
 	},
 
 	_openMobileWizard: function(data) {
@@ -292,6 +319,37 @@ window.L.ImpressTileLayer = window.L.CanvasTileLayer.extend({
 			return;
 
 		app.sectionContainer.getSectionWithName(app.CSections.CommentList.name).onPartChange();
+	},
+
+	// While VulcanImpressAccessibility is waiting for authoritative semantic
+	// HTML, the canvas remains exposed as the fallback viewing surface. Keep
+	// that fallback named with the exact current slide position. Once fresh
+	// semantics arrive, the controller hides this canvas from the accessibility
+	// tree and the sibling region carries the same label plus slide structure.
+	_updateSlideAccessibleName: function () {
+		if (!this._vulcanPhoneChrome() || !this.isImpress())
+			return;
+
+		var canvas = document.getElementById('document-canvas');
+		if (!canvas)
+			return;
+
+		var count = this._parts;
+		var index = this._selectedPart;
+		if (!(count > 0) || !(index >= 0) || index >= count)
+			return;
+
+		// setAttribute rather than the .ariaLabel IDL property the
+		// construction site uses: ARIA reflection is Safari 16.4+, and on an
+		// older iOS the assignment is taken as a plain expando and exposes no
+		// accessible name at all. Same reason the rest of the tree writes
+		// aria-* through setAttribute.
+		canvas.setAttribute(
+			'aria-label',
+			_('Slide {0} of {1}')
+				.replace('{0}', String(index + 1))
+				.replace('{1}', String(count)),
+		);
 	},
 
 	onUpdatePermission: function (e) {
@@ -332,6 +390,126 @@ window.L.ImpressTileLayer = window.L.CanvasTileLayer.extend({
 		app.activeDocument.activeLayout.viewSize =
 			app.activeDocument.fileSize.clone();
 		this._updateMaxBounds(true, true);
+		this._vulcanReanchorPartBasedFlip();
+		this._refreshAnnotationsForViewMode();
+	},
+
+	/*
+		FIT-AT-FLIP. The read -> edit posture flip above changes the coordinate
+		space (stacked file extent -> one slide) but used to leave two PRE-FLIP
+		origins armed, and the chrome change that follows every flip
+		(stampReadPosture -> #document-container resize -> _syncTileContainerSize)
+		then reconciled the fresh layout against both of them:
+
+		- the Leaflet center, still N slide-heights deep in the STACKED space.
+		  _syncTileContainerSize ends with setView(getCenter()), which re-imposes
+		  that stale center on the collapsed maxBounds; _limitCenter clamps it to
+		  an edge, not to the slide.
+		- the read posture's caret (app.file.textCursor + its marker), captured
+		  under fileBasedView. The resize checks scroll "the cursor" back into
+		  view (_mobileChecksAfterResizeEvent -> _onUpdateCursor(true) ->
+		  scrollToPos; _nonDesktopChecksAfterResizeEvent -> caret reveal /
+		  panTo), dragging the view toward a caret that was never on-screen in
+		  the read posture. Measured on prod (robert-08 + posture_flip_ms,
+		  8/24): the keyboard provided the resize and panTo panned BOTH axes to
+		  the phantom caret -- the slide landed cropped off-screen LEFT by the
+		  caret offset (117 CSS px in the rrweb trace). The same stale caret
+		  also re-raised the keyboard through _updateCursorAndOverlay's
+		  map.focus(true), around Permission.js's focus-without-keyboard entry.
+
+		So the flip itself now retires both origins:
+
+		1. The caret. Edit entry opens with NO text target (Permission.js), so
+		   until the user taps into text a caret here is definitionally the
+		   read posture's leftover; core resends cursorvisible/invalidatecursor
+		   for any real caret. Same client-side clear Socket.ts uses for
+		   presentations on reconnect. _onUpdateCursor(false) -- scroll
+		   explicitly refused -- detaches the marker and hides the overlay
+		   without letting the stale rectangle become a scroll target.
+		2. The view. Re-seat on the center of the collapsed extent, through the
+		   reset path so zoom and pixel origin are set together
+		   (VulcanImpressTextEntry.restore's exactness argument). maxBounds are
+		   already collapsed by _updateMaxBounds above, so _limitCenter clamps
+		   against the SINGLE slide.
+
+		Guards: the caller is already mobile-only (onUpdatePermission); part
+		dimensions can be absent before the first status (tablet edit-at-load
+		flips synchronously during init), and there the initial fit anchors the
+		view instead.
+	*/
+	_vulcanReanchorPartBasedFlip: function () {
+		if (!this._map || !this._map._docLoaded) return;
+		if (!(this._partWidthTwips > 0) || !(this._partHeightTwips > 0)) return;
+
+		app.setCursorVisibility(false);
+		this._onUpdateCursor(/* scroll */ false);
+
+		var centerPx = new cool.Point(
+			app.activeDocument.fileSize.pX / app.dpiScale / 2,
+			app.activeDocument.fileSize.pY / app.dpiScale / 2,
+		);
+		this._map.setView(
+			this._map.unproject(centerPx),
+			this._map.getZoom(),
+			/* reset */ true,
+		);
+	},
+
+	/*
+		🔴 COMMENT ANCHORS ARE BAKED FOR ONE VIEW MODE AND THIS FLIP CHANGES IT.
+
+		Core sends every Impress comment in its OWN PART's coordinates.
+		fileBasedView stacks all parts vertically, so CommentListSection has to
+		push each comment down by the height of everything above it: that is
+		`adjustCommentFileBasedView` (CommentListSection.ts:2289), and it
+		MUTATES the imported record in place -- `comment.anchorPos[1] +=
+		yAddition` (:2315), plus rectangle, rectangles and rectanglesOriginal
+		(:2309-2320). partBasedView takes the other branch,
+		`adjustCommentNormal` (:2336), which re-derives anchorPos from the raw
+		string and adds nothing. `adjustComment` (:2374) picks between them off
+		`app.file.fileBasedView` -- AT IMPORT TIME, once.
+
+		The two functions on either side of this comment change that flag, and
+		before this line nothing re-derived the anchors. So on a phone, which
+		imports its comments during the read posture (fileBasedView is on from
+		initialize, :56-58), tapping "Edit slide" left every comment carrying a
+		stacked offset while the canvas collapsed to a single slide:
+
+		  - Comment.updatePosition (CommentSection.ts:880-891) hands
+		    `data.anchorPos` straight to the marker sub-section, so the badge
+		    for a comment on slide N is placed N slide-heights BELOW the only
+		    slide there is. Slide 1 (yAddition 0) is fine; every other slide's
+		    badge is off the document extent, unreachable by scrolling, gone.
+		    Google ships that badge -- google-slides.json, "Comment badge and
+		    thread browsing": "A comments badge appears on slides that have
+		    threads".
+		  - Latent write half, stated but not the reason for this fix:
+		    CommentMarkerSubSection.sendAnnotationPositionChange:41-45 strips
+		    yAddition only `if (app.file.fileBasedView)`. A marker still
+		    reachable after the flip would therefore SAVE its stacked Y to
+		    .uno:EditAnnotation.
+
+		The fix is a re-import, not new arithmetic. Re-requesting the
+		annotations makes core resend the raw per-part records and
+		`adjustComment` then picks the branch matching the mode we just entered
+		-- correct in BOTH directions, and impossible to double-apply because
+		the objects are fresh off the socket rather than the mutated ones.
+		This is the tree's established refresh, not a new mechanism:
+		Map.js:422, Control.IdleHandler.ts:65 (every wake) and this file's own
+		_onStatusMsg (the `refreshAnnotation` send, :673) all send exactly this
+		message mid-session.
+
+		NOT phone-gated, deliberately. The defect is not the fork's and not the
+		phone's: `onUpdatePermission` runs this flip for `isSmallScreenDevice()
+		|| isTablet()` and the whole block is stock (blame: the vendor
+		snapshot, fe4f3eba30). Gating it to vulcan-mobile-chrome would fix the
+		phone and knowingly leave a tablet -- and a phone opened with
+		?vulcanChrome=desktop, which still takes this path -- with vanishing
+		comment badges. Recorded here so the scope is a decision on the record
+		rather than an oversight.
+	*/
+	_refreshAnnotationsForViewMode: function () {
+		app.socket.sendMessage('commandvalues command=.uno:ViewAnnotations');
 	},
 
 	// Total fileSize for filebased view: width = max width across parts (so
@@ -363,6 +541,62 @@ window.L.ImpressTileLayer = window.L.CanvasTileLayer.extend({
 		);
 	},
 
+	/*
+		Defense in depth for a MIS-DECLARED phone: ?vulcanChrome=desktop on a
+		small screen.
+
+		The host now always sends vulcanChrome=stock on phones, but the param
+		is an embedder contract and a third-party host (or a stale host build)
+		can still say 'desktop' to a device this file treats as mobile. In that
+		state the window.mode-gated init above still runs — fileBasedView
+		stacks every slide — while every vulcan-mobile-chrome-keyed gate reads
+		false, so CanvasTileLayer._recalcZoom skips its phone single-slide fit
+		substitution and contain-fits the STACKED extent. Its own comment
+		block states the consequence: yRatio overtakes xRatio at about four
+		slides and every deck of five or more opens pinned to the minZoom
+		floor — a ~205x115 CSS px slide, smaller the longer the deck. The
+		read posture (Permission.js) applies at first paint, so the deck OPENS
+		degenerate, not just after some interaction.
+
+		The clamp: in exactly that state, hand the parent fit the SINGLE
+		part's extent — the same substitution the phone path makes, expressed
+		as a scoped swap of app.activeDocument.fileSize around the super call
+		so the margin/ratio arithmetic stays the parent's and is never
+		duplicated here. The stacked fileSize is restored in finally; nothing
+		else reads it re-entrantly inside _recalcZoom.
+
+		DOWNGRADE ONLY, deliberately. The explicit param exists to defeat UA
+		lies (iPad desktop UA, sticky Request Desktop Website), so this must
+		never widen phone CHROME onto a desktop-declared session — it does not
+		touch chrome classes, tap grammar, or _vulcanPhoneChrome; it only
+		refuses the one fit the fork itself documents as backwards. Term by
+		term: isImpress() keeps Draw's HEAD fit (Draw shares this layer);
+		isSmallScreenDevice() is false on desktops and real tablets, so they
+		keep the deck-fit; the class check makes this a no-op whenever the
+		chrome and the device agree (the phone path already substitutes); the
+		fileBasedView + part-dimension terms are the same guards the phone
+		substitution carries. Substituting false for the whole predicate
+		reproduces HEAD exactly.
+	*/
+	_recalcZoom: function (newSize, bringCommentsIntoView, maxZoom) {
+		var misDeclaredPhone = this.isImpress() &&
+			window.mode.isSmallScreenDevice() &&
+			!document.documentElement.classList.contains('vulcan-mobile-chrome') &&
+			app.file.fileBasedView &&
+			this._partWidthTwips > 0 && this._partHeightTwips > 0;
+
+		if (!misDeclaredPhone)
+			return window.L.CanvasTileLayer.prototype._recalcZoom.call(this, newSize, bringCommentsIntoView, maxZoom);
+
+		var stackedFileSize = app.activeDocument.fileSize;
+		app.activeDocument.fileSize = new cool.SimplePoint(this._partWidthTwips, this._partHeightTwips);
+		try {
+			return window.L.CanvasTileLayer.prototype._recalcZoom.call(this, newSize, bringCommentsIntoView, maxZoom);
+		} finally {
+			app.activeDocument.fileSize = stackedFileSize;
+		}
+	},
+
 	_switchToFileBasedView: function () {
 		// fileSize stays as the canonical "total document extent" in twips for
 		// the consumers that still read it directly. The new ViewLayoutFileBased
@@ -374,6 +608,13 @@ window.L.ImpressTileLayer = window.L.CanvasTileLayer.extend({
 		app.file.fileBasedView = true;
 		this._updateMaxBounds(true, true);
 		RenderManager.updateFileBasedView();
+		// The other direction of the same anchor problem. Sent AFTER
+		// updateFileBasedView so the reply's adjustCommentFileBasedView finds
+		// ViewLayoutFileBased.getDocumentPartRect populated and takes the
+		// measured partRect.y1 branch (CommentListSection.ts:2296-2303) rather
+		// than falling back to the uniform index * partHeight estimate. See
+		// _refreshAnnotationsForViewMode.
+		this._refreshAnnotationsForViewMode();
 	},
 
 	_onCommandValuesMsg: function (textMsg) {
@@ -388,6 +629,10 @@ window.L.ImpressTileLayer = window.L.CanvasTileLayer.extend({
 			return;
 		}
 
+		if (values.type === 'pdfpagemodel') {
+			VulcanPdfCanvas.onPageModelResponse(values);
+			return;
+		}
 		if (values.type === 'vectorprimitives') {
 			RenderManager.handleVectorPrimitivesResponse(values);
 			return;

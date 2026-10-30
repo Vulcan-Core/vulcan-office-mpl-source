@@ -19,6 +19,7 @@
 
 #include "FontTable.hxx"
 #include <ooxml/resourceids.hxx>
+#include <o3tl/numeric.hxx>
 #include <utility>
 #include <vector>
 #include <sal/log.hxx>
@@ -284,11 +285,7 @@ EmbeddedFontHandler::~EmbeddedFontHandler()
              i < 16;
              ++i )
         {
-            int v1 = m_fontKey[ pos[ i ]];
-            int v2 = m_fontKey[ pos[ i ] + 1 ];
-            assert(( v1 >= '0' && v1 <= '9' ) || ( v1 >= 'A' && v1 <= 'F' ));
-            assert(( v2 >= '0' && v2 <= '9' ) || ( v2 >= 'A' && v2 <= 'F' ));
-            int val = ( v1 - ( v1 <= '9' ? '0' : 'A' - 10 )) * 16 + v2 - ( v2 <= '9' ? '0' : 'A' - 10 );
+            sal_uInt8 val = o3tl::convertToHex<sal_uInt8>(m_fontKey[pos[i]], m_fontKey[pos[i] + 1]);
             key[ i ] = val;
             key[ i + 16 ] = val;
         }

@@ -5159,7 +5159,7 @@ msgid ""
 "Unlinking citations will prevent Collabora Online from updating citations "
 "and bibliography in this document."
 msgstr ""
-"Door het ontkoppelen van citaten wordt voorkomen dat Collabora Online de "
+"Door het ontkoppelen van citaten wordt voorkomen dat Vulcan Office de "
 "citaten en bibliografie in dit document bijwerkt."
 
 #: src/control/HRuler.ts:321
@@ -6739,7 +6739,7 @@ msgstr "Dia’s bijwerken"
 #: src/map/handler/Map.VersionBar.js:50
 msgid "Your Collabora Online server needs updating. Version {0} is available."
 msgstr ""
-"Uw Collabora Online server moet worden bijgewerkt. Versie {0} is beschikbaar."
+"Uw Vulcan Office server moet worden bijgewerkt. Versie {0} is beschikbaar."
 
 #: src/map/handler/Map.WOPI.js:194
 msgid "Creating new file from template..."
@@ -7024,7 +7024,7 @@ msgstr "Geel idee"
 
 #: welcome/welcome.html%2Bhtml.head.title:9-3
 msgid "Collabora Online Welcome"
-msgstr "Collabora Online Welkom"
+msgstr "Vulcan Office Welkom"
 
 #: welcome/welcome.html%2Bhtml.body.div.div.div.div.h1:26-7
 msgid "Explore The New {coolversion}"
@@ -7033,7 +7033,7 @@ msgstr "Maak kennis met versie {coolversion}"
 #: welcome/welcome.html%2Bhtml.body.div.div.div.div.h2:27-7
 #: welcome/welcome.html%2Bhtml.body.div.div.div.div.h2:38-7
 msgid "Collabora Online Development Edition"
-msgstr "Collabora Online Ontwikkel Versie"
+msgstr "Vulcan Office Ontwikkel Versie"
 
 #: welcome/welcome.html%2Bhtml.body.div.div.div.div.p:28-7
 msgid ""
@@ -7063,7 +7063,7 @@ msgid ""
 msgstr ""
 "Lees de <a target=\"_blank\" rel=\"noopener\" href=\"https://www."
 "collaboraonline.com/code-26-04-release-notes/\">uitgavenotities van deze "
-"versie</a> en kom meer te weten over de meest recente Collabora Online "
+"versie</a> en kom meer te weten over de meest recente Vulcan Office "
 "Ontwikkel Versie, gericht op thuisgebruikers en kleine teams."
 
 #: welcome/welcome.html%2Bhtml.body.div.div.div.div.h1:48-7
@@ -7073,26 +7073,6 @@ msgstr "Help mee"
 #: welcome/welcome.html%2Bhtml.body.div.div.div.div.h2:49-7
 msgid "https://www.collaboraoffice.org/"
 msgstr "https://www.collaboraonline.org/"
-
-#: welcome/welcome.html%2Bhtml.body.div.div.div.div.p:50-7
-msgid ""
-"Are you interested in contributing but don’t know where to start? Head over "
-"to the <a target=\"_blank\" rel=\"noopener\" href=\"https://www."
-"collaboraoffice.org/post/build-code/\">step-by-step instructions</a> and "
-"build CODE from scratch. You can also help out with <a target=\"_blank\" "
-"rel=\"noopener\" href=\"https://www.collaboraoffice.org/post/translate/"
-"\">translations</a> or by <a target=\"_blank\" rel=\"noopener\" "
-"href=\"https://www.collaboraoffice.org/post/filebugs/\">filing a bug "
-"report</a> with all the essential steps on how to reproduce it."
-msgstr ""
-"Ben je geïnteresseerd om bij te dragen, maar weet je niet waar je moet "
-"beginnen? Ga naar de <a target=\"_blank\" rel=\"noopener\" href=\"https://www"
-".collaboraonline.org/post/build-code/\">stapsgewijze instructies</a> en bouw "
-"CODE vanaf de grond. Je kunt ook helpen met <a target=\"_blank\" rel="
-"\"noopener\" href=\"https://collaboraonline.github.io/post/translate/\""
-">vertalen</a> of met het <a target=\"_blank\" rel=\"noopener\" href=\"https"
-"://www.collaboraonline.org/post/filebugs/\">rapporteren van fouten</a> met "
-"essentiële stappen om die te reproduceren."
 
 #: welcome/welcome.html%2Bhtml.body.div.div:55-5
 msgid ""
@@ -7698,7 +7678,7 @@ msgstr ""
 #~ "opslaan en de snellere spellingcontrole."
 
 #~ msgid "Integrate Collabora Online into your webapp"
-#~ msgstr "Integreer Collabora Online in jouw webapplicatie"
+#~ msgstr "Integreer Vulcan Office in jouw webapplicatie"
 
 #~ msgid "Or get involved in the development"
 #~ msgstr "Of doe mee aan de ontwikkeling"
@@ -7714,7 +7694,7 @@ msgstr ""
 #~ "all the essential steps on how to reproduce it."
 #~ msgstr ""
 #~ "Leer meer over het integreren in jouw web applicatie met behulp van de <a "
-#~ "href=\"%coolSdkURL\" target=\"_blank\">Collabora Online SDK</a>. Of ga naar "
+#~ "href=\"%coolSdkURL\" target=\"_blank\">Vulcan Office SDK</a>. Of ga naar "
 #~ "de <a href=\"%coolStepByStepURL\" target=\"_blank\">stapsgewijze "
 #~ "instructies</a> en bouw CODE vanuit het niets. Je kunt ons ook helpen met <a"
 #~ " href=\"%coolTranslationsURL\" target=\"_blank\">vertalen</a> of met het <a "
@@ -7785,7 +7765,7 @@ msgstr ""
 #~ msgstr "De server wordt opnieuw opgestart en is snel weer beschikbaar"
 
 #~ msgid "Oops, there is a problem connecting to Collabora Online : "
-#~ msgstr "Oops, er is een probleem bij het verbinden met Collabora Online : "
+#~ msgstr "Oops, er is een probleem bij het verbinden met Vulcan Office : "
 
 #~ msgid "Number of views"
 #~ msgstr "Aantal weergaven"

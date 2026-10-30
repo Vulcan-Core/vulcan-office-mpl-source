@@ -42,14 +42,17 @@ void RemoteJSONPoll::start()
 {
     Poco::URI remoteServerURI(_conf.getString(_configKey));
 
+    // Vulcan Office: never start a remote poller (config or fonts) when no
+    // URL is configured; the default is empty, so out of the box nothing
+    // polls anything.
+    if (remoteServerURI.empty())
+    {
+        LOG_INF("Remote " << _expectedKind << " is not specified in coolwsd.xml");
+        return; // no remote server setup.
+    }
+
     if (_expectedKind == "configuration")
     {
-        if (remoteServerURI.empty())
-        {
-            LOG_INF("Remote " << _expectedKind << " is not specified in coolwsd.xml");
-            return; // no remote config server setup.
-        }
-
         if constexpr (!Util::isDebugEnabled())
         {
             if (Util::iequal(remoteServerURI.getScheme(), "http"))

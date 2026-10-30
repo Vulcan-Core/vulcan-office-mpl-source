@@ -5115,7 +5115,7 @@ msgid ""
 "Unlinking citations will prevent Collabora Online from updating citations "
 "and bibliography in this document."
 msgstr ""
-"Deconectarea citărilor va împiedica Collabora Online să actualizeze citările "
+"Deconectarea citărilor va împiedica Vulcan Office să actualizeze citările "
 "și bibliografia din acest document."
 
 #: src/control/HRuler.ts:321
@@ -6689,7 +6689,7 @@ msgstr ""
 #: src/map/handler/Map.VersionBar.js:50
 msgid "Your Collabora Online server needs updating. Version {0} is available."
 msgstr ""
-"Serverul dvs. Collabora Online necesită actualizare. Versiunea {0} este "
+"Serverul dvs. Vulcan Office necesită actualizare. Versiunea {0} este "
 "disponibilă."
 
 #: src/map/handler/Map.WOPI.js:194
@@ -6980,7 +6980,7 @@ msgstr ""
 
 #: welcome/welcome.html%2Bhtml.head.title:9-3
 msgid "Collabora Online Welcome"
-msgstr "Bine ați venit în Collabora Online"
+msgstr "Bine ați venit în Vulcan Office"
 
 #: welcome/welcome.html%2Bhtml.body.div.div.div.div.h1:26-7
 msgid "Explore The New {coolversion}"
@@ -6989,7 +6989,7 @@ msgstr "Explorează noua versiune {coolversion}"
 #: welcome/welcome.html%2Bhtml.body.div.div.div.div.h2:27-7
 #: welcome/welcome.html%2Bhtml.body.div.div.div.div.h2:38-7
 msgid "Collabora Online Development Edition"
-msgstr "Collabora Online Ediţia Dezvoltator"
+msgstr "Vulcan Office Ediţia Dezvoltator"
 
 #: welcome/welcome.html%2Bhtml.body.div.div.div.div.p:28-7
 #, fuzzy
@@ -7020,7 +7020,7 @@ msgid ""
 msgstr ""
 "Consultați <a target=\"_blank\" href=\"https://www.collaboraonline.com/"
 "code-26-04-release-notes/\">notele de lansare</a> și aflați totul despre: "
-"Cea mai recentă ediție de dezvoltare Collabora Online, destinată "
+"Cea mai recentă ediție de dezvoltare Vulcan Office, destinată "
 "utilizatorilor casnici și echipelor mici."
 
 #: welcome/welcome.html%2Bhtml.body.div.div.div.div.h1:48-7

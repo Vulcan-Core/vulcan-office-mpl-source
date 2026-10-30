@@ -24,6 +24,7 @@ interface MenuItem {
 	menu?: MenuItem[];
 	disabled?: boolean;
 	hidden?: boolean;
+	readOnly?: boolean;
 	mobileapp?: boolean;
 	iosapp?: boolean;
 	tablet?: boolean;
@@ -184,6 +185,7 @@ class Menubar extends window.L.Control {
 					{name: _('Invert Background'), id: 'invertbackground', type: 'action'},
 					{uno: '.uno:SidebarDeck.PropertyDeck', id: 'view-sidebar-property-deck', name: _UNO('.uno:Sidebar')},
 					{uno: '.uno:SidebarDeck.StyleListDeck', name: _('Style list')},
+					{uno: '.uno:SidebarDeck.InspectorDeck', name: _('Style inspector')},
 					{uno: '.uno:Navigator', id: 'navigator'},
 					{type: 'separator'},
 					{name: _UNO('.uno:ShowAnnotations', 'text'), unoid: '.uno:ShowAnnotations', id: 'showannotations', type: 'action'},
@@ -439,11 +441,6 @@ class Menubar extends window.L.Control {
 				{type: 'separator', iosapp: false},
 				{name: _('Keyboard shortcuts'), id: 'keyboard-shortcuts', type: 'action', iosapp: false},
 				{type: 'separator'},
-				{name: _('Forum'), id: 'forum', type: 'action'},
-				{name: _('Report an issue'), id: 'report-an-issue', type: 'action', iosapp: false},
-				{name: _('Latest Updates'), id: 'latestupdates', type: 'action', iosapp: false},
-				{name: _('Send Feedback'), id: 'feedback', type: 'action', mobileapp: false},
-				{type: 'separator'},
 				{name: _('Server audit'), id: 'serveraudit', type: 'action', mobileapp: false},
 				{type: 'separator'},
 				{name: _('About'), id: 'about', type: 'action'}]
@@ -637,11 +634,6 @@ class Menubar extends window.L.Control {
 				{type: 'separator', iosapp: false},
 				{name: _('Keyboard shortcuts'), id: 'keyboard-shortcuts', type: 'action', iosapp: false},
 				{type: 'separator'},
-				{name: _('Forum'), id: 'forum', type: 'action'},
-				{name: _('Report an issue'), id: 'report-an-issue', type: 'action', iosapp: false},
-				{name: _('Latest Updates'), id: 'latestupdates', type: 'action', iosapp: false},
-				{name: _('Send Feedback'), id: 'feedback', type: 'action', mobileapp: false},
-				{type: 'separator'},
 				{name: _('Server audit'), id: 'serveraudit', type: 'action', mobileapp: false},
 				{type: 'separator'},
 				{name: _('About'), id: 'about', type: 'action'}]
@@ -792,11 +784,6 @@ class Menubar extends window.L.Control {
 				{type: 'separator', iosapp: false},
 				{name: _('Keyboard shortcuts'), id: 'keyboard-shortcuts', type: 'action', iosapp: false},
 				{type: 'separator'},
-				{name: _('Forum'), id: 'forum', type: 'action'},
-				{name: _('Report an issue'), id: 'report-an-issue', type: 'action', iosapp: false},
-				{name: _('Latest Updates'), id: 'latestupdates', type: 'action', iosapp: false},
-				{name: _('Send Feedback'), id: 'feedback', type: 'action', mobileapp: false},
-				{type: 'separator'},
 				{name: _('Server audit'), id: 'serveraudit', type: 'action', mobileapp: false},
 				{type: 'separator'},
 				{name: _('About'), id: 'about', type: 'action'}]
@@ -847,7 +834,15 @@ class Menubar extends window.L.Control {
 				{name: _UNO('.uno:SelectAll', 'text'), uno: '.uno:SelectAll'},
 				{type: 'separator'},
 				{uno: '.uno:SearchDialog', id: 'searchreplace'},
-				{name: _('Find'), id: 'find', type: 'action', shortcut: 'home-search'}
+				{name: _('Find'), id: 'find', type: 'action', shortcut: 'home-search'},
+				{type: 'separator'},
+				{name: _UNO('.uno:ChangesMenu', 'spreadsheet'), id: 'changesmenu', type: 'menu', menu: [
+					{uno: '.uno:TraceChangeMode'},
+					{uno: '.uno:ShowChanges'},
+					{type: 'separator'},
+					{uno: '.uno:AcceptChanges'},
+					{uno: '.uno:CommentChange'}
+				]}
 			]},
 			{name: _UNO('.uno:ViewMenu', 'spreadsheet'), id: 'view', type: 'menu', accessibility: {combination: 'MV'},
 			 menu: (window.mode.isTablet() ? [
@@ -870,6 +865,7 @@ class Menubar extends window.L.Control {
 				   {uno: '.uno:SidebarDeck.StyleListDeck', name: _('Style list')},
 				   {type: 'separator'},
 				   {name: _UNO('.uno:ToggleSheetGrid', 'spreadsheet', true), uno: '.uno:ToggleSheetGrid', id: 'sheetgrid'},
+				   {uno: '.uno:ToggleFormula'},
 				   {name: _('Focus Cell'), type:'action', id: 'columnrowhighlight'},
 				   {name: _UNO('.uno:FreezePanes', 'spreadsheet', true), id: 'FreezePanes', uno: '.uno:FreezePanes'},
 				   {name: _UNO('.uno:FreezeCellsMenu', 'spreadsheet', true), id: 'FreezeCellsMenu', type: 'menu', uno: '.uno:FreezeCellsMenu', menu: [
@@ -901,7 +897,7 @@ class Menubar extends window.L.Control {
 					{uno: '.uno:InsertCurrentDate'},
 					{uno: '.uno:InsertCurrentTime'}
 				]},
-				{uno: '.uno:EditHeaderAndFooter'} /*todo: add to Control.Notebookbar.Calc.js (as Insert tab)*/
+				{uno: '.uno:EditHeaderAndFooter'}
 			]},
 			{name: _UNO('.uno:FormatMenu', 'spreadsheet'), id: 'format', type: 'menu', accessibility: {combination: 'MO'}, menu: [
 				{name: _UNO('.uno:FormatTextMenu', 'spreadsheet'), type: 'menu', menu: [
@@ -1042,6 +1038,8 @@ class Menubar extends window.L.Control {
 					{type: 'separator'},
 					{uno: '.uno:DataFilterRemoveFilter'},
 					{uno: '.uno:DataFilterHideAutoFilter'}]},
+				{uno: '.uno:TextToColumns'},
+				{uno: '.uno:HandleDuplicateRecords'},
 				{type: 'separator'},
 				{name: _UNO('.uno:DataPilotMenu', 'spreadsheet'), type: 'menu', menu: [
 					{name: _UNO('.uno:InsertPivotTable', 'spreadsheet'), uno: '.uno:DataDataPilotRun'},
@@ -1092,6 +1090,17 @@ class Menubar extends window.L.Control {
 				{uno: '.uno:GoalSeekDialog'},
 				{uno: '.uno:Protect'},
 				{type: 'separator'},
+				{name: _('Detective'), type: 'menu', menu: [
+					{uno: '.uno:ShowPrecedents'},
+					{uno: '.uno:ShowDependents'},
+					{type: 'separator'},
+					{uno: '.uno:ClearArrowPrecedents'},
+					{uno: '.uno:ClearArrowDependents'},
+					{uno: '.uno:ClearArrows'},
+					{type: 'separator'},
+					{uno: '.uno:ShowErrors'},
+					{uno: '.uno:ShowInvalid'}]},
+				{type: 'separator'},
 				{name: _UNO('.uno:RunMacro'), id: 'runmacro', uno: '.uno:RunMacro'}
 			]},
 			{name: _('Extensions'), id: 'extensions-menu', type: 'menu', menu: []},
@@ -1099,11 +1108,6 @@ class Menubar extends window.L.Control {
 				{name: _('Online Help'), id: 'online-help', type: 'action', iosapp: false},
 				{type: 'separator', iosapp: false},
 				{name: _('Keyboard shortcuts'), id: 'keyboard-shortcuts', type: 'action', iosapp: false},
-				{type: 'separator'},
-				{name: _('Forum'), id: 'forum', type: 'action'},
-				{name: _('Report an issue'), id: 'report-an-issue', type: 'action', iosapp: false},
-				{name: _('Latest Updates'), id: 'latestupdates', type: 'action', iosapp: false},
-				{name: _('Send Feedback'), id: 'feedback', type: 'action', mobileapp: false},
 				{type: 'separator'},
 				{name: _('Server audit'), id: 'serveraudit', type: 'action', mobileapp: false},
 				{type: 'separator'},
@@ -1114,16 +1118,39 @@ class Menubar extends window.L.Control {
 
 		mobiletext:  [
 			{name: _('Search'), id: 'recsearch', type: 'action'},
+			// writer-no-document-outline. Sits next to Search because both are
+			// READING tools, and reading is posture one -- an outline is how a
+			// long brief is navigated on a phone, which is the Writer phone use
+			// case for a legal product. Google puts the same data in a bottom
+			// sheet on phone (cut rule 4: change the navigation model rather
+			// than shrink the surface); VulcanDocumentOutline.ts builds that
+			// sheet from core's navigator payload.
+			//
+			// type:'action', NOT a uno. .uno:Navigator and .uno:GotoPage are in
+			// the DESKTOP arrays and stay out of here on purpose: .uno:Navigator
+			// opens a whole panel -- search field, three tabs, two toolbars,
+			// fifteen content categories -- and on a small screen
+			// Util.MessageRouter would post it straight into the mobile wizard,
+			// which is the dropped-desktop-dialog failure mode. The action runs
+			// the same command underneath but renders only the headings.
+			//
+			// Deliberately NOT added to allowedViewModeActions: that list gates
+			// _beforeShow, the DESKTOP DOM menubar, and this entry only ever
+			// reaches generateFullMenuStructure. There a top-level type:'action'
+			// clears _checkItemVisibility in read mode already -- which is the
+			// wanted answer, since the whole point is that a VIEWER can navigate.
+			{name: _('Document outline'), id: 'documentoutline', type: 'action'},
+			// Phone File menu is Google's: export, share, print. Save and
+			// Save As are gone because the phone never saves by hand -- the
+			// host drives Action_Save and coolwsd autosaves -- and revision
+			// history is a desktop posture (writer-kebab-untrimmed-stock-menu).
 			{name: _UNO('.uno:PickList', 'text'), id: 'file', type: 'menu', menu: [
-				{name: _UNO('.uno:Save', 'text'), unoid: '.uno:Save', id: 'save', type: 'action'},
-				{name: _UNO('.uno:SaveAs', 'text'), unoid: '.uno:SaveAs', id: 'saveas', type: 'action'},
 				{name: _('Export as'), id: 'exportas', type: 'menu', menu: [
 					{name: _('PDF Document (.pdf)'), id: 'exportas-pdf', type: 'action'},
 					{name: _('EPUB (.epub)'), id: 'exportas-epub', type: 'action'},
 					{name: _('Markdown (.md)'), id: 'exportas-md', type: 'action'}
 				]},
 				{name: _('Share...'), id:'shareas', type: 'action'},
-				{name: _('See revision history'), id: 'rev-history', type: 'action'},
 				{type: 'separator'},
 				{name: _UNO('.uno:Print', 'text'), unoid: '.uno:Print', id: 'print', type: 'action'},
 			]},
@@ -1145,11 +1172,27 @@ class Menubar extends window.L.Control {
 				{uno: '.uno:Cut'},
 				{uno: '.uno:Copy'},
 				{uno: '.uno:Paste'},
-				{uno: '.uno:SelectAll'}
+				{uno: '.uno:SelectAll'},
+				{type: 'separator'},
+				// writer-find-replace-missing. Google Docs phone ships Find and
+				// replace in the overflow. It lives INSIDE editmenu, not at top
+				// level, because _checkItemVisibility gates type:'menu' items on
+				// allowedReadonlyMenus (which includes 'editmenu') -- so it stays
+				// reachable in the read posture, where a top-level item would get
+				// no gating at all. The LOK dialog renders in the mobile wizard
+				// bottom sheet via Util.MessageRouter's small-screen branch.
+				{uno: '.uno:SearchDialog', id: 'searchreplace'}
 			]},
 			{name: _UNO('.uno:ChangesMenu', 'text'), id: 'changesmenu', type: 'menu', menu: [
+				// Record (TrackChanges) stays -- that is authoring intent.
+				// SHOW is gone: phone Writer is pinned to showing tracked
+				// changes at load (Control.UIManager.initializeSpecializedUI),
+				// so a toggle here could only take the user somewhere we do
+				// not want them, and hide-redlines is the per-view setting the
+				// DOCX exporter writes into the SHARED file as <w:revisionView>.
+				// Redlines are the document's content, not a view preference;
+				// the desktop keeps the toggle.
 				{uno: '.uno:TrackChanges'},
-				{uno: '.uno:ShowTrackedChanges'},
 				{type: 'separator'},
 				{type: 'action', id: 'acceptalltrackedchanges', uno: '.uno:AcceptAllTrackedChanges'},
 				{type: 'action', id: 'rejectalltrackedchanges', uno: '.uno:RejectAllTrackedChanges'},
@@ -1158,6 +1201,75 @@ class Menubar extends window.L.Control {
 			]},
 			{name: _UNO('.uno:ViewMenu', 'text'), id: 'view', type: 'menu', menu: [
 				{name: _UNO('.uno:FullScreen', 'text'), unoid: '.uno:FullScreen', id: 'fullscreen', type: 'action', mobileapp: false},
+				// THE REFLOW SWITCH, and it is Google's own control: their phone
+				// overflow carries "Print layout", and turning it OFF is what
+				// gives them text wrapped to the screen instead of a page you
+				// pan across (DOCS-REFERENCE §"Turn on print layout: More >
+				// Print layout").
+				//
+				// It matters more here than there. A Letter page with 1in
+				// margins puts 11pt text at 5.9 CSS px on a 393px phone if you
+				// fit the page (measured, all nine zoom levels swept), and zoom
+				// cannot fix it because zoom scales the column and the glyphs
+				// together: 58% is the widest zoom where a line still fits and
+				// 8.5px is unreadable. Web view is the only route to a readable
+				// line length that does not touch the document.
+				//
+				// 🔴 THIS ROW USED TO BE WIRED TO `.uno:PrintLayout`, WHICH IS
+				// THE OTHER HALF OF A RADIO PAIR. PrintLayout means "go back to
+				// page view"; sent from page view it is a no-op that changes no
+				// layout and broadcasts no state (wire-verified twice on the
+				// built image). Core also publishes no state for it, so the row
+				// never rendered checked either -- it could not answer the one
+				// question it exists to answer. `.uno:BrowseView` is the half
+				// that turns reflow ON, it is now a real toggle under COKit
+				// (sw/source/uibase/uiview/view0.cxx), and it is now in the
+				// kit's uno command list so the checkmark is truthful
+				// (sfx2/source/control/unoctitm.cxx).
+				//
+				// THIS ROW STARTS UNCHECKED, ON EVERY SURFACE. Reflow was the
+				// phone default for one image and had to be withdrawn: the
+				// engine laid the document out at the width of its widest
+				// TABLE rather than the phone's, so every paragraph ran off
+				// the right edge. The measurement and the engine seam are in
+				// the header of app/VulcanWriterReflow.ts. Until an image
+				// build shows that seam fixed, this row is how reflow is
+				// reached at all -- so it is a discovery surface again, not
+				// merely an escape hatch, and that is a known gap against
+				// Docs rather than the intended posture.
+				//
+				// `type: 'action'` rather than a bare uno row because the
+				// client owns things the engine cannot. It states the reflow
+				// width in twips BEFORE the mode flips (otherwise the first
+				// reflow lands on MIN_BROWSE_WIDTH -- 907 CSS px here -- and
+				// the user watches a wrong full-document layout), and it moves
+				// the zoom to where 11pt clears 16 CSS px, restoring the
+				// previous zoom exactly on the way out. It also does NOT send
+				// .uno:BrowseView: the mode is decided by tallying every
+				// attached view's vote, so a client that could set it directly
+				// could set it against another view's veto. The row states
+				// this session's wish and the engine decides
+				// (lcl_TallyKitReflowVotes,
+				// engine/sw/source/uibase/uiview/view2.cxx). All of the client
+				// half lives in app/VulcanWriterReflow.ts; the routing is
+				// Control.JSDialogBuilder.js:1917 -> _executeAction(undefined,
+				// data) -> id 'browseview' below.
+				//
+				// The checkmark therefore reports the DOCUMENT's state, which
+				// on a shared document is not always this session's wish: a
+				// desktop view attached to the same document vetoes reflow for
+				// everyone, and this row correctly goes unchecked while it is
+				// there. That is the cost of one layout per document; see the
+				// header of app/VulcanWriterReflow.ts.
+				//
+				// Paired with the engine change at
+				// engine/sw/source/core/layout/pagechg.cxx (ImplCalcBrowseWidth)
+				// WITHOUT WHICH THIS IS WORSE THAN USELESS: stock COOL pins
+				// browse width to MIN_BROWSE_WIDTH (200mm = 11339 twips), which
+				// is WIDER than a Letter text column (6.5in = 9360 twips), so
+				// toggling this on a phone lengthened the line instead of
+				// shortening it.
+				{name: _('Reflow to screen width'), id: 'browseview', type: 'action', uno: '.uno:BrowseView'},
 				{uno: '.uno:ControlCodes', id: 'formattingmarks'},
 				{uno: '.uno:SpellOnline'},
 				{name: _UNO('.uno:ShowResolvedAnnotations', 'text'), id: 'showresolved', uno: '.uno:ShowResolvedAnnotations'},
@@ -1174,22 +1286,99 @@ class Menubar extends window.L.Control {
 				{
 					uno: '.uno:Translate'
 				} : {},
-			{name: _UNO('.uno:RunMacro'), id: 'runmacro', uno: '.uno:RunMacro'},
-			{name: _('Latest Updates'), id: 'latestupdates', type: 'action', iosapp: false},
-			{name: _('Send Feedback'), id: 'feedback', type: 'action', mobileapp: false},
 			{name: _('About'), id: 'about', type: 'action'},
 		],
 
 		mobilepresentation: [
-			{name: _('Search'), id: 'recsearch', type: 'action'},
+			// MERGE NOTE (slides lane wins the label, sheets lane keeps its
+			// comment): phone Impress names this row 'Find and replace', not
+			// the stock 'Search'. Same dispatch as before -- id 'recsearch' ->
+			// app.dispatcher.dispatch('showsearchbar') -- but the phone search
+			// bar it opens now carries the real replacement controls on Impress
+			// (#vulcan-search-replace-row / -replace / -replace-all), so
+			// 'Search' was under-naming what the row does. Pinned by
+			// mocha_tests/ImpressPhoneOverflow.test.ts, which matches this
+			// literal and calibrates against the old label; the shared
+			// mobiletext / mobiledrawing / mobilespreadsheet menus keep their
+			// own labels.
+			{name: _('Find and replace'), id: 'recsearch', type: 'action'},
+			// See the mobiletext File menu for why Save / Save As / revision
+			// history are gone on phones.
 			{name: _UNO('.uno:PickList', 'presentation'), id: 'file', type: 'menu', menu: [
-				{name: _UNO('.uno:Save', 'presentation'), unoid: '.uno:Save', id: 'save', type: 'action'},
-				{name: _UNO('.uno:SaveAs', 'presentation'), unoid: '.uno:SaveAs', id: 'saveas', type: 'action'},
-				{name: _('Export as'), id: 'exportas', type: 'menu', menu: [
-					{name: _('PDF Document (.pdf)'), id: 'exportas-pdf', type: 'action'}
-				]},
+				// 🔴 SAVE AS AND EXPORT AS ARE CUT, because they NEVER RENDERED
+				// AND WERE SCORED AS SHIPPED. Three rows lived here -- 'saveas',
+				// the 'exportas' drill-in and its 'exportas-pdf' child -- and
+				// _checkItemVisibility drops all three unconditionally:
+				//   :3376  saveas          && wopi.UserCanNotWriteRelative
+				//   :3379  exportas/-pdf   && wopi.UserCanNotWriteRelative
+				// UserCanNotWriteRelative is hardcoded `true` by ALL THREE of this
+				// product's WOPI routes -- files/[fileId]/route.ts:493,
+				// versions/[versionId]/route.ts:84 and
+				// corpus/[corpusType]/[caseId]/[documentId]/route.ts:98 -- and the
+				// fork's own default is true too (Map.WOPI.js:34), so even an
+				// unconfigured host hides them. Nothing about the phone was ever
+				// involved: these rows are dead on desktop Impress as well.
+				//
+				// THAT FLAG IS CORRECT, not an oversight to flip. The host's only
+				// WOPI POST handler answers X-WOPI-Override: PUT_RELATIVE with 501
+				// and the comment "We don't support Save As"
+				// (files/[fileId]/route.ts:649-651), and the iframe URL carries
+				// SaveAsMode=false in ui_defaults (VulcanOfficeEditor.tsx:2141,
+				// :2152). Making these render is a server feature -- relative-file
+				// creation -- not a gate to delete.
+				//
+				// NOTHING IS LOST FROM THE PHONE by cutting them, and one thing is
+				// gained: the parity matrix stops claiming a capability we do not
+				// have. The user-facing PDF route is the Download as drill-in
+				// immediately below; 'exportdirectpdf' and 'exportpdf' both render
+				// (they gate on HideExportOption, which no route sends). What is
+				// genuinely absent is writing a COPY back to host storage, which is
+				// what exportas-* means and what PUT_RELATIVE would implement.
+				//
+				// Reopen when route.ts grows a real PUT_RELATIVE and CheckFileInfo
+				// stops hardcoding the flag -- and restore BOTH rows together, since
+				// a drill-in with no surviving child is its own kind of phantom.
+				// 🔴 RENAME DOCUMENT IS CUT. IT WAS ADDED IN A PRIOR PASS AS A
+				// CORRECTION TO THIS MATRIX AND IT HAS NEVER RENDERED ONCE, on any
+				// device, in any chrome. The comment it replaces ran fifty lines,
+				// traced the dispatch end to end, and got the one thing that decides
+				// whether a row exists exactly backwards.
+				//
+				// It said: "_checkItemVisibility:3040 already drops id
+				// 'renamedocument' unless wopi._supportsRename() && UserCanRename ...
+				// So a host that forbids renaming renders no row rather than a row
+				// that fails." Every clause of that is true. The conclusion drawn
+				// from it -- that the gate is a courtesy for hosts that say no -- is
+				// not, because THIS host says no. The gate lives at :3391 and the
+				// three values behind it were never read:
+				//   SupportsRename  -- no WOPI route sends it, so Map.WOPI.js:222
+				//                      coerces undefined to false
+				//   UserCanRename   -- likewise, :223
+				//   _supportsRename() -- Map.WOPI.js:179-181 is
+				//                      `!!SupportsRename || !UserCanNotWriteRelative`
+				//                      = false || !true = FALSE
+				// so the gate is `!(false && false)` = true = hidden, always.
+				//
+				// And it is dead a second time over, independently: rename travels
+				// client -> 'renamefile' (Toolbar.js:214-221) -> Socket.ts:1778 ->
+				// coolwsd (ClientSession.cpp:1215, DocumentBroker.cpp:2755+) -> a WOPI
+				// RenameFile POST at the host, which has no RENAME_FILE case and falls
+				// into `default:` -> 501 (files/[fileId]/route.ts:653-655). Even with
+				// the flags flipped the row would dispatch into a 501.
+				//
+				// Cut rather than fixed, and the parity argument agrees with the
+				// mechanical one. google-slides.json's own Rename route is "tap More
+				// NEXT TO THE FILE" -- the host's file list, which this product has
+				// and which is where a rename belongs. Google's second route is
+				// tapping the title in the editor, and the phone top bar carries no
+				// title to tap. So the editor is not where Slides renames either.
+				//
+				// Reopen only as a PAIR: CheckFileInfo must send SupportsRename and
+				// UserCanRename, AND the POST handler must implement RENAME_FILE
+				// (rename the row in `files`, re-point storage, invalidate the lock).
+				// Landing either half alone reproduces exactly this defect -- a row
+				// that renders and 501s, or a capability nothing surfaces.
 				{name: _('Share...'), id:'shareas', type: 'action'},
-				{name: _('See revision history'), id: 'rev-history', type: 'action'},
 				{type: 'separator'},
 				{name: _UNO('.uno:Print', 'presentation'), uno: '.uno:Print', id: 'print', type: 'action'},
 			]},
@@ -1202,60 +1391,438 @@ class Menubar extends window.L.Control {
 				{name: _('ODF Drawing (.odg)'), id: 'downloadas-odg', type: 'action'}
 			]},
 			{name: _UNO('.uno:EditMenu', 'presentation'), id: 'editmenu', type: 'menu', menu: [
-				{uno: '.uno:Undo'},
-				{uno: '.uno:Redo'},
-				{name: _('Repair'), id: 'repair',  type: 'action'},
+				{uno: '.uno:Undo', readOnly: false},
+				{uno: '.uno:Redo', readOnly: false},
+				{name: _('Repair'), id: 'repair',  type: 'action', readOnly: false},
 				{type: 'separator'},
-				{uno: '.uno:Cut'},
+				{uno: '.uno:Cut', readOnly: false},
 				{uno: '.uno:Copy'},
-				{uno: '.uno:Paste'},
+				{uno: '.uno:Paste', readOnly: false},
 				{uno: '.uno:SelectAll'}
+				// 🔴 MERGE NOTE -- THE NESTED SearchDialog ROW (id
+				// 'searchreplace') THAT mobiletext AND mobiledrawing CARRY IS
+				// DELIBERATELY ABSENT FROM PHONE IMPRESS, and this is the only
+				// place that says so.
+				//
+				// Writer/Draw nest their Find and replace inside editmenu
+				// because a top-level row gets no read-posture gating and
+				// 'editmenu' is in allowedReadonlyMenus, so nesting was how it
+				// stayed reachable to a viewer. Impress solved the same problem
+				// the other way and better: its root 'Find and replace' action
+				// (top of this array) opens the PHONE search bar, which grew its
+				// own Replace / Replace all controls, rather than posting the
+				// desktop SearchDialog into the mobile wizard -- and a top-level
+				// type:'action' row renders in the read posture anyway, which is
+				// the whole reason the Writer row had to be nested. Two routes to
+				// the same capability on one 390px menu is the duplicate this
+				// merge exists to avoid.
+				//
+				// It is also load-bearing for the read/edit census in
+				// mocha_tests/ImpressPhoneOverflow.test.ts, which deepEquals
+				// these children exactly: ['.uno:Copy', '.uno:SelectAll'] in the
+				// read posture and the seven rows above in the edit posture. An
+				// eighth child fails both. If you ever do want a nested dialog
+				// here, change that test in the same commit and say why.
+				//
+				// The readOnly: false flags above are the read-posture policy:
+				// _checkItemVisibility drops any item carrying it whenever
+				// isReadOnlyMode(), which is what leaves Copy and Select All --
+				// the two non-mutating rows -- as the viewer's Edit menu.
 			]},
 			{name: _UNO('.uno:ViewMenu', 'presentation'), id: 'view', type: 'menu', menu: [
 				{uno: '.uno:SpellOnline'},
+				// 🔴 THE PHONE'S ONLY ROUTE BACK TO THE AUTOMATIC FIT, and the
+				// reason a pinch used to be permanent.
+				//
+				// 'fitwidthzoom' is the sole dispatch that reaches
+				// `_fitWidthZoom(..., recalcFirstFit = true)`, which is the sole
+				// thing that clears CanvasTileLayer's `_vulcanUserZoomed` latch.
+				// Until this row existed the command had no phone surface at all:
+				// its Impress item is `fitwidthzoom-impress` on the status bar
+				// (Control.StatusBar.js:291) and vulcan-theme.css §13i.13 hides
+				// `#toolbar-down` outright for phone presentations, while
+				// Control.Menubar.ts:175's 'Fit to Screen' is the DESKTOP View
+				// menu. So the latch was set by any pinch and cleared by nothing,
+				// and the automatic fit stayed off for the rest of the session.
+				//
+				// The latch also expires on rotation now (CanvasTileLayer
+				// `_fitWidthZoom`), which is the Slides-shaped recovery and the one
+				// users will actually hit. This row is the explicit one, for a user
+				// who is lost in the same orientation they pinched in.
+				//
+				// NOT A PHANTOM -- the dispatch is traced end to end. A
+				// `type: 'action'` row reaches `_executeAction(undefined, data)` via
+				// Control.JSDialogBuilder.js:1917, and :3239 maps id 'fitwidthzoom'
+				// to `app.dispatcher.dispatch('fitwidthzoom')` ->
+				// `activeLayout.adjustViewZoomLevel()` (docdispatcher.ts:284) ->
+				// ViewLayout.ts:93. Impress gets `ViewLayoutFileBased`
+				// (DocumentBase.ts:37), which does not override that method.
+				//
+				// AND IT SURVIVES THE FILTER, which is a different question from
+				// being in this array and is the one that decides whether the
+				// escape ever renders. The phone kebab is built by
+				// `generateFullMenuStructure` and BOTH levels are filtered:
+				// :3960 runs `_checkItemVisibility` over the top-level items, and
+				// :4059 -- inside `_generateMenuStructure` -- runs it again over
+				// each submenu's children. Two facts are therefore load-bearing,
+				// and neither of them is this row:
+				//   - 'view' must stay in `allowedReadonlyMenus` (:2156). In
+				//     read-only `_checkItemVisibility` drops EVERY `type: 'menu'`
+				//     not listed there, which would take this row down with the
+				//     whole View submenu -- and read-only is the viewer-first
+				//     posture, i.e. exactly where a stuck pinch hurts. It is
+				//     present in both branches of that ternary.
+				//   - `_checkItemVisibility` must go on naming no rule for
+				//     'fitwidthzoom'. It names none, so the row survives.
+				// Both are pinned in mocha_tests/ImpressPhoneZoomLatch.test.ts.
+				//
+				// AN EARLIER VERSION OF THIS COMMENT GOT BOTH HALVES WRONG, which
+				// is worth naming because it is the exact mistake the filter
+				// question exists to catch. It said "`_generateMenuStructure`
+				// applies no `_checkItemVisibility` filter" -- :4059 is inside that
+				// method and does -- and it credited `allowedViewModeActions` for
+				// surviving read-only. That list is consulted by `_beforeShow`
+				// (:2722), bound to '#main-menu' (:2576), the DESKTOP smartmenus
+				// menubar; it never runs for the mobile wizard, and there it hides
+				// rather than disables. The conclusion was right and the mechanism
+				// was not, so the next person to edit `allowedReadonlyMenus` had no
+				// reason to think this row depended on them.
+				//
+				// The msgid is the one desktop Impress already uses for this exact
+				// command, so both surfaces name the control identically and po/
+				// already carries the translation.
+				{name: _('Zoom to Fit Slide'), id: 'fitwidthzoom', type: 'action'},
+				// Google Slides parity (docs/mobile-redesign/03 §5): speaker
+				// notes live behind the phone kebab; the stock 'notesmode'
+				// dispatcher action toggles Notes view.
+				{name: _('Speaker Notes'), id: 'notesmode', type: 'action'},
 				{name: _UNO('.uno:FullScreen', 'presentation'), unoid: '.uno:FullScreen', id: 'fullscreen', type: 'action', mobileapp: false},
 				{name: _('Dark Mode'), id: 'toggledarktheme', type: 'action'},
-				{name: _('Invert Background'), id: 'invertbackground', type: 'action'},
+				// Invert Background is CUT from the phone kebab. It is a
+				// document-rendering knob with no counterpart anywhere in
+				// google-slides.json, and it only ever appears while dark theme
+				// is already on (_checkItemVisibility returns false for
+				// 'invertbackground' unless prefs darkTheme is set), so on a
+				// viewer-first surface it reads as a second, contradictory dark
+				// control sitting directly under the first. Desktop keeps it.
 			]
 			},
-			{name: _UNO('.uno:TableMenu', 'text'/*HACK should be 'presentation', but not in xcu*/), id: 'tablemenu', type: 'menu', menu: [
-				{uno: '.uno:InsertRowsBefore'},
-				{uno: '.uno:InsertRowsAfter'},
-				{type: 'separator'},
-				{uno: '.uno:InsertColumnsBefore'},
-				{uno: '.uno:InsertColumnsAfter'},
-				{uno: '.uno:SelectTable'},
-				{uno: '.uno:EntireRow'},
-				{uno: '.uno:EntireColumn'},
-				{uno: '.uno:MergeCells'},
-				{uno: '.uno:DeleteRows'},
-				{uno: '.uno:DeleteColumns'},
-				{uno: '.uno:DeleteTable'},
-			]
-			},
+			// The 12-row Table drill-in is CUT from the phone kebab. It was
+			// unconditional and always rendered ENABLED -- the mobile path
+			// applies no command-state disabling -- so with no table selected,
+			// which is nearly always, it was twelve dead-looking rows at the
+			// kebab root of a viewer-first surface.
+			//
+			// 🔴 THIS COMMENT USED TO SAY the capability was not stranded,
+			// because #toolbar-down still rendered on Impress and
+			// Control.MobileBottomBar.js:241-263 carried insertrowsbefore /
+			// insertcolumnsbefore / togglemergecells under context: ['Table'].
+			// It then WARNED that cutting the Impress bottom bar would remove
+			// the last route to them. That bar is now cut
+			// (css/vulcan-theme.css §13i.13), so this is the outcome the
+			// warning described, taken deliberately rather than walked into.
+			//
+			// Table STRUCTURAL editing is gone from phone Impress, on purpose,
+			// because google-slides.json says it should be: "NOT SHIPPED:
+			// tables, video, audio, charts, WordArt, diagrams" (insert / core)
+			// reads "existing ones render and can be moved/resized, but not
+			// created or structurally edited". Moving and resizing an existing
+			// table still work — those are canvas gestures, not toolbar items.
+			// Insert row / insert column / merge cells remain on DESKTOP: the
+			// desktop menubar's Table menu (the 'table' entry in the presentation
+			// menu above) and Control.NotebookbarImpress.js.
+			// Draw is unaffected — 'tablemenu' still ships under mobiledrawing
+			// below, and §13i.13 is scoped to data-doctype='presentation'.
 			{name: _UNO('.uno:SlideMenu', 'presentation'), id: 'slidemenu', type: 'menu', menu: [
 				{name: _UNO('.uno:InsertSlide', 'presentation'), unoid: '.uno:InsertSlide', id: 'insertpage', type: 'action'},
 				{name: _UNO('.uno:DuplicateSlide', 'presentation'), unoid: '.uno:DuplicateSlide', id: 'duplicatepage', type: 'action'},
-				{name: _UNO('.uno:DeleteSlide', 'presentation'), unoid: '.uno:DeleteSlide', id: 'deletepage', type: 'action'}]
+				{name: _UNO('.uno:DeleteSlide', 'presentation'), unoid: '.uno:DeleteSlide', id: 'deletepage', type: 'action'},
+				{type: 'separator'},
+				// impress-no-change-layout is CLOSED, but NOT here -- the row
+				// lives at the kebab ROOT, next to Change theme, and the full
+				// rationale sits with it further down this array.
+				//
+				// 🔴 MERGE NOTE, so nobody re-adds it: the two phone lanes each
+				// built this drill-in, the sheets lane here under Slide ▸ and
+				// the slides lane at the root. Only one can ship. Two nodes with
+				// id 'changelayout' would render 'Change layout' twice in one
+				// kebab, and would give the mobile wizard two
+				// .ui-header-changelayout-N sets -- which does not merely look
+				// wrong, it turns
+				// e2e/vulcan-office-phone/impress-theme.spec.ts green without
+				// running: its locators are guarded on count() === 1 and would
+				// quietly match nothing at 2, while row32Inventory() would return
+				// the Slide ▸ copy (depth-first, and this drill-in comes first in
+				// the array) whose children carry no 'changelayout-N' ids.
+				// Root also matches google-slides.json's "tap More, tap Change
+				// layout" and the Impress spec, so root is what survived.
+				//
+				// The two things this copy said that the root copy did not have
+				// been carried down to it: the no-WhatPage/current-page fallback,
+				// and the long-form version of the one-physical-line
+				// unocommands.py build trap.
+				// impress-no-theme-picker. NOTE the honest label: this is
+				// svx::ThemeDialog, an icon grid of theme COLOUR SETS applied to
+				// the master page -- not Google Slides' full theme gallery of
+				// layouts + fonts + colours. Do not relabel it 'Change theme';
+				// that would promise behaviour we do not deliver. Renders as a
+				// tappable swatch grid in the mobile wizard (JSDialogBuilder
+				// registers an 'iconview' handler).
+				{name: _('Theme colours'), uno: '.uno:ThemeDialog'}]
 			},
-			{name: _UNO('.uno:RunMacro'), id: 'runmacro', uno: '.uno:RunMacro'},
+			// Change theme is the other formatting row google-slides.json puts
+			// in the overflow: "Double-tap a slide to enter edit, tap More (top
+			// right), tap Change theme, then tap a theme."
+			//
+			// 🔴 THIS ROW USED TO BE A DECLINE, AND THE STATED REASON WAS WRONG.
+			// It said the Master Slides deck "would arrive and render into a
+			// hidden wrapper" because device-mobile.css:309-311 sets
+			// `#sidebar-dock-wrapper, #navigator-dock-wrapper { display: none
+			// !important; }`. That CSS is real, but it is not on this path. On a
+			// small screen a sidebar deck never reaches the dock at all:
+			// Util.MessageRouter.ts:88-126 has NO `jsontype === 'sidebar'` branch
+			// inside its isSmallScreenDevice() block — that branch is at :129,
+			// in the desktop half — so the deck JSON falls through to
+			// `fire('mobilewizard')` (:109-118), whose first disjunct is
+			// `msgData.enabled` — and every window core dumps carries it
+			// (vcl/source/window/window.cxx:3367 puts "enabled", IsEnabled()).
+			// The mobile wizard IS the phone's sidebar renderer.
+			// It knows it, too:
+			// Control.MobileWizardWindow.js:452-458 scans the children for
+			// `type == 'deck'` and :544 hands the result to
+			// _modifySidebarLayout() (:641).
+			//
+			// The one real precondition is map.showSidebar, which the wizard
+			// checks at :461 and :464 and which is set by firing
+			// 'showwizardsidebar' (Control.MobileWizard.js:58-60).
+			//
+			// The handler uses a COKit-only exact-deck setup command. Opening the
+			// default sidebar and then dispatching the desktop toggle leaves the
+			// Master Slides deck hidden in the serialized phone sidebar. The
+			// synchronous setup path is also what the Writer page deck uses.
+			//
+			// ⚠ WHAT THIS ACTUALLY DELIVERS, said plainly rather than sold as
+			// Slides' theme gallery: the Impress Master Slides deck. Three
+			// panels (Sidebar.xcu:1257-1343) — "Used in This Presentation",
+			// "Recently Used", "Available for Use" — each a GtkIconView of
+			// rendered page previews (sd/uiconfig/simpress/ui/masterpagepanel.ui
+			// et al) that the mobile wizard builds through the inherited
+			// JSDialog.iconView handler. "Available for Use" is populated:
+			// extras/source/templates/presnt ships 23 presentation templates.
+			// A tap applies — MasterPagesSelector.cxx:62 wires
+			// connect_item_activated to :148-152, which runs 'applyselect'
+			// (ExecuteCommand :203, :211).
+			//
+			// 🔴 THE DIVERGENCE RECORDED HERE IS PATCHED IN THE ENGINE, PENDING
+			// THE FORK BUILD — the C++ below has never been compiled anywhere;
+			// only vulcan-office-build.yml builds the engine, and nothing on
+			// this branch has been wet-tested. Read every "now does X" here as
+			// "is written to do X, unverified." THE OLD "indistinguishable on a
+			// one-master deck" CONSOLATION WAS NOT EARNED, and that part is
+			// established by inspection. 'applyselect' runs AssignMasterPageToSelectedSlides
+			// (MasterPagesSelector.cxx:309-331), which builds its page list ONLY
+			// out of SlideSorterViewShell::GetSlideSorter(mrBase) and returns on
+			// the spot when that is null. A phone client never shows or drives a
+			// slide sorter, so the tap lands in one of exactly two places, and
+			// neither is what the row promises: nothing at all if no sorter was
+			// instantiated, or the single slide you happen to be on if a hidden
+			// left-pane one was. Which of the two it is has NOT been established
+			// by inspection here — the left-pane sorter is still registered as a
+			// wanted resource in kit sessions (SlideSorterModule.cxx:75-77 only
+			// excludes it under o3tl::IsRunningUnitTest()), while the center pane
+			// is pinned to ImpressView (ImpressViewShellBase.cxx:45). It does not
+			// matter to the fix: deck-wide is wrong in both readings, and
+			// deck-wide is what the row means.
+			//
+			// The applyall route (:205-210) could not be reached from here either,
+			// and the reason is stronger than "a phone has no right-click": it
+			// hangs off ShowContextMenu (:182-191), which feeds ExecuteCommand the
+			// RETURN VALUE of weld::Menu::popup_at_rect — and JSMenu::popup_at_rect
+			// (vcl/jsdialog/jsdialogbuilder.cxx:2162-2187) always returns "", by
+			// design: it ships the menu to the client and comments "simulate
+			// canceled menu". So applyall is unreachable from ANY kit client,
+			// desktop browser included, gesture or no gesture. There was no
+			// client-side fix to prefer.
+			//
+			// The fix is in the engine: ExecuteCommand's 'applyselect' branch now
+			// calls AssignMasterPageToAllSlides when
+			// ViewShellBase::isKitMobilePhone() — deck-wide, which is the Slides
+			// semantics this row is copied from. That gate is not merely the
+			// convenient one: it is fed by deviceFormFactor=mobile
+			// (app/Socket.ts:446), which js/global.js:217-225 derives from
+			// mode.isSmallScreenDevice() ALONE — the same half-gate this kebab row
+			// itself has — so ?vulcanChrome=desktop on a phone, which still renders
+			// this row, is intended to get the patched control rather than the
+			// dead one — intended, not demonstrated, per the header above. It is
+			// false for desktop and tablet kit clients (which can multi-select in
+			// their own slide panel, pushed into core via selectPart(), and expect
+			// selected-slides) and false in a non-COKit build, where
+			// SfxViewShell::maKitDeviceFormFactor stays UNKNOWN
+			// (sfx2/source/view/viewsh.cxx:2756,2778).
+			//
+			// A colour-only alternative was considered and rejected:
+			// .uno:ThemeDialog (svx::ThemeDialog, whose iconview the fork
+			// already special-cases at Control.JSDialogBuilder.js:67 and
+			// Widget.IconView.ts:278-283) also reaches the phone, because
+			// MessageRouter routes jsontype 'dialog' to the mobile wizard too.
+			// It is the worse fit twice over: it changes only the colour set,
+			// not the background/fonts/layout styling a Slides theme carries,
+			// and svx/uiconfig/ui/themedialog.ui carries an Add button that
+			// opens ThemeColorEditDialog — a twelve-colour editor — off a
+			// 390 px sheet.
+			//
+			// Read-only hides the row rather than dispatching into a wall.
+			// Applying a master is an edit, and the phone kebab renders in
+			// read-only too. The type:'menu' rows around this one get that for
+			// free (_checkItemVisibility filters them against
+			// allowedReadonlyMenus); a type:'action' row does not, so
+			// 'changetheme' is named in the same read-only switch that already
+			// names 'pagesetup'.
+			//
+			// ⚠ Do not put a leading comment on that case label. ESLint's
+			// no-fallthrough reports `Expected a 'break' statement before
+			// 'case'` when a comment sits between two otherwise-empty grouped
+			// case labels — verified on this exact edit, and the reason the
+			// rationale lives here instead of at the case site.
+			{name: _('Change theme'), id: 'changetheme', type: 'action'},
+			// Change layout — google-slides.json "Overflow (⋮) menu contents"
+			// lists it as core ("Share & export, Change theme, Change layout,
+			// Speaker notes (toggle), …"), and "Change layout" (importance
+			// common) is "Double-tap the slide, tap More, tap Change layout,
+			// pick one. Re-flows the current slide's placeholders into the
+			// chosen layout." The kebab is our More.
+			//
+			// 🔴 The six rows are NOT re-declared here. They are read from the
+			// one list the phone already has, Control.MobileSlide's
+			// _getVulcanLayouts() — the trimmed set its insert-slide picker
+			// offers — so change-layout and insert-slide cannot drift into
+			// offering different layouts on the same phone. That list is on the
+			// Leaflet prototype and takes no `this`; `options` is an instance
+			// field, evaluated when UIManager constructs the Menubar, long after
+			// every control module has been evaluated. Optional-chained and
+			// guarded anyway: with no list, this collapses to the `{}` the array
+			// already uses as its omit idiom (see the deeplEnabled entry above)
+			// and _generateMenuStructure drops it, rather than rendering a
+			// drill-in onto an empty page.
+			//
+			// Each row is a real dispatch and not a new action id: the command
+			// string is the one the stock desktop layout grid already sends
+			// (Definitions.Menu.ts generateLayoutPopupGrid, '.uno:AssignLayout?
+			// WhatLayout:long=N'), so it needs no _executeAction case and rides
+			// the plain uno path in Control.JSDialogBuilder's menu-entry click.
+			// In read-only mode the whole drill-in disappears rather than
+			// dispatching into a wall — _checkItemVisibility hides every
+			// type:'menu' item not in allowedReadonlyMenus, the same way it
+			// already hides the Slide drill-in above
+			// ('slidemenu' is not in that list; 'view' and 'editmenu' are).
+			//
+			// No WhatPage argument is passed: core falls back to the current
+			// page (sd/source/ui/view/ViewShellImplementation.cxx, AssignLayout),
+			// which is the "re-flows the CURRENT slide" semantics above.
+			//
+			// 🔴 MERGE NOTE -- THIS ROW LIVES AT THE KEBAB ROOT, NOT UNDER
+			// Slide ▸. The sheets lane independently built the same drill-in
+			// inside 'slidemenu'; both cannot ship, because two nodes with
+			// id 'changelayout' put two 'Change layout' rows in one phone menu
+			// and give the DOM two .ui-header-changelayout-N sets. Root wins on
+			// three counts: it is where google-slides.json puts it (the kebab is
+			// our More), it is what
+			// a host end-to-end test
+			// drives -- that spec's row32Inventory() walks
+			// generateFullMenuStructure() for the FIRST id 'changelayout' and
+			// expects children ids 'changelayout-<WhatLayout>', which only this
+			// version emits -- and its guarded locators would silently skip
+			// (count() === 1 fails at 2) rather than fail loudly if both shipped.
+			// See the note left at the Slide drill-in above.
+			(() => {
+				const layouts = ((window as any).L?.Control?.MobileSlide
+					?.prototype?._getVulcanLayouts?.() ?? []) as Array<{ layout: number; text: string }>;
+				if (!layouts.length)
+					return {} as MenuItem;
+				return {
+					name: _('Change layout'), id: 'changelayout', type: 'menu',
+					// 🔴 name: and uno: MUST share one physical line, and this is
+					// load-bearing for the BUILD, not for style.
+					// scripts/unocommands.py's extractMenuCommands only extracts a
+					// line when `line.find("uno:") >= 0 and line.find("name:") < 0`,
+					// then requires every extracted command to carry a description
+					// in the core XCU. A parameterised command has no XCU node --
+					// the node is the bare `.uno:AssignLayout`
+					// (DrawImpressCommands.xcu) -- so extracting one fails the build
+					// with "referenced in Online but have no description in the core
+					// XCU files". Every other parameterised command in this file
+					// (.uno:LanguageStatus?..., .uno:ConditionalFormatEasy?...,
+					// .uno:InsertPageHeader?) survives only because it sits on one
+					// line with name: and is therefore never extracted. Split this
+					// across lines and `make` dies in browser/, ~15s in, long after
+					// the hours-long engine stage -- and no CI catches it, because
+					// vendor/ is sparse-excluded everywhere and the office build
+					// skips PRs. BOTH lanes shipped a commit fixing exactly this.
+					menu: layouts.map((entry) => ({name: entry.text, id: 'changelayout-' + entry.layout, uno: '.uno:AssignLayout?WhatLayout:long=' + entry.layout})),
+				} as MenuItem;
+			})(),
+			// RunMacro was CUT from here. Hygiene, not a capability change: it
+			// was already unreachable in practice, because _checkItemVisibility
+			// returns false for id 'runmacro' whenever window.enableMacrosExecution
+			// is unset, and it is off by default. It is a stock-office row with
+			// no counterpart in google-slides.json. Desktop keeps it.
+			//
+			// Details is the third overflow row google-slides.json lists that is
+			// deliberately NOT added, and this is the row closing as a decline
+			// rather than staying open as a gap.
+			//
+			// The fork's only Details is '.uno:SetDocumentProperties' (the four
+			// places that route to it are all desktop: the text/presentation/
+			// spreadsheet menubars at :127/:477/:659/:814, the notebookbars, the
+			// backstage view at Control.BackstageView.ts:1126). It is a stock
+			// core dialog the fork does not compose -- it arrives over JSDialog
+			// with a tabcontrol, and Widget.TabControl.tsx:14-18 states the case
+			// against putting it on a phone in its own words: "the tab component
+			// used by desktop JSDialogs ... the notebookbar and the mobile
+			// wizard register their own tab handlers, so this component only
+			// ever runs for desktop dialog tabcontrols." Past its
+			// VERTICAL_TABS_THRESHOLD of 4 (:30) the tab rail even turns
+			// vertical and takes inline-start width, on the axis a 390px sheet
+			// has least of. That is exactly the shrink-a-desktop-control failure
+			// the phone direction rules out, so no kebab row is added for it.
+			//
+			// What Google's Details actually shows -- name, owner, location,
+			// size, modified -- is a small read-only card, not this dialog's
+			// subject matter. Reopen the row when a phone-shaped card exists;
+			// the pieces are already client-side (map['wopi'].BaseFileName,
+			// Map.WOPI.js:21+). Do NOT reopen it by pointing the kebab at
+			// .uno:SetDocumentProperties.
+			//
+			// Help & feedback is declined too, and for a blunter reason: NEITHER
+			// half exists here. There is no feedback surface at all -- no menu
+			// entry anywhere declares id 'feedback', nothing ever assigns
+			// _map.feedback (its only two readers, :3139 and :3395, are guards
+			// that hide a row that is never declared), and js/global.js:512
+			// records the removal: "the welcome/feedback phone-home surfaces are
+			// removed." The help half is showHelp() -> html/cool-help.html, whose
+			// presentation content tells the reader to "Use the slide pane
+			// toolbar in the bottom to start the slideshow, add slide, duplicate
+			// or delete the current slide" (:674) -- the #toolbar-down bar this
+			// branch cut on phone Impress (vulcan-theme.css §13i.13) -- and whose
+			// other half is a Ctrl-key shortcut table on a device with no Ctrl
+			// key. Its container has no upper-left exit either: Toolbar.js:758
+			// builds it with showYesNoButton(..., _('OK'), ...), one button.
+			// About stays: it is a real, short, already-shipping row, and it is
+			// not a stand-in for either of these.
 			{name: _('Fullscreen presentation'), id: 'fullscreen-presentation', type: 'action'},
-			{name: _('Latest Updates'), id: 'latestupdates', type: 'action', iosapp: false},
-			{name: _('Send Feedback'), id: 'feedback', type: 'action', mobileapp: false},
 			{name: _('About'), id: 'about', type: 'action'},
 		],
 
 		mobiledrawing: [
 			{name: _('Search'), id: 'recsearch', type: 'action'},
+			// See the mobiletext File menu for why Save / Save As / revision
+			// history are gone on phones.
 			{name: _UNO('.uno:PickList', 'presentation'), id: 'file', type: 'menu', menu: [
-				{name: _UNO('.uno:Save', 'presentation'), unoid: '.uno:Save', id: 'save', type: 'action'},
-				{name: _UNO('.uno:SaveAs', 'presentation'), unoid: '.uno:SaveAs', id: 'saveas', type: 'action'},
 				{name: _('Export as'), id: 'exportas', type: 'menu', menu: [
 					{name: _('PDF Document (.pdf)'), id: 'exportas-pdf', type: 'action'}
 				]},
 				{name: _('Share...'), id:'shareas', type: 'action'},
 				{name: _UNO('.uno:Print', 'presentation'), unoid: '.uno:Print', id: 'print', type: 'action'},
-				{name: _('See revision history'), id: 'rev-history', type: 'action'},
 			]},
 			{name: !window.ThisIsAMobileApp ? _('Download as') : _('Export as'), id:'downloadas', type: 'menu', menu: [
 				{name: _('PDF Document (.pdf)'), id: !window.ThisIsAMobileApp ? 'exportdirectpdf' : 'downloadas-pdf', type: 'action'},
@@ -1270,7 +1837,11 @@ class Menubar extends window.L.Control {
 				{uno: '.uno:Cut'},
 				{uno: '.uno:Copy'},
 				{uno: '.uno:Paste'},
-				{uno: '.uno:SelectAll'}
+				{uno: '.uno:SelectAll'},
+				{type: 'separator'},
+				// Inside editmenu for the read-posture reason spelt out in
+				// mobiletext above.
+				{uno: '.uno:SearchDialog', id: 'searchreplace'}
 			]},
 			{name: _UNO('.uno:ViewMenu', 'presentation'), id: 'view', type: 'menu', menu: [
 				{uno: '.uno:SpellOnline'},
@@ -1279,37 +1850,32 @@ class Menubar extends window.L.Control {
 				{name: _('Invert Background'), id: 'invertbackground', type: 'action'},
 			]
 			},
-			{name: _UNO('.uno:TableMenu', 'text'/*HACK should be 'presentation', but not in xcu*/), id: 'tablemenu', type: 'menu', menu: [
-				{name: _UNO('.uno:InsertRowsBefore', 'presentation'), uno: '.uno:InsertRowsBefore'},
-				{name: _UNO('.uno:InsertRowsAfter', 'presentation'), uno: '.uno:InsertRowsAfter'},
-				{type: 'separator'},
-				{name: _UNO('.uno:InsertColumnsBefore', 'presentation'), uno: '.uno:InsertColumnsBefore'},
-				{name: _UNO('.uno:InsertColumnsAfter', 'presentation'), uno: '.uno:InsertColumnsAfter'},
-				{name: _UNO('.uno:DeleteRows', 'presentation'), uno: '.uno:DeleteRows'},
-				{name: _UNO('.uno:DeleteColumns', 'presentation'), uno: '.uno:DeleteColumns'},
-				{name: _UNO('.uno:MergeCells', 'presentation'), uno: '.uno:MergeCells'}]
-			},
+			// Table drill-in removed for the same reason as Impress -- see the
+			// comment in mobilepresentation. Google ships no Draw phone app at
+			// all, so nothing in this array is protected by a parity target; the
+			// edits here are kept to the same set as the other three for
+			// consistency rather than inventing scope.
 			{name: _UNO('.uno:PageMenu', 'presentation'), id: 'pagemenu', type: 'menu', menu: [
 				{name: _UNO('.uno:InsertPage', 'presentation'), unoid: '.uno:InsertPage', id: 'insertpage', type: 'action'},
 				{name: _UNO('.uno:DuplicatePage', 'presentation'), unoid: '.uno:DuplicatePage', id: 'duplicatepage', type: 'action'},
 				{name: _UNO('.uno:DeletePage', 'presentation'), unoid: '.uno:DeletePage', id: 'deletepage', type: 'action'}]
 			},
-			{name: _UNO('.uno:RunMacro'), id: 'runmacro', uno: '.uno:RunMacro'},
-			{name: _('Latest Updates'), id: 'latestupdates', type: 'action', iosapp: false},
-			{name: _('Send Feedback'), id: 'feedback', type: 'action', mobileapp: false},
 			{name: _('About'), id: 'about', type: 'action'},
 		],
 
 		mobilespreadsheet: [
-			{name: _('Search'), id: 'recsearch', type: 'action'},
+			// Google Sheets puts one full Find-and-Replace route directly in the
+			// phone overflow. Use the existing home-search action so the row takes
+			// the same raw SearchDialog dispatch as Ctrl-F after the menu closes.
+			// Keeping the UNO value supplies the localized label and icon.
+			{uno: '.uno:SearchDialog', id: 'home-search', type: 'action'},
+			// See the mobiletext File menu: Save / Save As / revision history
+			// are deliberate phone cuts, not oversights.
 			{name: _UNO('.uno:PickList', 'spreadsheet'), id: 'file', type: 'menu', menu: [
-				{name: _UNO('.uno:Save', 'spreadsheet'), unoid: '.uno:Save', id: 'save', type: 'action'},
-				{name: _UNO('.uno:SaveAs', 'spreadsheet'), unoid: '.uno:SaveAs', id: 'saveas', type: 'action'},
 				{name: _('Export as'), id: 'exportas', type: 'menu', menu: [
 					{name: _('PDF Document (.pdf)'), id: 'exportas-pdf', type: 'action'}
 				]},
 				{name: _('Share...'), id:'shareas', type: 'action'},
-				{name: _('See revision history'), id: 'rev-history', type: 'action'},
 				{type: 'separator'},
 				{name: _UNO('.uno:Print', 'spreadsheet'), unoid: '.uno:Print', id: 'print', type: 'action'},
 				{name: _('Define print area'), uno: '.uno:DefinePrintArea' },
@@ -1349,6 +1915,8 @@ class Menubar extends window.L.Control {
 				{type: 'separator'},
 				{uno: '.uno:DeleteRows'},
 				{uno: '.uno:DeleteColumns'},
+				{name: _UNO('.uno:ShowRow', 'spreadsheet', true), uno: '.uno:ShowRow'},
+				{name: _UNO('.uno:ShowColumn', 'spreadsheet', true), uno: '.uno:ShowColumn'},
 				{type: 'separator'},
 				{name: _UNO('.uno:FreezePanes', 'spreadsheet'), uno: '.uno:FreezePanes'},
 				{name: _UNO('.uno:FreezePanesColumn', 'spreadsheet'), uno: '.uno:FreezePanesColumn'},
@@ -1360,6 +1928,38 @@ class Menubar extends window.L.Control {
 				{uno: '.uno:SortAscending'},
 				{uno: '.uno:SortDescending'},
 				{type: 'separator'},
+				// The next three are Google Sheets phone features Calc had no
+				// phone route to at all. They sit under Data rather than at top
+				// level ON PURPOSE: 'datamenu' is NOT in allowedReadonlyMenus, so
+				// all three hide themselves whenever the document is read-only,
+				// with zero new gating code. Top-level items in the mobile path
+				// get no read-mode gating whatsoever (_beforeShow's logic is
+				// jQuery over #main-menu, i.e. desktop only), so a flat placement
+				// would show a viewer three controls that silently do nothing.
+				//
+				// NOTE for whoever reads the sibling comment in Permission.js:
+				// removing phone Calc's OPT-IN read posture is NOT sufficient to
+				// flatten these. That change only skips the first-open pencil
+				// gate; a genuinely read-only session still exists -- server
+				// permission 'view'/'readonly', a locked read-only user, or
+				// _shouldStartReadOnly() on a degradable format. Flattening is
+				// only safe once the mobile path has real read-mode gating of
+				// its own.
+				//
+				// Each carries an explicit name: the XCU labels ('AutoFilter',
+				// 'Conditional Formatting: More Rules', 'Manage Names...') are
+				// desktop wording.
+				// calc-create-a-filter-absent
+				{name: _('Create a filter'), uno: '.uno:DataFilterAutoFilter'},
+				{type: 'separator'},
+				// calc-conditional-formatting-hidden-by-bottom-bar-cut. ONE entry,
+				// not the desktop's three-level ConditionalFormatMenu tree: cut
+				// discipline per docs/mobile-redesign 00 §5.
+				{name: _('Conditional formatting'), uno: '.uno:ConditionalFormatDialog'},
+				// calc-named-ranges-absent. Manage Names both lists AND adds, so
+				// it replaces both desktop NamesMenu entries.
+				{name: _('Named ranges'), uno: '.uno:DefineName'},
+				{type: 'separator'},
 				{name: _UNO('.uno:GroupOutlineMenu', 'spreadsheet'), id: 'groupoutlinemenu', type: 'menu', menu: [
 					{uno: '.uno:Group'},
 					{uno: '.uno:Ungroup'},
@@ -1369,61 +1969,25 @@ class Menubar extends window.L.Control {
 					{uno: '.uno:HideDetail'},
 					{uno: '.uno:ShowDetail'}]}
 			]},
-			{name: _UNO('.uno:RunMacro'), id: 'runmacro', uno: '.uno:RunMacro'},
-			{name: _('Latest Updates'), id: 'latestupdates', type: 'action', iosapp: false},
-			{name: _('Send Feedback'), id: 'feedback', type: 'action', mobileapp: false},
 			{name: _('About'), id: 'about', type: 'action'},
 		],
 
 		mobileInsertMenu : {
+			// Writer's + sheet mirrors the Google Docs phone insert list
+			// (docs/mobile-redesign/01 §4): Link, Comment, Image, Table, Page
+			// break, Page number, Footnote — everything else (charts, shapes,
+			// fields, header/footer, fontwork, formatting marks, content
+			// controls) is cut per the 01 §9 feature-cut discipline.
 			'text' : {
 				name: _UNO('.uno:InsertMenu', 'text'), id: 'insert', type: 'menu', menu: [
+					{name: _UNO('.uno:HyperlinkDialog'), unoid: '.uno:HyperlinkDialog', id: 'inserthyperlink', type: 'action'},
+					{name: _UNO('.uno:InsertAnnotation', 'text'), unoid: '.uno:InsertAnnotation', id: 'insertcomment', type: 'action'},
 					{name: _('Local Image...'), id: 'insertgraphic', type: 'action'},
 					{name: _UNO('.uno:InsertGraphic', 'text'), unoid: '.uno:InsertGraphic', id: 'insertgraphicremote', type: 'action'},
-					{uno: '.uno:InsertObjectChart'},
-					{name: _UNO('.uno:InsertAnnotation', 'text'), unoid: '.uno:InsertAnnotation', id: 'insertcomment', type: 'action'},
 					{name: _UNO('.uno:TableMenu'), unoid: '.uno:TableMenu', id: 'inserttable', type: 'action'},
-					{type: 'separator'},
-					{name: _UNO('.uno:InsertField', 'text'), id: 'insertfield', type: 'menu', menu: [
-						{uno: '.uno:InsertPageNumberField'},
-						{uno: '.uno:InsertPageCountField'},
-						{uno: '.uno:InsertDateField'},
-						{uno: '.uno:InsertTimeField'},
-						{uno: '.uno:InsertTitleField'},
-						{uno: '.uno:InsertAuthorField'},
-						{uno: '.uno:InsertTopicField'}
-					]},
-					{name: _UNO('.uno:InsertHeaderFooterMenu', 'text'), id: 'insertheaderfooter', type: 'menu', menu: [
-						{name: _UNO('.uno:InsertPageHeader', 'text'), id: 'insertpageheader', type: 'menu', menu: [
-							{name: _('All'), disabled: true, id: 'insertheader', tag: '_ALL_', uno: '.uno:InsertPageHeader?On:bool=true'}]},
-						{name: _UNO('.uno:InsertPageFooter', 'text'), id: 'insertpagefooter', type: 'menu', menu: [
-							{name: _('All'), disabled: true, id: 'insertfooter', tag: '_ALL_', uno: '.uno:InsertPageFooter?On:bool=true'}]}
-					]},
-					{uno: '.uno:InsertFootnote'},
-					{uno: '.uno:InsertEndnote'},
-					{type: 'separator'},
 					{uno: '.uno:InsertPagebreak'},
-					{name: _UNO('.uno:InsertColumnBreak', 'spreadsheet'), uno: '.uno:InsertColumnBreak'},
-					{type: 'separator'},
-					{name: _UNO('.uno:HyperlinkDialog'), unoid: '.uno:HyperlinkDialog', id: 'inserthyperlink', type: 'action'},
-					{name: _UNO('.uno:ShapesMenu'), unoid: '.uno:ShapesMenu', id: 'insertshape', type: 'action'},
-					{name: _UNO('.uno:FontworkGalleryFloater'), uno: '.uno:FontworkGalleryFloater', id: 'fontworkgalleryfloater'},
-					{name: _UNO('.uno:FormattingMarkMenu', 'text'), id: 'formattingmark', type: 'menu', menu: [
-						{uno: '.uno:InsertNonBreakingSpace'},
-						{uno: '.uno:InsertHardHyphen'},
-						{uno: '.uno:InsertSoftHyphen'},
-						{uno: '.uno:InsertZWSP'},
-						{uno: '.uno:InsertWJ'},
-						{uno: '.uno:InsertLRM'},
-						{uno: '.uno:InsertRLM'}]},
-					{name: _UNO('.uno:FormatFormMenu', 'text'), id: 'formatformmenu', type: 'menu', menu: [
-						{name: _('Insert Rich Text'), uno: '.uno:InsertContentControl'},
-						{name: _('Insert Checkbox'), uno: '.uno:InsertCheckboxContentControl'},
-						{name: _('Insert Dropdown'), uno: '.uno:InsertDropdownContentControl'},
-						{name: _('Insert Picture'), uno: '.uno:InsertPictureContentControl'},
-						{name: _('Insert Date'), uno: '.uno:InsertDateContentControl'},
-						{name: _('Properties'), uno: '.uno:ContentControlProperties'},
-					]},
+					{uno: '.uno:InsertPageNumberField'},
+					{uno: '.uno:InsertFootnote'},
 				]
 			},
 			'spreadsheet' : {
@@ -1440,26 +2004,392 @@ class Menubar extends window.L.Control {
 					// other fields need EditEngine context & can't be disabled in the menu.
 				]
 			},
+			// Impress's + sheet mirrors the Google Slides phone insert list.
+			// (03-impress.md does not specify this surface; the authority
+			// below is Google's own Help Center.) Google: "Tap Add (+) and you get
+			// precisely four object types: Text, Image, Shape, Line. That is
+			// the entire insert surface on both Android and iOS phone.
+			// Google deliberately did not port the desktop insert menu." So
+			// the order below is theirs, and the cuts are theirs too: "The
+			// insert menu stops at Text/Image/Shape/Line. Tables, video,
+			// audio, charts, diagrams and WordArt cannot be inserted on
+			// phone — existing ones render and can be moved/resized, but not
+			// created or structurally edited."
+			//   - Chart (.uno:InsertObjectChart) — named computer-only.
+			//   - Table (.uno:TableMenu) — named computer-only.
+			//   - Fontwork — WordArt by another name, named computer-only.
+			//   - the seven-entry Insert Field submenu — its headline entry
+			//     is the slide number, and Google files that separately as
+			//     unavailable on phone: "Adding slide numbers is unavailable
+			//     on Android; the Help Center routes you to
+			//     slides.google.com on a computer."
+			// 🔴 COMMENT AND HYPERLINK ARE NOW CUT, and the note that used to
+			// sit here defending them was wrong in a specific, checkable way.
+			// It read: "Comment and Hyperlink stay: neither appears anywhere on
+			// Google's not-shipped list, and the Writer entry above — the
+			// curation precedent this follows — keeps both." Both halves fail:
+			//   - "Not on the not-shipped list" is the wrong test. Google's
+			//     clause here is an AFFIRMATIVE enumeration, not a subtraction:
+			//     "precisely four object types: Text, Image, Shape, Line. That
+			//     is the entire insert surface on both Android and iOS phone."
+			//     A row does not need to be named as cut to be outside four.
+			//   - The Writer precedent does not transfer, it CONTRADICTS. It is
+			//     Docs-backed: google-docs.json "Insert (+) menu contents in
+			//     Docs" — "a flat list: Comment, Link, Image, Table, Page break,
+			//     Page number, Footnote, Horizontal line, and Special
+			//     characters/emoji." Google put Comment and Link in the DOCS +
+			//     sheet and kept them out of the SLIDES one. Copying the Writer
+			//     list into Impress copied the one app-specific decision Google
+			//     made differently on purpose.
+			// So the six rows here were four of Google's plus two carried over
+			// from a sibling app, and this is the one menu Google explicitly
+			// refused to port wholesale.
+			//
+			// Neither cut strands a capability the same way:
+			//   COMMENT was a THIRD route, and the two Google names are both
+			//     already live in this tree. google-slides.json "Add a comment":
+			//     "tap a slide in read mode and choose 'Add comment' … or select
+			//     text/an object in edit mode and use More > Add comment." Route
+			//     one is the read-posture bar (Control.MobileSelectionBar 'slide'
+			//     mode, the 'slide-comment' button); route two is the edit-mode
+			//     element pill (Control.ImpressSelectionBar setPage, the two
+			//     `id: 'comment'` entries, text mode and shape mode). Both run
+			//     the single VulcanSlideComment.insert, whose own header calls
+			//     itself "the ONE 'Add comment' path on phone Impress" — which
+			//     this row was quietly making false. Note the phone top bar's
+			//     💬 was ALREADY curated out of the Impress edit posture
+			//     (Control.MobileTopBar onUpdatePermission, isVulcanImpress) on
+			//     the stated grounds that the pill is its second route; this row
+			//     is the same over-delivery one surface further in.
+			//   HYPERLINK is a real capability loss, stated as one rather than
+			//     dressed up. `inserthyperlink` has no other phone Impress
+			//     surface — after this it is desktop-menubar, desktop
+			//     top-toolbar and Ctrl+K only. It goes anyway because Google's
+			//     phone Slides has no link-insert flow to match: "hyperlink",
+			//     "insert link" and "add a link" return ZERO across the whole
+			//     Google phone corpus for Slides (google-slides.json, 76
+			//     features), while Docs' + sheet names "Link" explicitly. If
+			//     that ever turns out to be a hole in the corpus rather than in
+			//     Google, this comes back scored against the clause that
+			//     establishes it — not as a leftover from the desktop menu.
+			//
+			// The count this protects is load-bearing and has been broken by
+			// accident before: adding the Line submenu closed one row and moved
+			// this one further from Google, and nobody recounted. Anything added
+			// here from now on either replaces one of the four or hangs off one
+			// of them as a submenu, the way Line and Image below both do.
+			//
+			// LINE, the fourth of Google's four, is now here. The earlier note
+			// in this comment parked it on the grounds that a bare
+			// {uno: '.uno:Line'} "arms a draw TOOL rather than dropping an
+			// object", so it wanted a wet test. Two arguments were written
+			// here against that. 🔴 ONE OF THEM WAS FALSE and is withdrawn
+			// below; only the second stands, which is a weaker position than
+			// this comment used to claim. Read both before citing this entry:
+			//   1. 🔴 WITHDRAWN — THIS ARGUMENT WAS FALSE. It claimed the phone
+			//      Insert > Shapes sheet "ALREADY ships eleven commands of
+			//      exactly the same family, bare and unparameterised:
+			//      .uno:Connector, .uno:ConnectorLine, .uno:ConnectorCurve …
+			//      (Control.Toolbar.js:519-531)". Those eleven live in the
+			//      `insertconnectors` COLLECTION (Control.Toolbar.js:518), a
+			//      sibling of `insertshapes` and not part of it, and the phone
+			//      sheet never builds it: `_openInsertShapesWizard()` below
+			//      calls `createShapesPanel('insertshapes')` and nothing else,
+			//      so it renders only that collection's shape groups.
+			//      `insertconnectors` is reached from
+			//      `insertShapes('insertconnectors', …)`
+			//      (Control.Toolbar.js:774) via the `insertconnectorspopup`
+			//      HTML content (Widget.HTMLContent.ts:307), opened from the
+			//      DESKTOP top toolbar's `insertconnectors` menubutton
+			//      (Control.TopToolbar.js:238). No phone surface has ever
+			//      dispatched a bare connector command.
+			//      What survives of the point: the phone shapes grid does
+			//      dispatch every shape bare and unparameterised, with the same
+			//      `map.sendUnoCommand('.uno:' + uno)` (Control.Toolbar.js:626),
+			//      so bare dispatch is not a new IDIOM here. But `.uno:Line`
+			//      being a rubber-band tool rather than a drop is not covered
+			//      by that — a BasicShapes.* command drops an object. The
+			//      wet-test objection stands on argument 2 alone.
+			//   2. Google's line IS a drag. Their Insert > Line submenu
+			//      "offers line, arrow, elbow connector, curved connector, and
+			//      scribble. Connectors snap to object anchor points when
+			//      DRAGGED near them." An arm-then-drag flow is parity, not a
+			//      defect — which is the whole reason this is not left out.
+			// Reachability is verified statically, not assumed: `.uno:Line` is
+			// already dispatched from two live Impress surfaces in this fork
+			// (Control.TopToolbar.js:237 `insertline`, and
+			// Control.NotebookbarImpress.js:1616-1617), and the label call used
+			// here is the identical `_UNO('.uno:Line', 'presentation')` that
+			// the notebookbar entry makes, so unocommands.js carries the
+			// presentation-module string. The `{uno:}` shape routes through
+			// Control.JSDialogBuilder.js:1906-1928, which closes the insert
+			// wizard and then `sendUnoCommand`s — the same path the Writer
+			// entry's `{uno: '.uno:InsertCurrentDate'}` above already takes.
+			//
+			// 🔴 THE OPEN QUESTION IS NOW ANSWERED, AND NOT BY A WET TEST.
+			// Every earlier pass wrote that "whether the engine answers
+			// `.uno:Line` by dropping a default-sized line or by arming a
+			// rubber-band tool" could only be settled on a device, and filed
+			// it as the highest-risk parity claim on the branch. It is settled
+			// from source, because the ENGINE SOURCE IS IN THIS TREE
+			// (../../engine, the LibreOffice core the fork is built against;
+			// unocommands.js is generated out of it at build time by
+			// online/scripts/unocommands.py, which is how we know it is the
+			// right tree and not a stray copy). The chain, each link read
+			// rather than assumed:
+			//   a. `.uno:Line` is SID_DRAW_LINE (svx/sdi/svx.sdi:5610,
+			//      `SfxBoolItem Line SID_DRAW_LINE`) and is in Impress's own
+			//      slot interface (sd/sdi/_drvwsh.sdi:1229).
+			//   b. DrawViewShell::FuPermanent handles it in the case block at
+			//      sd/source/ui/view/drviewse.cxx:408-461 — the same block that
+			//      carries SID_LINE_ARROW_END, SID_TOOL_CONNECTOR and the whole
+			//      SID_CONNECTOR_* family — and at :503 sets
+			//      `bCreateDirectly = comphelper::COKit::isActive()`.
+			//   c. 🔴 WE ARE THE COKIT. So `bCreateDirectly` is TRUE here and
+			//      false in desktop LibreOffice, and the guard at :667
+			//      (`if(!(HasCurrentFunction() && ((rReq.GetModifier() &
+			//      KEY_MOD1) || bCreateDirectly))) return;`) FALLS THROUGH
+			//      instead of returning. :670-706 then builds a default-sized
+			//      rectangle at the centre of the slide (:670-693; :684-687 replaces the
+			//      window's visible area with the page size, "aVisArea is
+			//      nonsensical in the COKit case"), calls
+			//      `GetCurrentFunction()->CreateDefaultObject(nSId, …)` and
+			//      `InsertObjectAtView`s the result (:707). :732 then dispatches
+			//      SID_OBJECT_SELECT, so the tool disarms itself.
+			//   d. The object that comes back is a real line:
+			//      FuConstructRectangle::CreateDefaultObject
+			//      (sd/source/ui/func/fuconrec.cxx:860) answers SID_DRAW_LINE
+			//      at :942-967 with a two-point path across the rectangle.
+			// So on THIS product, `.uno:Line` is a DROP, not an armed tool:
+			// tapping the row inserts a default-sized line at the centre of the
+			// slide, already selected, with no canvas gesture at all. Argument
+			// 2 above (Google's line is a drag) is therefore not load-bearing
+			// either — we are not matching their gesture, we are landing an
+			// object they would have landed after the drag, which is the
+			// better of the two outcomes on a phone.
+			// 🔴 AND THE ARM-A-TOOL FEAR WAS NOT IDLE — it just lands on a
+			// different surface. If `bCreateDirectly` were false the flow WOULD
+			// be unreachable by touch, because MouseControl.onMouseMove
+			// (src/canvas/sections/MouseControl.ts:396-414) turns every
+			// `touchmove` during a drag into a view pan and never posts
+			// buttondown/move to core, so no rubber-band on this canvas can
+			// ever be completed with a finger. Anyone who removes the COKit
+			// branch upstream removes every draw tool from the phone at once.
+			// What is STILL not verified, and is genuinely device-only: where
+			// the object lands relative to the visible viewport. It is centred
+			// on the PAGE (:684-687), not on what you are looking at, so on a
+			// zoomed-in phone canvas the new line can be off-screen. That is a
+			// scroll-to-selection question, not an insert question.
+			//
+			// 🔴 Reachability, decided rather than assumed. This structure
+			// has NO chrome gate, and "desktop menus are untouched" is only
+			// half the story: the desktop Insert menu (the 'presentation'
+			// entry in `menubar`, further up this file) is genuinely
+			// unmodified, but mobileInsertMenu is chosen by FORM FACTOR, not
+			// by chrome. Control.UIManager.ts:745-748 builds mobileTopBar on
+			// window.mode.isSmallScreenDevice() alone, so on a phone run with
+			// ?vulcanChrome=desktop the + button still dispatches
+			// insertion_mobile_wizard into this list, and there is no desktop
+			// menubar on a small screen to fall back to. In that one
+			// configuration Chart, Table, Fontwork and the seven Insert Field
+			// entries are unreachable.
+			// That is accepted, not overlooked: the landed Writer ('text')
+			// and Calc ('spreadsheet') entries directly above make exactly
+			// the same bargain, and gating this one doctype would make
+			// Impress behave differently from the two surfaces it is meant to
+			// match — the same asymmetry the format-sheet gate in
+			// docdispatcher.ts avoids. If a phone-with-desktop-chrome escape
+			// hatch is wanted, it belongs on all three doctypes at once, not
+			// bolted onto Impress here.
 			'presentation' : {
 				name: _UNO('.uno:InsertMenu', 'presentation'), id: 'insert', type: 'menu', menu: [
-					{name: _('Local Image...'), id: 'insertgraphic', type: 'action'},
-					{name: _UNO('.uno:InsertGraphic', 'presentation'), unoid: '.uno:InsertGraphic', id: 'insertgraphicremote', type: 'action'},
-					{uno: '.uno:InsertObjectChart'},
-					{name: _UNO('.uno:InsertAnnotation', 'presentation'), unoid: '.uno:InsertAnnotation', id: 'insertcomment', type: 'action'},
-					{name: _UNO('.uno:TableMenu'), unoid: '.uno:TableMenu', id: 'inserttable', type: 'action'},
-					{name: _UNO('.uno:HyperlinkDialog'), unoid: '.uno:HyperlinkDialog', id: 'inserthyperlink', type: 'action'},
-					{name: _UNO('.uno:ShapesMenu'), unoid: '.uno:ShapesMenu', id: 'insertshape', type: 'action'},
-					{name: _UNO('.uno:FontworkGalleryFloater'), uno: '.uno:FontworkGalleryFloater', id: 'fontworkgalleryfloater'},
 					{name: _UNO('.uno:Text', 'presentation'), unoid: '.uno:Text', id: 'inserttextbox', type: 'action'},
-					{name: _UNO('.uno:InsertField', 'text'), id: 'insertfield', type: 'menu', menu: [
-						{uno: '.uno:InsertDateFieldFix'},
-						{uno: '.uno:InsertDateFieldVar'},
-						{uno: '.uno:InsertTimeFieldFix'},
-						{uno: '.uno:InsertTimeFieldVar'},
-						{type: 'separator'},
-						{name: _UNO('.uno:InsertSlideField', 'presentation'), uno: '.uno:InsertPageField'},
-						{name: _UNO('.uno:InsertSlideTitleField', 'presentation'), uno: '.uno:InsertPageTitleField'},
-						{name: _UNO('.uno:InsertSlidesField', 'presentation'), uno: '.uno:InsertPagesField'},
+					// IMAGE IS A SUBMENU for the same reason LINE below is: Google's
+					// image row opens a second sheet rather than a picker.
+					// google-slides.json "Insert > Image sources": "Choosing Image
+					// prompts 'choose where to get your image from' — camera (take a
+					// picture now), device photos, and Google Drive/Photos. The image
+					// lands centered on the slide, already selected with handles
+					// showing." So the + list still opens on Text / Image / Shape /
+					// Line, and Image is one row until you tap it — the count above is
+					// untouched.
+					//
+					// TWO of Google's three sources are here. The third is deliberately
+					// absent; see the remote-image note below.
+					//
+					// The two are two INPUT ELEMENTS, not two modes of one, and that is
+					// the whole mechanism — see html/cool.html.m4. `capture` is an
+					// attribute on the input, not an argument to the click: with it
+					// present iOS Safari opens the camera directly instead of raising
+					// its Photo Library / Take Photo / Choose File action sheet, and
+					// Android Chrome skips its chooser the same way. Adding it to the
+					// existing #insertgraphic would therefore have DELETED the photo
+					// library for every caller of that shared element — Writer, Calc,
+					// Draw, the desktop top toolbar, and ContentControlSection's
+					// picture picker all click the same node. Hence #insertgraphiccamera
+					// alongside it, and `insertgraphiccamera` in _executeAction.
+					//
+					// ⚠ Honest about what this does and does not buy, because the
+					// camera was never strictly unreachable: on iOS Safari the OS action
+					// sheet behind today's single row already offers "Take Photo or
+					// Video". What was missing is that our UI never NAMED a camera
+					// source, and on Android the chooser that offers it is OEM-dependent
+					// rather than guaranteed. Tap counts to either destination are
+					// unchanged; the source is now named and the camera is reached the
+					// same way on both platforms. Nothing here is wet-tested — this is
+					// patched, pending the build.
+					{name: _UNO('.uno:InsertGraphic', 'presentation'), id: 'insertimagemenu', type: 'menu', menu: [
+						{name: _('Take photo'), id: 'insertgraphiccamera', type: 'action'},
+						{name: _('Choose photo'), id: 'insertgraphic', type: 'action'},
+					]},
+					// 🔴 THE REMOTE-IMAGE ROW STAYS CUT, and it must not come back as
+					// Google's third source without a HOST change first. It never
+					// rendered: _checkItemVisibility drops 'insertgraphicremote'
+					// whenever wopi.EnableInsertRemoteImage is false — which is always,
+					// because no WOPI route this product serves ever sends that key and
+					// Map.WOPI.js:35 defaults it to false.
+					//
+					// Sending the flag is a one-line host change and would be the WRONG
+					// one on its own. The flag is not a feature switch, it is the
+					// integration DECLARING that it implements a remote picker: the row
+					// fires `postMessage {msgId: 'UI_InsertGraphic'}` (_executeAction, and
+					// docdispatcher 'remotegraphic') and then waits for the host to
+					// answer 'Action_InsertGraphic' with a URL (Map.WOPI.js:947). Our
+					// host has the bridge — it already handles UI_Share — and handles
+					// UI_InsertGraphic NOWHERE: zero hits for UI_InsertGraphic and
+					// Action_InsertGraphic across apps/ and packages/. Flipping the flag
+					// would rebuild the exact phantom just removed, one layer deeper: a
+					// row that renders, is tappable, and does nothing at all. Not
+					// stateless either — 'remotegraphic' also joins the desktop
+					// InsertImageMenu (Map.WOPI.js:397-400), so the dead row would appear
+					// on desktop too.
+					//
+					// And what it would open is not Google's source anyway. Theirs is
+					// "Google Drive/Photos"; ours would have to be the host's file
+					// library, which is a picker somebody has to design and build in the
+					// host frame. That is a product decision on the THIRD-ranked source
+					// of a phone VIEWER, behind the two that now ship. Filed, not built.
+					//
+					// ⚠ Recorded while reading that gate, NOT fixed here because it is a
+					// host change with a real behaviour consequence: the host sends
+					// `DisableInsertImage` (files/[fileId]/route.ts:496) meaning to hide
+					// local image insert from viewers and commenters, but coolwsd only ever
+					// reads `DisableInsertLocalImage` (wsd/wopi/WopiStorage.cpp:242), so
+					// that flag is inert and the row renders for everyone. That is the
+					// INVERSE defect -- a row that renders when the host asked for it to be
+					// hidden -- and fixing it removes Insert > Image for commenters, which
+					// is a product decision, not a lint fix. The visibility gate now names
+					// all three ids (insertgraphic, insertgraphiccamera, insertimagemenu)
+					// so that correction hides the parent row with its children instead of
+					// leaving an Image row that opens an empty sheet.
+					//
+					// ⚠ Recorded while reading that gate, NOT fixed here because it is a
+					// host change with a real behaviour consequence: the host sends
+					// `DisableInsertImage` (files/[fileId]/route.ts:496) meaning to hide
+					// local image insert from viewers and commenters, but coolwsd only ever
+					// reads `DisableInsertLocalImage` (wsd/wopi/WopiStorage.cpp:242), so
+					// that flag is inert and the row renders for everyone. That is the
+					// INVERSE defect -- a row that renders when the host asked for it to be
+					// hidden -- and fixing it removes Insert > Image for commenters, which
+					// is a product decision, not a lint fix.
+					{name: _UNO('.uno:ShapesMenu'), unoid: '.uno:ShapesMenu', id: 'insertshape', type: 'action'},
+					// Google's order is Text, Image, Shape, Line — Line sits
+					// directly after Shape, and is now the LAST row: the two
+					// non-Google keeps that used to follow it (Comment,
+					// Hyperlink) are gone. See the count note in this entry's
+					// header comment for why, and for the two live routes that
+					// carry Add comment.
+					//
+					// LINE IS A SUBMENU, because Google's is
+					// (google-slides.json, "Insert > Line submenu", insert /
+					// niche): "Offers line, arrow, elbow connector, curved
+					// connector, and scribble. Connectors snap to object anchor
+					// points when dragged near them." The five rows below are
+					// those five, in that order. This does not change the count
+					// the row above cares about — the Insert list still opens on
+					// Text / Image / Shape / Line, and Line is one row until you
+					// tap it.
+					//
+					// Each command was resolved against the engine source in
+					// this tree rather than guessed, and each was checked for
+					// the SAME `bCreateDirectly` behaviour the long note above
+					// establishes for `.uno:Line` — i.e. that tapping the row
+					// DROPS an object rather than arming a gesture the phone
+					// canvas cannot finish:
+					//   arrow             .uno:LineArrowEnd
+					//                     = SID_LINE_ARROW_END, in the
+					//                     drviewse.cxx:408-461 block (:412), so
+					//                     same drop path; default object at
+					//                     fuconrec.cxx:945.
+					//   elbow connector   .uno:Connector
+					//                     = SID_TOOL_CONNECTOR (:433). It is the
+					//                     ELBOW one by omission, not by name:
+					//                     FuConstructRectangle::SetAttributes
+					//                     (fuconrec.cxx:556, branches at :566-597)
+					//                     gives OneLine to
+					//                     the CONNECTOR_LINE family, ThreeLines
+					//                     to CONNECTOR_LINES and Bezier to
+					//                     CONNECTOR_CURVE, and never mentions
+					//                     SID_TOOL_CONNECTOR — which therefore
+					//                     keeps SdrEdgeKindItem's default,
+					//                     SdrEdgeKind::OrthoLines
+					//                     (include/svx/sxekitm.hxx:34). Ortho =
+					//                     right-angled = Google's "elbow".
+					//                     🔴 Do NOT "fix" this to
+					//                     .uno:ConnectorLines because its label
+					//                     reads "Line Connector"; that one is
+					//                     ThreeLines, and .uno:ConnectorLine
+					//                     ("Straight Connector") is OneLine.
+					//                     The three names are nearly
+					//                     interchangeable in English and are not
+					//                     interchangeable in the engine.
+					//   curved connector  .uno:ConnectorCurve
+					//                     = SID_CONNECTOR_CURVE (:447), Bezier
+					//                     (fuconrec.cxx:588-597).
+					//   scribble          .uno:Freeline_Unfilled
+					//                     = SID_DRAW_FREELINE_NOFILL. This one is
+					//                     a DIFFERENT case block
+					//                     (drviewse.cxx:509-516) and a different
+					//                     function class, FuConstructBezierPolygon
+					//                     — but :520 sets the same
+					//                     `bCreateDirectly = COKit::isActive()`,
+					//                     and FuConstructBezierPolygon::
+					//                     CreateDefaultObject (fuconbez.cxx:408)
+					//                     answers SID_DRAW_FREELINE_NOFILL at
+					//                     :462-490 with a two-segment bezier. It
+					//                     had to be checked separately: unlike
+					//                     FuConstructRectangle::MouseButtonUp
+					//                     (fuconrec.cxx:322-338, "Drag was too
+					//                     small to create object, so insert
+					//                     default object at click pos"),
+					//                     FuConstructBezierPolygon::MouseButtonUp
+					//                     (fuconbez.cxx:192-228) has NO
+					//                     click-fallback, so on the mouse path
+					//                     scribble would be the one entry a tap
+					//                     could not complete. It is only safe
+					//                     because the COKit branch never reaches
+					//                     the mouse path.
+					//
+					// Labels are OURS (`_()`), not `_UNO()`, and that is
+					// deliberate on two counts. First, unocommands.js is
+					// GENERATED from the engine at build time and this lane
+					// cannot read it, so `_UNO('.uno:LineArrowEnd', …)` — which
+					// has no other call site in the fork — risks rendering the
+					// raw command name as a menu label, and a label that lies
+					// about what a row does is the one defect class the phone
+					// brief calls always-wrong regardless of posture. Second,
+					// the engine's own strings are desktop draughting names
+					// ("Line Ends with Arrow", "Curved Connector", "Freeform
+					// Line", from GenericCommands.xcu:2472/2341/5360) and the
+					// brief is to copy Slides, whose words these are. The
+					// parent row keeps `_UNO('.uno:Line', 'presentation')` so
+					// the entry point reads exactly as it does today.
+					{name: _UNO('.uno:Line', 'presentation'), id: 'insertlinemenu', type: 'menu', menu: [
+						{name: _UNO('.uno:Line', 'presentation'), uno: '.uno:Line'},
+						{name: _('Arrow'), uno: '.uno:LineArrowEnd'},
+						{name: _('Elbow connector'), uno: '.uno:Connector'},
+						{name: _('Curved connector'), uno: '.uno:ConnectorCurve'},
+						{name: _('Scribble'), uno: '.uno:Freeline_Unfilled'},
 					]},
 				]
 			},
@@ -1521,7 +2451,7 @@ class Menubar extends window.L.Control {
 			'downloadas-ods', 'downloadas-xls', 'downloadas-xlsx', 'downloadas-csv', 'closedocument', // file menu
 			() => !window.L.Browser.edge ? 'fullscreen' : undefined, 'zoomin', 'zoomout', 'zoomreset', 'fitwidthzoom', 'showruler', 'showstatusbar', 'showresolved', 'showannotations', 'toggledarktheme', // view menu
 			'insert-signatureline', // insert menu
-			'about', 'keyboard-shortcuts', 'latestupdates', 'feedback', 'serveraudit', 'online-help', 'report-an-issue', // help menu
+			'about', 'keyboard-shortcuts', 'serveraudit', 'online-help', // help menu
 			'insertcomment',
 			'find' // edit menu
 		],
@@ -1554,6 +2484,8 @@ class Menubar extends window.L.Control {
 	private _isFileODF: boolean = true;
 	private lastModIndicator: HTMLElement | null = null;
 	private _map: any;
+	// The inputs key of the last _onRefresh rebuild; null forces one.
+	private _lastRebuildInputsKey: string | null = null;
 
 	/**
 	 * Called when the menubar is added to the map.
@@ -1566,6 +2498,9 @@ class Menubar extends window.L.Control {
 		this._hiddenItems = [];
 		this._menubarCont = window.L.DomUtil.get('main-menu');
 		this._isFileODF = true;
+		// A re-added menubar starts from an empty container, so the rebuild
+		// guard's key must not carry over from a previous life.
+		this._lastRebuildInputsKey = null;
 		this._map = map;
 		// In case it contains garbage
 		if (this._menubarCont)
@@ -1799,6 +2734,26 @@ class Menubar extends window.L.Control {
 			this._onDocLayerInit();
 		}
 
+		// Rebuild only when the inputs the build reads have changed.
+		// 'updatepermission' fires in identical bursts (4-5 per load,
+		// measured), each rebuild constructs a NEW SmartMenus instance
+		// (jquery.smartmenus $.fn wrapper) and KILLS any open menu — the
+		// mid-session no-op rebuild is the armed path behind the desktop
+		// first-click self-close. The key is the inputs, never menu-open
+		// state: a real permission flip changes the key and still rebuilds
+		// (closing an open menu is correct there). Extension ids cover the
+		// loadExtensions refresh(); editComment is _createMenu's other
+		// readonly-branch read.
+		var inputsKey = [
+			this._map.getDocType(),
+			this._map.isReadOnlyMode(),
+			app.file.editComment,
+			Object.keys(this._map._extensions || {}).sort().join(','),
+		].join('|');
+		if (inputsKey === this._lastRebuildInputsKey)
+			return;
+		this._lastRebuildInputsKey = inputsKey;
+
 		// clear initial menu
 		if (this._menubarCont)
 			window.L.DomUtil.removeChildNodes(this._menubarCont);
@@ -1909,9 +2864,18 @@ class Menubar extends window.L.Control {
 	private _onDocLayerInit(): void {
 		this._onRefresh();
 
+		// Once per document load. Deliberately NOT in _onRefresh: that is the
+		// menubar's rebuild burst, which MenubarRefreshRebuildGuard keeps free
+		// of work precisely so a refresh cannot kill an open menu, and the find
+		// box sits in #document-titlebar, which smartmenus never rebuilds.
+		this._vulcanAddFindBox();
+		this._vulcanAddShareButton();
+		this._vulcanScrollableMenuRow();
+
 		// Usage
 		this._bindEventIfNotBound('#main-menu', 'select', 'smapi', {self: this}, this._onItemSelected);
 		this._bindEventIfNotBound('#main-menu', 'beforeshow', 'smapi', {self: this}, this._beforeShow);
+		this._bindEventIfNotBound('#main-menu', 'show', 'smapi', {self: this}, this._vulcanAnchorMenuPopup);
 		this._bindEventIfNotBound('#main-menu', 'click', 'smapi', {self: this}, this._onClicked);
 		this._bindEventIfNotBound('#main-menu', 'keydown', '', {self: this}, this._onKeyDown);
 
@@ -1959,7 +2923,26 @@ class Menubar extends window.L.Control {
 							const menuData = this._map.menubar.generateFullMenuStructure();
 							this._map.fire('mobilewizard', { data: menuData });
 							$('#toolbar-hamburger').removeClass('menuwizard-closed').addClass('menuwizard-opened');
-							$('#toolbar-mobile-back').css('visibility', 'hidden');
+							// Keep the upper-left exit VISIBLE while the kebab is
+							// open on the Vulcan phone chrome.
+							//
+							// Stock hides it here, which makes the kebab the one
+							// surface with no way out on the left: the wizard's own
+							// close is also hidden at its top level, so the only
+							// escape is the hamburger on the RIGHT. The phone design
+							// makes the left-hand exit load-bearing -- fixed position
+							// is the whole point, because it is what lets anything
+							// live a layer deep. An exit that moves to the other side
+							// of the screen when you go deeper is not a fixed exit.
+							//
+							// This is an INLINE style, so no stylesheet rule can undo
+							// it without !important; it has to be skipped at the
+							// source. (An earlier note claimed a rule in
+							// mobilewizard.css rescued this. It does not exist --
+							// that file is 1229 lines and contains no
+							// #toolbar-mobile-back rule at all.)
+							if (!this._isVulcanPhoneChrome())
+								$('#toolbar-mobile-back').css('visibility', 'hidden');
 							$('#formulabar').hide();
 						}
 					} else if (!window.mode.isSmallScreenDevice()) {
@@ -2001,8 +2984,9 @@ class Menubar extends window.L.Control {
        * @param e - The event data.
        * @param menu - The clicked menu element.
        */
-	private _onClicked(e: any, menu: any): void {
-		if ($(menu).hasClass('highlighted')) {
+	private _onClicked(e: any, menu: any): boolean | void {
+		const wasOpen = $(menu).hasClass('highlighted');
+		if (wasOpen) {
 			$('#main-menu').smartmenus('menuHideAll');
 		}
 
@@ -2013,6 +2997,14 @@ class Menubar extends window.L.Control {
 
 		if (menu?.parentElement?.id === 'menu-file' && window.mode.isCODesktop() && app.map.backstageView)
 			app.map.backstageView.toggle();
+
+		// VULCAN: a click on an open top-bar item closes it. The
+		// hide above is not enough on its own: smartmenus' itemClick goes on
+		// to re-open a first-level menu it finds hidden unless this
+		// click.smapi handler returns false. Nested items keep the upstream
+		// path (their select.smapi still hands focus back to the document).
+		if (wasOpen && $(menu).closest('ul').is('#main-menu'))
+			return false;
 	}
 
 	/**
@@ -2039,6 +3031,7 @@ class Menubar extends window.L.Control {
        * @param menu - The submenu element.
        */
 	private _beforeShow(e: any, menu: any): void {
+		this._vulcanCapMenuPopup(menu);
 		const items = this._getMenuItems(menu);
 		$(items).each((index, aItem) => {
 			const type = $(aItem).data('type');
@@ -2427,7 +3420,36 @@ class Menubar extends window.L.Control {
 			return;
 		}
 
-		var content = window.createShapesPanel('insertshapes');
+		// Phone Impress gets Google's shape CATEGORIES, not LibreOffice's
+		// gallery. google-slides.json "Insert > Shape submenu" (insert /
+		// common): "Opens a categorized grid — general shapes, arrows,
+		// callouts, and equation symbols." Stock builds all six groups of the
+		// `insertshapes` collection — 113 shapes, most of them flowchart and
+		// banner work nobody does on a 390px screen — which is the plain
+		// "we render the desktop surface" shape of gap. The allowlist, the
+		// mapping onto Google's four, and the reason the fourth category
+		// cannot be delivered here are all in Control.Toolbar.js next to
+		// VULCAN_PHONE_SHAPE_GROUPS.
+		//
+		// Three-part gate, and each part earns its place:
+		//   - _isVulcanPhoneChrome() is BOTH halves. isSmallScreenDevice()
+		//     alone is not the gate: ?vulcanChrome=desktop puts the desktop
+		//     chrome back on a phone-sized screen and must get the desktop
+		//     gallery with it. (The early return above is deliberately left on
+		//     isSmallScreenDevice() alone — it decides dropdown-vs-wizard, a
+		//     question about which CONTROL can exist, not about chrome.)
+		//   - the doctype, because this wizard is shared. Draw on a phone
+		//     reaches the same code and keeps all six groups: it has no Slides
+		//     catalogue to copy, and flowchart and connector shapes are most of
+		//     what a Draw document is for.
+		// With the gate false this passes `undefined`, which is the parameter's
+		// omitted case and therefore HEAD's exact behaviour.
+		var phoneImpress = this._isVulcanPhoneChrome()
+			&& this._map.getDocType() === 'presentation';
+		var content = window.createShapesPanel(
+			'insertshapes',
+			phoneImpress ? window.VulcanPhoneShapeGroups : undefined,
+		);
 		var data = {
 			id: 'insertshape',
 			type: '',
@@ -2505,6 +3527,34 @@ class Menubar extends window.L.Control {
 			app.dispatcher.dispatch(id);
 		} else if (id === ('settings-dialog')) {
 			this._map.settings.showSettingsDialog();
+		} else if (id === 'documentoutline') {
+			// writer-no-document-outline. Only mobiletext carries this id, and
+			// generateFullMenuStructure -- its only reader -- is called from the
+			// small-screen branch alone (Control.Menubar.ts:2005) and keys the
+			// array off 'mobile' + docType, so Calc, Impress and every desktop
+			// and tablet menu are untouched by construction. The guard is
+			// nonetheless real, because _executeAction is a shared entry point:
+			// Control.NotebookbarBuilder.js:696 calls it on a bare {id} from the
+			// DESKTOP notebookbar, so id alone is not proof of form factor.
+			if (window.mode.isSmallScreenDevice() &&
+				this._map.getDocType() === 'text' &&
+				(window as any).VulcanDocumentOutline) {
+				(window as any).VulcanDocumentOutline.open(this._map);
+			}
+		} else if (id === 'browseview') {
+			// The phone View menu's reflow toggle. Goes through the controller
+			// rather than straight to sendUnoCommand because the ORDER matters
+			// and the zoom is half the fix: state the width, move the zoom,
+			// then flip the mode -- and restore the zoom exactly on the way
+			// back. See app/VulcanWriterReflow.ts.
+			//
+			// Guarded on the controller existing rather than on form factor:
+			// _executeAction is a shared entry point (Control.NotebookbarBuilder
+			// reaches it with a bare {id} from the DESKTOP notebookbar), and
+			// the controller itself is the thing that knows whether it manages
+			// zoom on this surface.
+			if (app.writerReflow)
+				app.writerReflow.toggle();
 		} else if (id === 'insertcomment') {
 			this._map.insertComment();
 		} else if (id === 'insert-signatureline') {
@@ -2532,6 +3582,13 @@ class Menubar extends window.L.Control {
 			app.map._docLayer.requestNewFiledBasedViewTiles();
 		} else if (id === 'insertgraphic') {
 			window.L.DomUtil.get('insertgraphic').click();
+		} else if (id === 'insertgraphiccamera') {
+			// The camera half of Google's image sheet. Same click-a-hidden-input
+			// mechanism as the row above, a DIFFERENT element: the camera one
+			// carries capture="environment" (html/cool.html.m4), which cannot be
+			// put on #insertgraphic without removing the photo library from every
+			// other caller of it.
+			window.L.DomUtil.get('insertgraphiccamera').click();
 		} else if (id === 'insertgraphicremote') {
 			this._map.fire('postMessage', {msgId: 'UI_InsertGraphic'});
 		} else if (id === 'insertmultimedia') {
@@ -2588,15 +3645,6 @@ class Menubar extends window.L.Control {
 			this._map.duplicatePage();
 		} else if (id === 'about') {
 			this._map.showLOAboutDialog();
-		} else if (id === 'latestupdates' && this._map.welcome) {
-			if (window.mode.isCODesktop()) this._map.welcome.showWelcomeSlideshow();
-			else this._map.welcome.showWelcomeDialog();
-		} else if (id === 'feedback' && this._map.feedback) {
-			this._map.feedback.showFeedbackDialog();
-		} else if (id === 'report-an-issue') {
-			window.open('https://github.com/CollaboraOnline/online/issues', '_blank', 'noopener');
-		} else if (id === 'forum') {
-			window.open('https://forum.collaboraonline.com', '_blank', 'noopener');
 		} else if (id === 'inserthyperlink') {
 			app.dispatcher.dispatch('hyperlinkdialog');
 		} else if (id === 'keyboard-shortcuts' || id === 'online-help') {
@@ -2621,6 +3669,11 @@ class Menubar extends window.L.Control {
 			this._map.sendUnoCommand('.uno:LOKSidebarWriterPage');
 			this._map.fire('showwizardsidebar');
 			window.pageMobileWizard = true;
+		} else if (id === 'changetheme') {
+			// Reusing the core deck can return its full snapshot immediately, so
+			// arm the phone sidebar before asking for that snapshot.
+			this._map.fire('showwizardsidebar');
+			this._map.sendUnoCommand('.uno:KitSidebarMasterSlides');
 		} else if (id === 'showslide') {
 			app.dispatcher.dispatch('showslide');
 		} else if (id === 'hideslide') {
@@ -2740,6 +3793,247 @@ class Menubar extends window.L.Control {
 		}
 	}
 
+	/*
+	 * VULCAN (desktop chrome): FIND IN DOCUMENT, where Word puts it.
+	 *
+	 * Word's search box lives in the TITLE BAR, beside the document name and
+	 * above the ribbon — not on the page. This is a sibling in nav.main-nav
+	 * before the user cluster, which is that slot.
+	 *
+	 * IT IS A FIELD, NOT A BUTTON. The first version was a pill reading
+	 * "Search" that opened the panel and handed off focus, which put a boxed
+	 * control in a row of unboxed menu items and made you cross the screen to
+	 * type. You type here instead: the word sits inside the box as a
+	 * placeholder, Enter is the submit, and the query arrives in the panel
+	 * already run. No magnifier button: the kit's search fields carry no
+	 * trailing glyph, and the panel has its own close button.
+	 *
+	 * No search state lives here — see NavigatorPanel.chromeQuery*.
+	 */
+	private _vulcanAddFindBox(): void {
+		if (!document.documentElement.classList.contains('vulcan-desktop-chrome'))
+			return;
+		// Writer only: the box proxies the Writer navigator's search field.
+		// On a deck or a sheet Enter ran nothing and the magnifier's toggle
+		// closed the Slides strip, so those documents get no box at all.
+		if (this._map.getDocType() !== 'text') return;
+		// A SIBLING of the title, not a child of it: #document-titlebar is a
+		// column (name over loading bar) so a child stacks under the name, and
+		// .document-title's input spans the row so a child lands on top of it.
+		const nav = document.querySelector('nav.main-nav') as HTMLElement | null;
+		const userList = document.getElementById('userListHeader');
+		if (!nav || document.getElementById('vulcan-find-box')) return;
+
+		const box = window.L.DomUtil.create('div', 'vulcan-find-box');
+		box.id = 'vulcan-find-box';
+		if (userList) nav.insertBefore(box, userList);
+		else nav.appendChild(box);
+
+		const input = window.L.DomUtil.create(
+			'input',
+			'vulcan-find-input',
+			box,
+		) as HTMLInputElement;
+		input.id = 'vulcan-find-input';
+		input.type = 'text';
+		input.autocomplete = 'off';
+		input.spellcheck = false;
+		input.placeholder = _('Search');
+		input.setAttribute('aria-label', _('Find in document'));
+
+		// The box is the panel's own search field by proxy -- see the two
+		// NavigatorPanel.chromeQuery* entry points for the rules. Typing
+		// mirrors into the panel and searches live while it is open; Enter
+		// submits and never closes.
+		const panel = () => {
+			const n = this._map && (this._map as any).navigator;
+			return n && typeof n.chromeQuerySubmit === 'function' ? n : null;
+		};
+
+		input.addEventListener('input', () => panel()?.chromeQueryTyped(input.value));
+		input.addEventListener('keydown', (e: KeyboardEvent) => {
+			if (e.key === 'Enter') { e.preventDefault(); panel()?.chromeQuerySubmit(input.value); }
+			// Esc gives the document back without leaving a stale query behind.
+			if (e.key === 'Escape') { input.value = ''; panel()?.chromeQueryTyped(''); this._map.focus(); }
+		});
+	}
+
+	/*
+	 * VULCAN (desktop chrome): SHARE, upper right of the menu row.
+	 *
+	 * Owner decision 2026-09-02, reversing the 2026-08-24 removal: the fork's
+	 * desktop top chrome carries ONE Share control, at the far right of the
+	 * menu row -- past the Search field, the save chip and the user cluster,
+	 * where the kit puts a header's actions. It is a LAUNCHER, not a share
+	 * surface: the click dispatches 'shareas', the same action the File >
+	 * Share... menu item fires, and docdispatcher posts the UI_Share message
+	 * to the host, which opens its own ShareDialog. No sharing UI lives in
+	 * the fork.
+	 *
+	 * A kit icon button (32x32, radius 8) with a masked monochrome glyph --
+	 * a <span> under CSS mask, not an <img>, so the mark takes the row's
+	 * colour and the mocha rig (jsdom, no image loading) can build it.
+	 * Styled in css/vulcan-kit-share.css. Appended as the nav's LAST child
+	 * on purpose: #userListHeader, #viewMode (save chip / Edit) and the
+	 * close-button wrapper are all ahead of it in html/cool.html.m4, so
+	 * appendChild is what lands it at the right edge. Once per document
+	 * load, from _onDocLayerInit beside the find box; the id guard keeps a
+	 * second init from doubling it.
+	 *
+	 * Plain JS in the body (no TS casts): the mocha suite slices this method
+	 * out of the source and runs it in a vm against a jsdom, the same way
+	 * MenubarRefreshRebuildGuard exercises _onRefresh.
+	 */
+	private _vulcanAddShareButton(): void {
+		if (!document.documentElement.classList.contains('vulcan-desktop-chrome'))
+			return;
+		// Same gate as the File ▸ Share menu item: no launcher when the host
+		// disables sharing (wopi arrives before the status that fires this).
+		if (!this._map['wopi'] || !this._map['wopi'].EnableShare) return;
+		const nav = document.querySelector('nav.main-nav');
+		if (!nav || document.getElementById('vulcan-topchrome-share')) return;
+
+		const button = window.L.DomUtil.create('button', 'vulcan-topchrome-share');
+		button.id = 'vulcan-topchrome-share';
+		button.type = 'button';
+		button.setAttribute('aria-label', _('Share'));
+		button.setAttribute('data-cooltip', _('Share'));
+
+		const glyph = window.L.DomUtil.create('span', 'vulcan-topchrome-share-glyph', button);
+		glyph.setAttribute('aria-hidden', 'true');
+
+		// Same path as the File > Share... menu item (_executeAction below):
+		// the dispatcher's 'shareas' action -> map.openShare() -> UI_Share.
+		button.addEventListener('click', () => {
+			app.dispatcher.dispatch('shareas');
+		});
+
+		// data-cooltip only shows once the tooltip control is listening on
+		// the element; guarded because the vm rig has no L.control.
+		if (window.L.control && typeof window.L.control.attachTooltipEventListener === 'function')
+			window.L.control.attachTooltipEventListener(button, this._map);
+
+		nav.appendChild(button);
+	}
+
+	/*
+	 * VULCAN (desktop chrome): the menu row scrolls, so its popups go fixed.
+	 *
+	 * vulcan-theme.css §4b makes the menus' track in nav.main-nav an x-scroll
+	 * container, the same treatment #toolbar-up has. The smartmenus popups
+	 * are <ul>s nested inside that track and positioned absolute within their
+	 * <li>, which a scrolling track clips. A fixed-position element escapes
+	 * an ancestor's overflow clip only if its containing block lies outside
+	 * the scroll container; the bar carries no transform or filter (§4 moved
+	 * the glass blur onto a ::before layer for exactly this), so the containing block
+	 * is the viewport, and this handler -- on 'show', after smartmenus has
+	 * measured and positioned the popup for its own coordinate space --
+	 * re-anchors it in viewport coordinates from its anchor's rect.
+	 *
+	 * Hover, keyboard and hide are untouched: the popup stays where it was
+	 * in the DOM, so smartmenus' containment checks still hold.
+	 */
+	private _vulcanAnchorMenuPopup(e: any, menu: any): void {
+		if (!document.documentElement.classList.contains('vulcan-desktop-chrome'))
+			return;
+		// dataSM is smartmenus' own data accessor (not in the jQuery typings).
+		const $sub: any = $(menu);
+		const $a = $sub.dataSM('parent-a');
+		if (!$a || !$a.length) return;
+
+		const anchor = $a[0].getBoundingClientRect();
+		const level: number = $sub.dataSM('level') || 2;
+		const pos = VulcanMenuPopup.place(
+			level,
+			{ left: anchor.left, top: anchor.top, right: anchor.right, bottom: anchor.bottom },
+			$sub.outerWidth() || 0,
+			$sub.outerHeight() || 0,
+			window.innerWidth,
+			window.innerHeight,
+			document.documentElement.dir === 'rtl',
+		);
+		$sub.css({
+			position: 'fixed',
+			left: pos.left + 'px',
+			top: pos.top + 'px',
+			marginLeft: 0,
+			marginTop: 0,
+		});
+	}
+
+	/**
+	 * A popup taller than the room it gets scrolls inside itself (
+	 * Calc's Format and Data ran past a short editor, their last rows under
+	 * the sheet-tab bar or off-screen). Runs on beforeshow, before smartmenus
+	 * measures the popup: smartmenus then never arms its own scroll arrows,
+	 * which land behind the rows once _vulcanAnchorMenuPopup has made the
+	 * popup position:fixed. The submenus inside are fixed too, so the scroll
+	 * box cannot clip them -- but they do not follow their row either, so a
+	 * scroll re-anchors them, and closes them once their row has scrolled out
+	 * of sight. (Closing on every scroll is not enough: a click on a
+	 * half-hidden row scrolls it into view, and that scroll event lands a
+	 * frame after the click has opened the row's submenu.)
+	 */
+	private _vulcanCapMenuPopup(menu: any): void {
+		if (!document.documentElement.classList.contains('vulcan-desktop-chrome'))
+			return;
+		const $sub: any = $(menu);
+		const $a = $sub.dataSM('parent-a');
+		if (!$a || !$a.length) return;
+
+		const level: number = $sub.dataSM('level') || 2;
+		const anchor = $a[0].getBoundingClientRect();
+		menu.style.maxHeight =
+			VulcanMenuPopup.maxHeight(
+				level,
+				{ left: anchor.left, top: anchor.top, right: anchor.right, bottom: anchor.bottom },
+				window.innerHeight,
+			) + 'px';
+		menu.classList.add('vulcan-menu-capped');
+
+		if (menu._vulcanScrollHidesSubmenus) return;
+		menu._vulcanScrollHidesSubmenus = true;
+		menu.addEventListener('scroll', () => {
+			// Parents come first in document order, so each re-anchors
+			// against a row that has already moved.
+			const open = $(menu).find('ul:visible').toArray();
+			if (!open.length) return;
+			const box = menu.getBoundingClientRect();
+			const row = ($(open[0]) as any).dataSM('parent-a')[0].getBoundingClientRect();
+			const middle = (row.top + row.bottom) / 2;
+			if (middle < box.top || middle > box.bottom) {
+				// activatedItems[level - 1] is this popup's open row.
+				try { $('#main-menu').data('smartmenus').menuHideSubMenus(level - 1); } catch (err) { /* menubar rebuilt */ }
+				return;
+			}
+			for (const sub of open) this._vulcanAnchorMenuPopup(null, sub);
+		}, { passive: true });
+	}
+
+	// Everything before the presence strip (the menus and the find field)
+	// moves into a track of its own, which scrolls; the presence strip, the
+	// save status and Share stay in view (vulcan-theme.css §4b).
+	// A fixed popup does not follow its anchor while the row scrolls under
+	// it, so a scroll closes the menus -- the same thing smartmenus does on a
+	// window scroll.
+	private _vulcanScrollableMenuRow(): void {
+		if (!document.documentElement.classList.contains('vulcan-desktop-chrome'))
+			return;
+		const nav = document.querySelector('nav.main-nav');
+		if (!nav || document.getElementById('vulcan-menu-track')) return;
+		const presence = document.getElementById('userListHeader');
+		const fixedEnd = presence && presence.parentNode === nav ? presence : null;
+		const track = document.createElement('div');
+		track.id = 'vulcan-menu-track';
+		while (nav.firstChild && nav.firstChild !== fixedEnd) track.appendChild(nav.firstChild);
+		nav.insertBefore(track, fixedEnd);
+		const hideMenus = () => {
+			try { $('#main-menu').smartmenus('menuHideAll'); } catch (err) { /* not initialised yet */ }
+		};
+		nav.addEventListener('scroll', hideMenus, { passive: true });
+		track.addEventListener('scroll', hideMenus, { passive: true });
+	}
+
 	/**
        * Checks whether a given menu item (configuration object) should be visible.
        * @param menuItem - The menu item configuration.
@@ -2765,12 +4059,16 @@ class Menubar extends window.L.Control {
 			if (!found)
 				return false;
 		}
+		if (this._map.isReadOnlyMode() && menuItem.readOnly === false) {
+			return false;
+		}
 		if (this._map.isReadOnlyMode()) {
 			switch (menuItem.id) {
 			case 'last-mod':
 			case 'save':
 			case 'runmacro':
 			case 'pagesetup':
+			case 'changetheme': // applying a master page is an edit; see the row
 			case 'watermark':
 			case 'properties':
 			case 'formattingmarks':
@@ -2828,7 +4126,17 @@ class Menubar extends window.L.Control {
 		if (menuItem.id === 'renamedocument' && !(this._map['wopi']._supportsRename() && this._map['wopi'].UserCanRename))
 			return false;
 
-		if (menuItem.id === 'insertgraphic' && this._map['wopi'].DisableInsertLocalImage)
+		// All three are the SAME capability -- pick a local image off this
+		// device -- so they hide together or the phone Impress + sheet grows a
+		// new phantom class: an Image row that opens a submenu with nothing in
+		// it. `insertgraphiccamera` is the camera source and `insertimagemenu`
+		// is the parent row that holds it and `insertgraphic`; both arrived
+		// with Google's two-device-source image sheet (mobileInsertMenu
+		// .presentation above). This gate is inert on this deployment either
+		// way -- no WOPI route sends DisableInsertLocalImage -- but the host
+		// already TRIES to send the neighbouring DisableInsertImage, so the
+		// day that key is corrected the parent must go with its children.
+		if ((menuItem.id === 'insertgraphic' || menuItem.id === 'insertgraphiccamera' || menuItem.id === 'insertimagemenu') && this._map['wopi'].DisableInsertLocalImage)
 			return false;
 
 		if (menuItem.id === 'insertmultimedia' && this._map['wopi'].DisableInsertLocalImage)
@@ -2865,7 +4173,48 @@ class Menubar extends window.L.Control {
 				'presentation': 'impress'
 			};
 
-			if (extraFormats.includes(format) && !window.extraExportFormats.includes(`${format}_${appNames[docType]}`)) {
+			// 🔴 The key is `<app>_<format>`, NOT `<format>_<app>`. This line
+			// read `${format}_${appNames[docType]}` -- 'png_impress' -- and the
+			// token nobody ever emits is 'png_impress', so the test always
+			// failed and every one of the five extra presentation formats was
+			// hidden UNCONDITIONALLY, including on a deployment whose admin had
+			// switched them on. Not a phone bug and not fork-introduced: it
+			// arrived with the vendor snapshot (fe4f3eba30) and it is a dead
+			// control on the desktop menubar too.
+			//
+			// Three independent sources agree on the order against this line,
+			// which is why it is a typo and not a convention I am guessing at:
+			//   - the PRODUCER, wsd/FileServer.cpp:1600-1611, appends the
+			//     literals ' impress_swf', ' impress_bmp', ' impress_gif',
+			//     ' impress_png', ' impress_svg', ' impress_tiff' into
+			//     %EXTRA_EXPORT_FORMATS%, which reaches the client through
+			//     html/cool.html.m4:294 and js/global.js:535.
+			//   - the OTHER CONSUMER, Control.NotebookbarBuilder.js:491-511,
+			//     tests 'impress_svg' / 'impress_bmp' / 'impress_gif' /
+			//     'impress_png' / 'impress_tiff' and gets it right, which is why
+			//     the notebookbar shows these rows and the menubar never can.
+			//   - the CONFIG NAMES themselves, coolwsd.xml.in:368-373.
+			//
+			// ⚠ Blast radius, stated rather than assumed: all six config values
+			// default to false (coolwsd.xml.in:368-373) and nothing in this
+			// repository overrides them, so on our deployment
+			// window.extraExportFormats is the empty array and this fix changes
+			// NOTHING -- the rows stay hidden exactly as they are today. It only
+			// has an effect on a deployment that opted in, where showing the row
+			// is the opt-in's whole point and matches what the notebookbar
+			// already does.
+			//
+			// ⚠ This does NOT close google-slides.json's "Save As / Send a copy
+			// — export formats" row. Google's phone list is the deck as PPTX /
+			// PDF / TXT / ODP plus "the current slide alone as JPEG, PNG or
+			// SVG". Even with the key fixed, per-slide export needs a server
+			// config change rather than a diff; JPEG has no filter anywhere in
+			// this tree (the five are svg/bmp/gif/png/tiff); the fork's SVG row
+			// is the whole interactive deck, not one slide (coolwsd.xml.in:372);
+			// and no 'downloadas-txt' exists for presentations. So no row is
+			// added to the phone kebab here: it would render nothing on a
+			// default deployment, which is a phantom entry, not a feature.
+			if (extraFormats.includes(format) && !window.extraExportFormats.includes(`${appNames[docType]}_${format}`)) {
 				return false;
 			}
 
@@ -3152,6 +4501,17 @@ class Menubar extends window.L.Control {
 	}
 
 	/**
+       * True only inside the Vulcan phone chrome: a small-screen device AND the
+       * pre-paint html.vulcan-mobile-chrome marker (js/global.js stamps it iff
+       * !desktopChrome && mode.isSmallScreenDevice()). Desktop and tablet fail
+       * both halves -- isTablet() is *defined* as !isSmallScreenDevice().
+       */
+	private _isVulcanPhoneChrome(): boolean {
+		return !!(window as any).mode.isSmallScreenDevice()
+			&& document.documentElement.classList.contains('vulcan-mobile-chrome');
+	}
+
+	/**
        * Generates the full menu structure (for mobile use).
        * @returns The full menu structure object.
        */
@@ -3162,8 +4522,18 @@ class Menubar extends window.L.Control {
 			id : 'menubar',
 			children : [] as any[]
 		};
-		var docType = ('mobile' + this._map.getDocType()) as keyof typeof this.options; // FIXME There should be a better structure for 'mobile<something>' in the options
-		var items = this.options[docType];
+		// The options KEY is 'mobile' + docType, but _UNO()'s second argument
+		// is a MODULE name -- 'text' | 'spreadsheet' | 'presentation' |
+		// 'global', assigned by XCU filename prefix in scripts/unocommands.py.
+		// 'mobilespreadsheet' can never match one, so _UNO fell through
+		// entry[component] -> entry['global'] -> `return command`, and every
+		// module-only command in these arrays rendered as its RAW IDENTIFIER
+		// on phones ('SortAscending', 'Validation', 'TrackChanges', ...).
+		// generateInsertMenuStructure() below already passes the real docType;
+		// match it, and keep the prefixed key only for the options lookup.
+		var docType = this._map.getDocType();
+		var optionsKey = ('mobile' + docType) as keyof typeof this.options;
+		var items = this.options[optionsKey];
 		if (!Array.isArray(items))
 			return topMenu;
 
@@ -3249,11 +4619,35 @@ class Menubar extends window.L.Control {
 		} else if (item.uno === '.uno:TrackChanges' ||
 			item.uno === '.uno:ShowTrackedChanges' ||
 			item.uno === '.uno:ControlCodes' ||
+			// Without this the reflow row is a toggle that never shows its own
+			// state -- and "am I in page view or reflowed view" is the entire
+			// question the row exists to answer.
+			//
+			// 🔴 THIS LINE WAS `.uno:PrintLayout` AND IT COULD NEVER BE TRUE.
+			// Membership here is necessary, not sufficient: the value comes
+			// from `stateChangeHandler.getItemValue(...)`, which is only ever
+			// populated by a KIT_CALLBACK_STATE_CHANGED payload, and core
+			// emits one only for commands in `GetKitUnoCommandList()`
+			// (sfx2/source/control/unoctitm.cxx). PrintLayout is not in that
+			// list and never was, so this test read `undefined === 'true'` on
+			// every menu build. BrowseView is now in the list, with
+			// IsActivePayload, which emits exactly the `.uno:BrowseView=true`
+			// shape this compares against.
+			item.uno === '.uno:BrowseView' ||
 			item.uno === '.uno:SpellOnline' ||
 			item.uno === '.uno:ShowResolvedAnnotations' ||
+			// Google's 'Create a filter' flips to 'Remove filter' once the
+			// block has one. Core broadcasts an SfxBoolItem for SID_AUTO_FILTER
+			// saying which state we are in (sc/source/ui/view/cellsh2.cxx), so
+			// the entry can read as the toggle it actually is. This function is
+			// mobile-only -- its only callers are the two mobile generators --
+			// so this cannot reach desktop.
+			item.uno === '.uno:DataFilterAutoFilter' ||
 			item.uno === '.uno:FreezePanes') {
 			if (this._map['stateChangeHandler'].getItemValue(item.uno) === 'true') {
 				menuStructure['checked'] = true;
+				if (item.uno === '.uno:DataFilterAutoFilter')
+					menuStructure.text = _('Remove filter');
 			}
 		} else if (item.id === 'togglea11ystate') {
 			if (window.prefs.getBoolean('accessibilityState'))
@@ -3308,6 +4702,21 @@ class Menubar extends window.L.Control {
 	 */
 	private _onInitModificationIndicator(lastmodtime: any): void {
 		var lastModButton = window.L.DomUtil.get('menu-last-mod');
+		/*
+		 * VULCAN (desktop chrome): no "Last saved: 2m ago" in the menu row.
+		 *
+		 * It is a wide, ever-changing string sitting between the menus and the
+		 * right cluster, and it says less than the save chip two slots along
+		 * already says — the chip names the CURRENT state (Saved / Saving /
+		 * Edited / Not saved), which is what a writer needs, while the elapsed
+		 * time is a detail nobody acts on. Removing it gives the row back the
+		 * space, and the revision-history route (File > Version History) is
+		 * untouched.
+		 */
+		if (document.documentElement.classList.contains('vulcan-desktop-chrome')) {
+			if (lastModButton) window.L.DomUtil.setStyle(lastModButton, 'display', 'none');
+			return;
+		}
 		if (lastModButton !== null && lastModButton !== undefined
 			&& lastModButton.firstChild
 			&& lastModButton.firstChild.innerHTML !== null
@@ -3343,3 +4752,43 @@ class Menubar extends window.L.Control {
 		}
 	}
 }
+
+/*
+ * Only a real change of the window size closes the menus.
+ *
+ * smartmenus binds winResize to every window resize and, on a desktop
+ * browser, blurs the item that opened the menu and hides every menu. That
+ * is upstream behaviour, so menus never float off a reflowed bar. A
+ * synthetic resize at the same size must not close them. A status bar update
+ * sends none (JSDialog.RefreshScrollables dispatches 'refreshscrollables'),
+ * but the notebookbar's jQuery $(window).resize() does, and so may any other
+ * code. Widget.OverflowManager.onResize and
+ * VulcanCalcDesktopChrome ignore such an event by the same test.
+ *
+ * Each instance compares with the size it last saw: the size when it was
+ * built (a menubar rebuild builds a new one) and at each real resize. A
+ * disabled menubar (its overlay) and an orientation change keep upstream.
+ */
+function vulcanMenusCloseOnRealResizeOnly(SmartMenus: any): void {
+	const proto = SmartMenus && SmartMenus.prototype;
+	if (!proto || proto._vulcanRealResizeOnly) return;
+	proto._vulcanRealResizeOnly = true;
+	const init = proto.init;
+	const winResize = proto.winResize;
+	const windowSize = (): string => window.innerWidth + 'x' + window.innerHeight;
+	proto.init = function (...args: any[]) {
+		this._vulcanWindowSize = windowSize();
+		return init.apply(this, args);
+	};
+	proto.winResize = function (...args: any[]) {
+		const e = args[0];
+		if (e && e.type === 'resize' && this.handleEvents()
+			&& windowSize() === this._vulcanWindowSize)
+			return;
+		this._vulcanWindowSize = windowSize();
+		return winResize.apply(this, args);
+	};
+}
+
+if (typeof $ !== 'undefined')
+	vulcanMenusCloseOnRealResizeOnly(($ as any).SmartMenus);

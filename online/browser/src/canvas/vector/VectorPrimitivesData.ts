@@ -14,6 +14,11 @@ namespace cool {
 	export interface VectorPrimitivesData {
 		slideWidth: number; // twips
 		slideHeight: number; // twips
+		/// The page's left/top border, twips: object geometry here is
+		/// border-inset (logic) coordinates; the margin-inclusive frame
+		/// InsertShape and the document structure use adds these.
+		borderLeft?: number;
+		borderTop?: number;
 		masterPage: Primitive[];
 		objects: SlideObject[];
 	}

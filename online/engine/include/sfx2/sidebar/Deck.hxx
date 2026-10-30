@@ -66,7 +66,8 @@ public:
 
     sal_Int32 GetMinimalWidth() const { return mnMinimalWidth; }
 
-    static void KitSendSidebarFullUpdate();
+    SFX2_DLLPUBLIC static void KitSendSidebarFullUpdate();
+    SFX2_DLLPUBLIC static void KitSendSidebarFullUpdate(bool bForce);
 
 private:
     void RequestLayoutInternal();

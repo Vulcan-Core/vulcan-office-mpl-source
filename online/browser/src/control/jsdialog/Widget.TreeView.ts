@@ -728,7 +728,7 @@ class TreeViewControl {
 	 * Highlighted part of text corresponds to where core has marked a hit
 	 *
 	 * e.g. searching for 'line', core sends the following:
-	 * 		Collabora On[line],
+	 * 		head[line],
 	 * 		https://www.collaboraon[line].com,
 	 * 		des graphiques spark[line],
 	 *      etc.
@@ -2748,7 +2748,16 @@ class TreeViewControl {
 		this._hasState = TreeViewControl.hasState(data);
 		this._hasIcon = TreeViewControl.hasIcon(data);
 		this._isNavigator = this.isNavigator(data);
-		this._singleClickActivate = TreeViewControl.isSingleClickActivate(data);
+		// Presentation Navigator: one click acts. Core's dump leaves the
+		// flag off (desktop needs the double-click), but clicking a deck
+		// object in the panel and having nothing select reads as broken —
+		// activate routes to core's bookmark jump, which selects the
+		// object. Canvas→panel highlighting already worked; this makes it
+		// two-way.
+		this._singleClickActivate =
+			TreeViewControl.isSingleClickActivate(data) ||
+			(this._isNavigator &&
+				app.map?._docLayer?._docType === 'presentation');
 		this._containerRole =
 			data.role ||
 			(this._isRealTree
