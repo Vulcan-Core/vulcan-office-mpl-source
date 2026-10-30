@@ -5811,7 +5811,7 @@ window.L.CanvasTileLayer = window.L.Layer.extend({
 					`heightIncreased === false` branch, against the same caret.
 					So the narrowing covered one half of one caller: the panTo
 					honoured it and this call still slammed the slide sideways.
-					Measured on prod 8/24 (robert-08) at the read -> edit flip,
+					Measured on prod 8/24 (a test session) at the read -> edit flip,
 					where the keyboard provided the resize and the caret was the
 					read posture's leftover: 117 CSS px off-screen left. The flip
 					retires that caret now (ImpressTileLayer.

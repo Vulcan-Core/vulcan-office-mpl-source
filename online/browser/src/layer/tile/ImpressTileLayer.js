@@ -410,7 +410,7 @@ window.L.ImpressTileLayer = window.L.CanvasTileLayer.extend({
 		  view (_mobileChecksAfterResizeEvent -> _onUpdateCursor(true) ->
 		  scrollToPos; _nonDesktopChecksAfterResizeEvent -> caret reveal /
 		  panTo), dragging the view toward a caret that was never on-screen in
-		  the read posture. Measured on prod (robert-08 + posture_flip_ms,
+		  the read posture. Measured on prod (a test session + posture_flip_ms,
 		  8/24): the keyboard provided the resize and panTo panned BOTH axes to
 		  the phantom caret -- the slide landed cropped off-screen LEFT by the
 		  caret offset (117 CSS px in the rrweb trace). The same stale caret
